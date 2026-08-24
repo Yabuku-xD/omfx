@@ -16,12 +16,6 @@ pub const Input = struct {
     plan: bool = false,
 };
 
-pub const Decision = struct {
-    offer: bool,
-    score: i32,
-    reason: []const u8,
-};
-
 const allow_threshold: i32 = 4;
 
 const delegate_words = [_][]const u8{
@@ -50,10 +44,8 @@ fn countHits(lower: []const u8, words: []const []const u8) usize {
     return n;
 }
 
-pub fn decide(input: Input) Decision {
-    if (input.plan) {
-        return .{ .offer = false, .score = -99, .reason = "plan-mode" };
-    }
+pub fn allow(input: Input) bool {
+    if (input.plan) return false;
 
     var prompt_buf: [4096]u8 = undefined;
     const prompt = lowerInto(&prompt_buf, input.prompt);
@@ -92,37 +84,28 @@ pub fn decide(input: Input) Decision {
     if (input.board_summary.len != 0) score += 1;
     if (input.prompt.len > 280) score += 1;
 
-    if (score >= allow_threshold) {
-        return .{ .offer = true, .score = score, .reason = "threshold-met" };
-    }
-    return .{ .offer = false, .score = score, .reason = "below-threshold" };
+    return score >= allow_threshold;
 }
 
 test "easy asks do not advertise peers" {
-    const d = decide(.{ .prompt = "rename this variable to n" });
-    try std.testing.expect(!d.offer);
+    try std.testing.expect(!allow(.{ .prompt = "rename this variable to n" }));
 }
 
 test "explicit parallel coding work advertises peers" {
-    const d = decide(.{ .prompt = "split this in parallel: fix the parser, update tests, and investigate the failure" });
-    try std.testing.expect(d.offer);
-    try std.testing.expect(d.score >= allow_threshold);
+    try std.testing.expect(allow(.{ .prompt = "split this in parallel: fix the parser, update tests, and investigate the failure" }));
 }
 
 test "recent blockers can lift a hard task over the threshold" {
-    const d = decide(.{
+    try std.testing.expect(allow(.{
         .prompt = "try another approach to fix the failing build",
         .prior_assistant = "bash failed again after edit and retry",
         .board_summary = "FAIL build still broken\nPATH inspect parser\n",
-    });
-    try std.testing.expect(d.offer);
+    }));
 }
 
 test "plan mode suppresses automatic peers" {
-    const d = decide(.{
+    try std.testing.expect(!allow(.{
         .prompt = "compare two migration strategies",
         .plan = true,
-    });
-    try std.testing.expect(!d.offer);
-    try std.testing.expectEqualStrings("plan-mode", d.reason);
+    }));
 }

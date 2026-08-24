@@ -688,6 +688,13 @@ pub fn applySetting(ctx: *Ctx, pair: []const u8) !bool {
 
 const settings_usage = "usage: /settings <key>=<value>\n  sound thinking telemetry peer statusline sandbox mode composer editor ide\n  review cdp_port effort bash_timeout keep_sessions max_peer_depth\n";
 
+fn settingNote(allocator: std.mem.Allocator, key: []const u8, value: []const u8) ![]u8 {
+    if (std.mem.eql(u8, key, "peer")) {
+        return std.fmt.allocPrint(allocator, "Auto peers {s}.\n", .{value});
+    }
+    return std.fmt.allocPrint(allocator, "{s}={s}\n", .{ key, value });
+}
+
 fn doSettings(ctx: *Ctx, rest: []const u8) !void {
     if (rest.len > 0) {
         if (!(applySetting(ctx, rest) catch false)) {
@@ -695,10 +702,11 @@ fn doSettings(ctx: *Ctx, rest: []const u8) !void {
             return;
         }
         const eq = std.mem.indexOfScalar(u8, rest, '=').?;
-        try emit(ctx, try std.fmt.allocPrint(ctx.arena, "{s}={s}\n", .{
+        try emit(ctx, try settingNote(
+            ctx.arena,
             std.mem.trim(u8, rest[0..eq], " \t"),
             std.mem.trim(u8, rest[eq + 1 ..], " \t"),
-        }));
+        ));
         return;
     }
     const p = try settings.path(ctx.arena, ctx.home);
