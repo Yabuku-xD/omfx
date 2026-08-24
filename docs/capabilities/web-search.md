@@ -2,13 +2,20 @@
 
 Configure search backends with `/web`.
 
-Keys and enable/disable state live in `~/.omfx/auth.json`. Fallback order lives in `~/.omfx/settings.json`.
+Keys live in `~/.omfx/auth.json`. Fallback order lives in `~/.omfx/settings.json`.
 
-Twenty-three backends are available (API, OAuth-backed, endpoint, and free). Examples inside `/web`:
+Nineteen backends are available (API key, SearXNG endpoint, and free). Model-native search (Anthropic, xAI, ChatGPT, Gemini) is not listed here — those models already search when you chat with them. Prefer omfx `web_search` / `web_fetch` / `web_scrape` over any built-in vendor search.
 
-- Numbered pick of backends
-- `order exa,tavily,duckduckgo` — try in that order
-- `off google` — skip one
+Inside `/web`:
+
+- Pick a provider to try it first (and paste a key if it needs one)
+- Pick **Set search order**, then pick first, second, third… Empty line saves (replaces the previous list)
+  - Pick the same provider again to remove it
+  - Pick **Start over** to clear the picks and begin again
+  - Pick **Use built-in order** if the custom list went wrong (drops it; the default chain runs)
+- `off id` / `on id` — skip or include again
 - `test zig 0.16` — run the chain now
 
 The first working provider in the order wins; the rest are fallbacks.
+
+Related tools: `web_fetch` (short raw sample for HTML), `web_scrape` (title + main text). Search returns numbered title/URL/snippet hits, deduped, with tracking params stripped.

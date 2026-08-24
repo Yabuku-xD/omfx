@@ -123,7 +123,7 @@ pub const builtin = [_]Spec{
     .{ .name = "/sound", .help = "toggle launch and completion chimes", .args = "[on|off]" },
     .{ .name = "/thinking", .help = "toggle thinking text in the tui", .args = "[on|off]" },
     .{ .name = "/version", .help = "show installed version" },
-    .{ .name = "/web", .help = "web search keys and fallback order", .args = "[key=value]" },
+    .{ .name = "/web", .help = "web search backends and order", .args = "" },
     .{ .name = "/browser", .help = "install Chrome relay extension (existing tabs)" },
     .{ .name = "/reload", .help = "reload settings, auth, reads, relay" },
     .{ .name = "/background", .help = "list background commands", .args = "[id]" },

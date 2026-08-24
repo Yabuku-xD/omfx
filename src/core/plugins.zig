@@ -1,10 +1,14 @@
 const std = @import("std");
 const Io = std.Io;
 const settings = @import("settings.zig");
+const web = @import("../tools/web.zig");
 
-const log = std.log.scoped(.plugins);
+pub const Error = error{
+    InvalidMarketplace,
+    OutOfMemory,
+};
 
-pub fn githubRawUrl(allocator: std.mem.Allocator, owner_repo: []const u8) ![]u8 {
+pub fn githubRawUrl(allocator: std.mem.Allocator, owner_repo: []const u8) Error![]u8 {
     if (std.mem.indexOfScalar(u8, owner_repo, '/')) |_| {
         return std.fmt.allocPrint(allocator, "https://raw.githubusercontent.com/{s}/main/.claude-plugin/marketplace.json", .{owner_repo});
     }
@@ -14,7 +18,6 @@ pub fn githubRawUrl(allocator: std.mem.Allocator, owner_repo: []const u8) ![]u8 
 pub fn fetchManifest(allocator: std.mem.Allocator, io: Io, owner_repo: []const u8) ![]u8 {
     const url = try githubRawUrl(allocator, owner_repo);
     defer allocator.free(url);
-    const web = @import("../tools/web.zig");
     return web.fetch(allocator, io, url);
 }
 

@@ -166,6 +166,7 @@ pub fn run(
         },
         .delete => blk: {
             const path = args.str("path") orelse return error.MissingPath;
+            if (path.len == 0) return error.MissingPath;
             try pathing.assertInside(workspace, path);
             undo.recordDelete(allocator, dir, io, workspace, path);
             dir.deleteFile(io, path) catch try dir.deleteDir(io, path);
@@ -174,6 +175,7 @@ pub fn run(
         .rename => blk: {
             const from = args.str("from") orelse args.str("path") orelse return error.MissingPath;
             const to = args.str("to") orelse return error.MissingPath;
+            if (from.len == 0 or to.len == 0) return error.MissingPath;
             undo.recordRename(allocator, dir, io, workspace, from, to);
             try search.rename(dir, io, workspace, from, to);
             break :blk try std.fmt.allocPrint(allocator, "renamed {s} -> {s}", .{ from, to });
@@ -182,25 +184,30 @@ pub fn run(
         .copy => blk: {
             const from = args.str("from") orelse args.str("path") orelse return error.MissingPath;
             const to = args.str("to") orelse return error.MissingPath;
+            if (from.len == 0 or to.len == 0) return error.MissingPath;
             undo.recordWrite(allocator, dir, io, workspace, to);
             try fs.copy(dir, io, workspace, from, to);
             break :blk try std.fmt.allocPrint(allocator, "copied {s} -> {s}", .{ from, to });
         },
         .mkdir => blk: {
             const path = args.str("path") orelse return error.MissingPath;
+            if (path.len == 0) return error.MissingPath;
             try fs.mkdir(dir, io, workspace, path);
             break :blk try std.fmt.allocPrint(allocator, "mkdir {s}", .{path});
         },
         .file_info => blk: {
             const path = args.str("path") orelse return error.MissingPath;
+            if (path.len == 0) return error.MissingPath;
             break :blk try fs.info(dir, io, allocator, workspace, path);
         },
         .semantic_search => blk: {
             const q = args.str("query") orelse args.str("q") orelse return error.EmptyNeedle;
+            if (q.len == 0) return error.EmptyNeedle;
             break :blk try search.semanticSearch(dir, io, allocator, workspace, q);
         },
         .open_file => blk: {
             const path = args.str("path") orelse return error.MissingPath;
+            if (path.len == 0) return error.MissingPath;
             try pathing.assertInside(workspace, path);
             const abs = try pathing.joinWorkspace(allocator, workspace, path);
             defer allocator.free(abs);
@@ -215,10 +222,17 @@ pub fn run(
         },
         .web_fetch => blk: {
             const url = args.str("url") orelse return error.InvalidUrl;
+            if (url.len == 0) return error.InvalidUrl;
             break :blk try web.fetch(allocator, io, url);
+        },
+        .web_scrape => blk: {
+            const url = args.str("url") orelse return error.InvalidUrl;
+            if (url.len == 0) return error.InvalidUrl;
+            break :blk try web.scrape(allocator, io, url);
         },
         .web_search => blk: {
             const q = args.str("query") orelse args.str("q") orelse return error.EmptyQuery;
+            if (q.len == 0) return error.EmptyQuery;
             const web_search = @import("web_search.zig");
             break :blk try web_search.searchFromHome(allocator, io, home, q);
         },
@@ -227,8 +241,8 @@ pub fn run(
             defer cfg.deinit(allocator);
             break :blk try cdp.run(allocator, io, args_json, settings.cdpPort(cfg));
         },
-        .ask_user => error.UnknownTool,
-        .peer => error.UnknownTool,
+        .ask_user => allocator.dupe(u8, "ask_user: harness waits on the TTY; not available via dispatch\n"),
+        .peer => allocator.dupe(u8, "peer: harness spawns the teammate; not available via dispatch\n"),
         .board => blk: {
             const action = args.str("action") orelse "read";
             const line = args.str("line") orelse args.str("text") orelse "";
@@ -701,4 +715,197 @@ test "job polls and kills a running command" {
     defer a.free(killed);
     try std.testing.expect(std.mem.indexOf(u8, killed, "killed") != null);
     try std.testing.expectEqual(@as(usize, 0), jobs.count());
+}
+
+// Every dispatch-routed tool, model-shaped JSON, asserted on receipts / disk.
+// peer and ask_user stay harness-owned (see executeAdmitted); their dispatch
+// stubs must still return a clear string, never UnknownTool.
+test "e2e catalog coverage for fs search board memory mcp compact" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+
+    // --- write / mkdir / copy / rename / delete / file_info / list ---
+    {
+        const out = try run(tmp.dir, io, a, "ws", "mkdir",
+            \\{"path":"src"}
+        , "");
+        defer a.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "mkdir") != null);
+    }
+    {
+        const out = try run(tmp.dir, io, a, "ws", "write",
+            \\{"path":"src/lib.zig","contents":"pub fn MarkerSymbol() void {}\n"}
+        , "");
+        defer a.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "wrote") != null);
+    }
+    {
+        const out = try run(tmp.dir, io, a, "ws", "mkdir",
+            \\{"path":"src/nested"}
+        , "");
+        defer a.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "mkdir") != null);
+    }
+    {
+        const out = try run(tmp.dir, io, a, "ws", "copy",
+            \\{"from":"src/lib.zig","to":"src/nested/lib2.zig"}
+        , "");
+        defer a.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "copied") != null);
+        const got = try wrote(tmp, io, a, "src/nested/lib2.zig");
+        defer a.free(got);
+        try std.testing.expect(std.mem.indexOf(u8, got, "MarkerSymbol") != null);
+    }
+    {
+        const out = try run(tmp.dir, io, a, "ws", "rename",
+            \\{"from":"src/nested/lib2.zig","to":"src/nested/lib_renamed.zig"}
+        , "");
+        defer a.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "renamed") != null);
+    }
+    {
+        const out = try run(tmp.dir, io, a, "ws", "file_info",
+            \\{"path":"src/lib.zig"}
+        , "");
+        defer a.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "bytes") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "size=") != null);
+    }
+    {
+        const out = try run(tmp.dir, io, a, "ws", "list",
+            \\{"path":"src"}
+        , "");
+        defer a.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "lib.zig") != null);
+    }
+    {
+        const out = try run(tmp.dir, io, a, "ws", "grep",
+            \\{"pattern":"MarkerSymbol","path":"src"}
+        , "");
+        defer a.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "lib.zig") != null);
+    }
+    {
+        const out = try run(tmp.dir, io, a, "ws", "glob",
+            \\{"pattern":"**/*renamed.zig"}
+        , "");
+        defer a.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "lib_renamed.zig") != null);
+    }
+    {
+        const out = try run(tmp.dir, io, a, "ws", "semantic_search",
+            \\{"query":"MarkerSymbol"}
+        , "");
+        defer a.free(out);
+        try std.testing.expect(out.len > 0);
+    }
+    {
+        const out = try run(tmp.dir, io, a, "ws", "delete",
+            \\{"path":"src/nested/lib_renamed.zig"}
+        , "");
+        defer a.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "deleted") != null);
+    }
+
+    // --- empty path fail-closed ---
+    try std.testing.expectError(error.MissingPath, run(tmp.dir, io, a, "ws", "copy",
+        \\{"from":"","to":"x"}
+    , ""));
+    try std.testing.expectError(error.MissingPath, run(tmp.dir, io, a, "ws", "rename",
+        \\{"from":"src/lib.zig","to":""}
+    , ""));
+
+    // --- board FACT requires path= (docs) ---
+    {
+        const bad = try run(tmp.dir, io, a, "ws", "board",
+            \\{"action":"post","line":"FACT orphan claim without path"}
+        , "");
+        defer a.free(bad);
+        try std.testing.expect(std.mem.indexOf(u8, bad, "rejected") != null);
+        const good = try run(tmp.dir, io, a, "ws", "board",
+            \\{"action":"post","line":"FACT path=src/lib.zig MarkerSymbol exists"}
+        , "");
+        defer a.free(good);
+        try std.testing.expect(std.mem.indexOf(u8, good, "FACT") != null);
+        const read = try run(tmp.dir, io, a, "ws", "board",
+            \\{"action":"read"}
+        , "");
+        defer a.free(read);
+        try std.testing.expect(std.mem.indexOf(u8, read, "MarkerSymbol") != null);
+    }
+
+    // --- memory save/list against a temp home ---
+    {
+        var home_tmp = std.testing.tmpDir(.{});
+        defer home_tmp.cleanup();
+        // memory.path joins home/.omfx/memory.jsonl — home is the parent of .omfx.
+        const home_abs = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &home_tmp.sub_path });
+        defer a.free(home_abs);
+        const omfx_dir = try std.fs.path.join(a, &.{ home_abs, ".omfx" });
+        defer a.free(omfx_dir);
+        Io.Dir.cwd().createDirPath(io, omfx_dir) catch {};
+
+        const saved = try run(tmp.dir, io, a, "ws", "memory",
+            \\{"action":"save","fact":"e2e-catalog-marker=1"}
+        , home_abs);
+        defer a.free(saved);
+        const listed = try run(tmp.dir, io, a, "ws", "memory",
+            \\{"action":"list"}
+        , home_abs);
+        defer a.free(listed);
+        try std.testing.expect(std.mem.indexOf(u8, listed, "e2e-catalog-marker") != null);
+    }
+
+    // --- mcp list / compact / peer / ask_user stubs ---
+    {
+        const mcp_out = try run(tmp.dir, io, a, "ws", "mcp",
+            \\{"action":"list"}
+        , "");
+        defer a.free(mcp_out);
+        try std.testing.expect(mcp_out.len > 0);
+    }
+    {
+        const c = try run(tmp.dir, io, a, "ws", "compact", "{}", "");
+        defer a.free(c);
+        try std.testing.expect(std.mem.indexOf(u8, c, "ARC") != null);
+    }
+    {
+        const p = try run(tmp.dir, io, a, "ws", "peer",
+            \\{"goal":"noop"}
+        , "");
+        defer a.free(p);
+        try std.testing.expect(std.mem.indexOf(u8, p, "harness") != null);
+    }
+    {
+        const u = try run(tmp.dir, io, a, "ws", "ask_user",
+            \\{"question":"ok?"}
+        , "");
+        defer a.free(u);
+        try std.testing.expect(std.mem.indexOf(u8, u, "TTY") != null);
+    }
+
+    // --- open_file receipt ---
+    {
+        const o = try run(tmp.dir, io, a, "ws", "open_file",
+            \\{"path":"src/lib.zig"}
+        , "");
+        defer a.free(o);
+        try std.testing.expect(std.mem.indexOf(u8, o, "opened") != null);
+    }
+
+    // --- web_search with empty backends: honest unavailable ---
+    {
+        var home_tmp = std.testing.tmpDir(.{});
+        defer home_tmp.cleanup();
+        const home_abs = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &home_tmp.sub_path });
+        defer a.free(home_abs);
+        Io.Dir.cwd().createDirPath(io, home_abs) catch {};
+        const ws = try run(tmp.dir, io, a, "ws", "web_search",
+            \\{"query":"bread coding agent"}
+        , home_abs);
+        defer a.free(ws);
+        try std.testing.expect(ws.len > 0);
+    }
 }

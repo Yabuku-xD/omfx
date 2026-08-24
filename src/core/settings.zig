@@ -94,8 +94,12 @@ pub const File = struct {
         if (self.rules.len > 0) allocator.free(self.rules);
         if (self.workspace_dirs.len > 0) allocator.free(self.workspace_dirs);
         if (self.plugin_marketplaces.len > 0) allocator.free(self.plugin_marketplaces);
-        if (self.mcp.len > 0) allocator.free(self.mcp);
-        if (self.raw.len > 0) allocator.free(self.raw);
+        if (self.raw.len > 0) {
+            allocator.free(self.mcp);
+            allocator.free(self.raw);
+        } else if (self.mcp.len > 0) {
+            allocator.free(self.mcp);
+        }
         self.* = .{};
     }
 };
@@ -227,9 +231,9 @@ fn extractU32(json: []const u8, key: []const u8) u32 {
 }
 
 fn extractMcp(allocator: std.mem.Allocator, json: []const u8) ![]McpServer {
-    const key = std.mem.indexOf(u8, json, "\"mcp\"") orelse return &.{};
+    const key = std.mem.indexOf(u8, json, "\"mcp\"") orelse return try allocator.alloc(McpServer, 0);
     const rest = json[key..];
-    const lb = std.mem.indexOfScalar(u8, rest, '[') orelse return &.{};
+    const lb = std.mem.indexOfScalar(u8, rest, '[') orelse return try allocator.alloc(McpServer, 0);
     var depth: i32 = 0;
     var rb: usize = lb;
     for (rest[lb..], lb..) |c, idx| {
@@ -242,7 +246,8 @@ fn extractMcp(allocator: std.mem.Allocator, json: []const u8) ![]McpServer {
             }
         }
     }
-    if (rb <= lb) return &.{};
+    if (rb <= lb) return try allocator.alloc(McpServer, 0);
+
     const inner = rest[lb + 1 .. rb];
     var list: std.ArrayList(McpServer) = .empty;
     errdefer list.deinit(allocator);
@@ -711,6 +716,12 @@ test "parse mcp servers" {
     try std.testing.expectEqualStrings("fs", f.mcp[0].name);
     try std.testing.expectEqualStrings("npx", f.mcp[0].command);
     try std.testing.expectEqual(@as(usize, 3), f.mcp[0].argv_n);
+}
+
+test "parse missing mcp owns empty slice" {
+    var f = try parse(std.testing.allocator, "{}");
+    defer f.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), f.mcp.len);
 }
 
 test "encode round-trips order" {

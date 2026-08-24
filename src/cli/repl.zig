@@ -1884,12 +1884,12 @@ pub fn run(
             break :blk tui.Event.enter;
         } else tui.pollEvent(stdin, 64);
         const tag = std.meta.activeTag(ev);
-        if (tag != .skip and tag != .shift_tab) sess.noteClear();
+        if (tag != .skip and tag != .shift_tab and !state.pending.awaitingInput()) sess.noteClear();
         // Nothing was typed, so nothing else will repaint: the note has to ask
         // for the frame that takes it back down.
         if (tag == .skip) {
             const now = nowMs(io);
-            if (sess.noteExpired(now)) {
+            if (sess.noteExpired(now) and !state.pending.awaitingInput()) {
                 sess.noteClear();
                 sess.dirty = true;
             }
@@ -2371,6 +2371,7 @@ pub fn run(
                 sess.draft.clear();
                 var pctx = sess.cmdCtx();
                 _ = try cmds.applyPick(&pctx, picked);
+                sess.takeMenuNote(&state.menu, nowMs(io));
                 sess.palette_stash.clearRetainingCapacity();
                 if (state.pick.kind == .none) {
                     sess.paintTranscript();
@@ -2398,7 +2399,8 @@ pub fn run(
             sess.draft.clear();
             if (state.pending != .none) {
                 state.menu.cols = sess.layout.cols;
-                try menus.cancel(gpa, arena, stdout, sess.toTranscript(), &sess.shown, &state.pending, &state.menu);
+                // Empty line finishes a guided order (or cancels other prompts).
+                try menus.feed(gpa, arena, io, home, stdout, sess.toTranscript(), &sess.shown, &state.pending, &state.menu, "");
                 sess.takeMenuNote(&state.menu, nowMs(io));
                 sess.dirty = true;
                 continue;
@@ -2443,6 +2445,7 @@ pub fn run(
         if (prompt_text[0] == '/') {
             switch (try cmds.dispatch(&ctx, prompt_text)) {
                 .handled => {
+                    sess.takeMenuNote(&state.menu, nowMs(io));
                     if (state.pick.kind == .none) {
                         sess.paintTranscript();
                         try stdout.flush();

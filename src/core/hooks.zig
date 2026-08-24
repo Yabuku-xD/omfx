@@ -90,6 +90,7 @@ pub fn pre(contract: contract_mod.Contract, name: []const u8, args_json: []const
         .open_file,
         .semantic_search,
         .web_fetch,
+        .web_scrape,
         .web_search,
         .ask_user,
         .memory,

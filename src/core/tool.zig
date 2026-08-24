@@ -17,6 +17,7 @@ pub const Name = enum {
     open_file,
     semantic_search,
     web_fetch,
+    web_scrape,
     web_search,
     ask_user,
     memory,
@@ -43,13 +44,13 @@ pub const Name = enum {
     pub fn isExplore(self: Name) bool {
         return switch (self) {
             .read, .list, .grep, .glob, .semantic_search, .file_info, .board, .todo, .job => true,
-            .write, .edit, .bash, .copy, .mkdir, .delete, .rename, .open_file, .web_fetch, .web_search, .ask_user, .memory, .browser, .peer, .mcp, .patch, .compact => false,
+            .write, .edit, .bash, .copy, .mkdir, .delete, .rename, .open_file, .web_fetch, .web_scrape, .web_search, .ask_user, .memory, .browser, .peer, .mcp, .patch, .compact => false,
         };
     }
 
     pub fn isSensitive(self: Name) bool {
         return switch (self) {
-            .read, .glob, .grep, .web_fetch, .web_search, .ask_user, .list, .file_info, .semantic_search, .memory, .open_file, .browser, .board, .todo, .job => false,
+            .read, .glob, .grep, .web_fetch, .web_scrape, .web_search, .ask_user, .list, .file_info, .semantic_search, .memory, .open_file, .browser, .board, .todo, .job => false,
             .write, .edit, .bash, .copy, .mkdir, .delete, .rename, .peer, .mcp, .patch => true,
             .compact => false,
         };
@@ -57,7 +58,7 @@ pub const Name = enum {
 
     pub fn blockedInPlan(self: Name) bool {
         return switch (self) {
-            .read, .list, .grep, .glob, .semantic_search, .file_info, .board, .web_fetch, .web_search, .ask_user, .memory, .bash, .todo, .job => false,
+            .read, .list, .grep, .glob, .semantic_search, .file_info, .board, .web_fetch, .web_scrape, .web_search, .ask_user, .memory, .bash, .todo, .job => false,
             .write, .edit, .copy, .mkdir, .delete, .rename, .open_file, .browser, .peer, .mcp, .patch => true,
             .compact => false,
         };
@@ -66,21 +67,21 @@ pub const Name = enum {
     pub fn isRoutineWrite(self: Name) bool {
         return switch (self) {
             .write, .edit, .copy, .mkdir, .patch => true,
-            .read, .bash, .glob, .grep, .list, .delete, .rename, .file_info, .open_file, .semantic_search, .web_fetch, .web_search, .ask_user, .memory, .browser, .peer, .board, .mcp, .compact, .todo, .job => false,
+            .read, .bash, .glob, .grep, .list, .delete, .rename, .file_info, .open_file, .semantic_search, .web_fetch, .web_scrape, .web_search, .ask_user, .memory, .browser, .peer, .board, .mcp, .compact, .todo, .job => false,
         };
     }
 
     pub fn needsVerify(self: Name) bool {
         return switch (self) {
             .write, .edit, .patch => true,
-            .read, .bash, .glob, .grep, .list, .copy, .mkdir, .delete, .rename, .file_info, .open_file, .semantic_search, .web_fetch, .web_search, .ask_user, .memory, .browser, .peer, .board, .mcp, .compact, .todo, .job => false,
+            .read, .bash, .glob, .grep, .list, .copy, .mkdir, .delete, .rename, .file_info, .open_file, .semantic_search, .web_fetch, .web_scrape, .web_search, .ask_user, .memory, .browser, .peer, .board, .mcp, .compact, .todo, .job => false,
         };
     }
 
     pub fn needsAttach(self: Name) bool {
         return switch (self) {
             .read, .write, .edit, .patch => true,
-            .bash, .glob, .grep, .list, .copy, .mkdir, .delete, .rename, .file_info, .open_file, .semantic_search, .web_fetch, .web_search, .ask_user, .memory, .browser, .peer, .board, .mcp, .compact, .todo, .job => false,
+            .bash, .glob, .grep, .list, .copy, .mkdir, .delete, .rename, .file_info, .open_file, .semantic_search, .web_fetch, .web_scrape, .web_search, .ask_user, .memory, .browser, .peer, .board, .mcp, .compact, .todo, .job => false,
         };
     }
 

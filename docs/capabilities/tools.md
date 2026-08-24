@@ -4,15 +4,17 @@ Built-in tools the agent can call. Exact availability depends on permission mode
 
 ## Capabilities
 
-- Read, edit, patch, and search the workspace (`read`, `write`, `edit`, `patch`, `glob`, `grep`, `list`, …)
+- Read, edit, patch, and search the workspace (`read`, `write`, `edit`, `patch`, `glob`, `grep`, `list`, …). `write` and `copy` create missing parent directories.
 - Hybrid `semantic_search` — repo reference rank, symbol names, and tokens fused with reciprocal rank fusion (no embeddings, no on-disk index)
 - Shell commands (`bash`, `job`) with optional OS sandbox
-- Web fetch and web search (via `/web` backends)
+- Web fetch, scrape (readable HTML text), and search (via `/web` backends)
 - Diagnostics after writes — parse gate, then optional one-shot LSP
 - Memory, board, todo, and peer coordination
 - Browser relay (Chrome extension + local listener)
 - MCP tools when servers are configured
 - Compact older turns (ARC cites)
+
+`peer` and `ask_user` are admitted by the agent loop (TTY confirm / teammate spawn), not by the low-level dispatch table. Calling them outside a session returns a short harness notice.
 
 ## Parse gate
 

@@ -94,7 +94,9 @@ pub fn open(allocator: std.mem.Allocator, io: Io, path_env: []const u8, workspac
         log.warn("spawn {s}: {s}", .{ s.bin, @errorName(err) });
         return std.fmt.allocPrint(allocator, "could not launch {s}: {s}\n", .{ id, @errorName(err) });
     };
-    _ = child.wait(io) catch {};
+    _ = child.wait(io) catch |err| {
+        log.debug("wait {s}: {s}", .{ s.bin, @errorName(err) });
+    };
     return std.fmt.allocPrint(allocator, "opened {s} on {s}\n", .{ id, workspace });
 }
 

@@ -751,17 +751,49 @@ fn startLoginPick(ctx: *Ctx, rest: []const u8) !void {
         if (ctx.state.pending == .none) reloadFromDisk(ctx);
         return;
     }
+    const json = auth.readJson(ctx.gpa, ctx.io, ctx.home);
+    defer if (json.len > 0) ctx.gpa.free(json);
     ctx.state.pick.open(.login);
-    for (catalog.all) |spec| ctx.state.pick.pushFlipped(spec.id, spec.name);
+    for (catalog.all) |spec| {
+        const on = auth.extractKey(json, catalog.storeId(spec)) != null or auth.extractKey(json, spec.id) != null;
+        const label = if (on)
+            std.fmt.allocPrint(ctx.arena, "{s}  ✓ configured", .{spec.name}) catch spec.name
+        else
+            spec.name;
+        ctx.state.pick.pushFlipped(spec.id, label);
+    }
+}
+
+fn fillWebPick(ctx: *Ctx) void {
+    const json = auth.readJson(ctx.gpa, ctx.io, ctx.home);
+    defer if (json.len > 0) ctx.gpa.free(json);
+    var file = settings.load(ctx.gpa, ctx.io, ctx.home);
+    defer file.deinit(ctx.gpa);
+    ctx.state.pick.open(.web);
+    if (ctx.state.pending == .web_order) {
+        ctx.state.pick.pushFlipped(web_search.order_pick_id, "Start over");
+        ctx.state.pick.pushFlipped(web_search.default_pick_id, "Use built-in order");
+    } else {
+        ctx.state.pick.pushFlipped(web_search.order_pick_id, "Set search order");
+        ctx.state.pick.pushFlipped(web_search.default_pick_id, "Use built-in order");
+    }
+    for (web_search.all) |spec| {
+        const on = web_search.isConfigured(spec, json, file.web);
+        const label = if (on)
+            std.fmt.allocPrint(ctx.arena, "{s}  ✓ configured", .{spec.name}) catch spec.name
+        else
+            spec.name;
+        ctx.state.pick.pushFlipped(spec.id, label);
+    }
 }
 
 fn startWebPick(ctx: *Ctx, rest: []const u8) !void {
     if (rest.len > 0) {
         try menus.startWeb(ctx.gpa, ctx.arena, ctx.io, ctx.home, ctx.stdout, ctx.to_transcript, ctx.shown, &ctx.state.pending, &ctx.state.menu, rest);
+        if (ctx.state.pending == .web_order) fillWebPick(ctx);
         return;
     }
-    ctx.state.pick.open(.web);
-    for (web_search.all) |spec| ctx.state.pick.pushFlipped(spec.id, spec.name);
+    fillWebPick(ctx);
 }
 
 pub fn applyPick(ctx: *Ctx, name: []const u8) !Flow {
@@ -815,6 +847,7 @@ pub fn applyPick(ctx: *Ctx, name: []const u8) !Flow {
         .web => {
             ctx.state.pick.clear();
             try menus.startWeb(ctx.gpa, ctx.arena, ctx.io, ctx.home, ctx.stdout, ctx.to_transcript, ctx.shown, &ctx.state.pending, &ctx.state.menu, name);
+            if (ctx.state.pending == .web_order) fillWebPick(ctx);
         },
         .commands => {
             ctx.state.pick.clear();

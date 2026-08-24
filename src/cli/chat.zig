@@ -25,6 +25,7 @@ pub fn verbFor(name: []const u8) Verb {
         .grep, .glob, .semantic_search, .web_search => .{ .run = "Searching", .done = "Searched" },
         .list => .{ .run = "Listing", .done = "Listed" },
         .web_fetch => .{ .run = "Fetching", .done = "Fetched" },
+        .web_scrape => .{ .run = "Scraping", .done = "Scraped" },
         .mcp => .{ .run = "Calling", .done = "Called" },
         .memory => .{ .run = "Remembering", .done = "Remembered" },
         .copy, .mkdir, .delete, .rename => .{ .run = "Changing", .done = "Changed" },
@@ -205,7 +206,7 @@ pub fn groupable(name: []const u8) bool {
     const t = Tool.Name.fromSlice(name) orelse return false;
     return switch (t) {
         .read, .open_file, .file_info, .list, .glob, .grep, .semantic_search, .bash, .edit, .patch, .write, .copy, .mkdir, .rename, .delete, .memory, .job => true,
-        .web_fetch, .web_search, .ask_user, .browser, .peer, .board, .mcp, .compact, .todo => false,
+        .web_fetch, .web_scrape, .web_search, .ask_user, .browser, .peer, .board, .mcp, .compact, .todo => false,
     };
 }
 

@@ -805,7 +805,7 @@ pub const feature_sheet =
     \\  /peers /background /trace /feedback /quit
     \\tools (via the model, or !cmd for bash)
     \\  read write edit bash glob grep list copy mkdir delete rename
-    \\  file_info open_file semantic_search web_fetch web_search
+    \\  file_info open_file semantic_search web_fetch web_scrape web_search
     \\  ask_user memory browser peer board mcp patch compact
     \\keys  Enter:send  Shift+Tab:mode  Ctrl+:shortcuts  ctrl-q quit  ?:keys
     \\

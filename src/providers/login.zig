@@ -113,14 +113,17 @@ pub fn formatMenu(allocator: std.mem.Allocator, auth_json: []const u8) ![]u8 {
     try out.appendSlice(allocator, "login  pick a number or id, empty to cancel\n\n");
     for (catalog.all, 0..) |spec, i| {
         const on = auth.extractKey(auth_json, catalog.storeId(spec)) != null or auth.extractKey(auth_json, spec.id) != null;
-        const mark: []const u8 = if (on) "in" else "--";
+        const mark: []const u8 = if (on) "✓ configured" else "";
         const kind: []const u8 = switch (spec.login) {
             .api_key => "key",
             .device => "device",
             .pkce => "browser",
         };
         var line_buf: [160]u8 = undefined;
-        const line = std.fmt.bufPrint(&line_buf, "  {d: >2}  {s: <22} {s: <8} {s}\n", .{ i + 1, spec.id, kind, mark }) catch continue;
+        const line = if (mark.len > 0)
+            std.fmt.bufPrint(&line_buf, "  {d: >2}  {s: <22} {s: <8} {s}\n", .{ i + 1, spec.id, kind, mark }) catch continue
+        else
+            std.fmt.bufPrint(&line_buf, "  {d: >2}  {s: <22} {s}\n", .{ i + 1, spec.id, kind }) catch continue;
         try out.appendSlice(allocator, line);
     }
     try out.appendSlice(allocator, "\nthen paste a key, or complete the browser/device flow.\n");

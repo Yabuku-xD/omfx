@@ -18,6 +18,11 @@ pub const Pending = union(enum) {
     web_home,
     web_key: []const u8,
     web_endpoint,
+    /// Building a fallback order by picking providers one at a time.
+    web_order: struct {
+        ids: [settings.max_ids][]const u8 = undefined,
+        n: usize = 0,
+    },
 
     pub fn deinit(self: *Pending, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -25,6 +30,16 @@ pub const Pending = union(enum) {
             else => {},
         }
         self.* = .none;
+    }
+
+    /// A paste/URL prompt or order builder is still open: the footer note must
+    /// stay put until the user answers or cancels, rather than clearing on
+    /// the next key.
+    pub fn awaitingInput(self: Pending) bool {
+        return switch (self) {
+            .login_key, .login_pkce, .web_key, .web_endpoint, .web_order => true,
+            .none, .login_pick, .web_home => false,
+        };
     }
 };
 
@@ -148,9 +163,21 @@ pub fn startWeb(
     out: *Out,
     rest: []const u8,
 ) !void {
-    pending.deinit(gpa);
-    pending.* = .web_home;
     const s = Surface{ .stdout = stdout, .to_transcript = to_transcript, .shown = shown, .arena = arena, .out = out };
+    if (pending.* == .web_order) {
+        try feedWebOrder(gpa, io, home, s, pending, rest);
+        return;
+    }
+    pending.deinit(gpa);
+    if (std.mem.eql(u8, rest, web_search.order_pick_id) or std.mem.eql(u8, rest, "order")) {
+        try beginWebOrder(s, pending);
+        return;
+    }
+    if (std.mem.eql(u8, rest, web_search.default_pick_id) or std.mem.eql(u8, rest, "default")) {
+        try useBuiltInOrder(gpa, io, home, s, pending);
+        return;
+    }
+    pending.* = .web_home;
     if (rest.len == 0) {
         try emitWebMenu(gpa, io, home, s);
         return;
@@ -187,6 +214,10 @@ pub fn feed(
     const s = Surface{ .stdout = stdout, .to_transcript = to_transcript, .shown = shown, .arena = arena, .out = out };
     const trimmed = std.mem.trim(u8, line, " \t");
     if (trimmed.len == 0) {
+        if (pending.* == .web_order) {
+            try finishWebOrder(gpa, io, home, s, pending);
+            return;
+        }
         try cancel(gpa, arena, stdout, to_transcript, shown, pending, out);
         return;
     }
@@ -198,6 +229,7 @@ pub fn feed(
         .web_home => try feedWebHome(gpa, io, home, s, pending, trimmed),
         .web_key => |id| try feedWebKey(gpa, io, home, s, pending, id, trimmed),
         .web_endpoint => try feedWebEndpoint(gpa, io, home, s, pending, trimmed),
+        .web_order => try feedWebOrder(gpa, io, home, s, pending, trimmed),
     }
 }
 
@@ -210,21 +242,21 @@ fn feedLoginPick(
     line: []const u8,
 ) !void {
     const spec = login.pick(line) orelse {
-        try emit(s, "Unknown provider. Type a number or id. Empty line cancels.\n");
+        try settle(s, "Unknown provider. Type a number or id. Empty line cancels.");
         return;
     };
     switch (spec.login) {
         .api_key => {
             pending.* = .{ .login_key = spec.id };
-            const msg = try std.fmt.allocPrint(s.arena, "Paste the {s} API key. Empty line cancels.\n", .{spec.name});
-            try emit(s, msg);
+            const msg = try std.fmt.allocPrint(s.arena, "Paste the {s} API key. Empty line cancels.", .{spec.name});
+            try settle(s, msg);
         },
         .device => {
             pending.* = .none;
-            try emit(s, "Open the URL and enter the code (also printed on stderr).\n");
+            try settle(s, "Open the URL and enter the code (also printed on stderr).");
             login.runDevice(gpa, io, home, s.stdout, spec) catch |err| {
-                const msg = try std.fmt.allocPrint(s.arena, "Unable to log in ({s}). Try /login again.\n", .{@errorName(err)});
-                try emit(s, msg);
+                const msg = try std.fmt.allocPrint(s.arena, "Unable to log in ({s}). Try /login again.", .{@errorName(err)});
+                try settle(s, msg);
                 return;
             };
             rememberLogin(gpa, io, home, spec);
@@ -232,13 +264,13 @@ fn feedLoginPick(
         },
         .pkce => {
             const hold = login.beginPkce(gpa, io, spec) catch |err| {
-                const msg = try std.fmt.allocPrint(s.arena, "Unable to log in ({s}). Try /login again.\n", .{@errorName(err)});
-                try emit(s, msg);
+                const msg = try std.fmt.allocPrint(s.arena, "Unable to log in ({s}). Try /login again.", .{@errorName(err)});
+                try settle(s, msg);
                 return;
             };
             pending.* = .{ .login_pkce = hold };
-            const msg = try std.fmt.allocPrint(s.arena, "Open {s}\nComplete login, then paste the redirect URL or code. Empty line cancels.\n", .{hold.url});
-            try emit(s, msg);
+            const msg = try std.fmt.allocPrint(s.arena, "Open {s} — then paste the redirect URL or code. Empty line cancels.", .{hold.url});
+            try settle(s, msg);
         },
     }
 }
@@ -254,12 +286,12 @@ fn feedLoginKey(
 ) !void {
     const spec = catalog.byId(id) orelse {
         pending.* = .none;
-        try emit(s, "Unknown provider. Type /login to pick again.\n");
+        try settle(s, "Unknown provider. Type /login to pick again.");
         return;
     };
     const path = login.saveApiKey(gpa, io, home, catalog.storeId(spec), key) catch |err| {
-        const msg = try std.fmt.allocPrint(s.arena, "Unable to save ({s}). Check ~/.omfx permissions.\n", .{@errorName(err)});
-        try emit(s, msg);
+        const msg = try std.fmt.allocPrint(s.arena, "Unable to save ({s}). Check ~/.omfx permissions.", .{@errorName(err)});
+        try settle(s, msg);
         return;
     };
     defer gpa.free(path);
@@ -281,8 +313,8 @@ fn feedLoginPkce(
     pending.* = .none;
     defer hold.deinit(gpa);
     login.finishPkce(gpa, io, home, s.stdout, hold, line) catch |err| {
-        const msg = try std.fmt.allocPrint(s.arena, "Unable to log in ({s}). Try /login again.\n", .{@errorName(err)});
-        try emit(s, msg);
+        const msg = try std.fmt.allocPrint(s.arena, "Unable to log in ({s}). Try /login again.", .{@errorName(err)});
+        try settle(s, msg);
         return;
     };
     if (catalog.byId(hold.id)) |spec| rememberLogin(gpa, io, home, spec);
@@ -299,41 +331,31 @@ fn feedWebHome(
 ) !void {
     switch (web_search.parseHome(line)) {
         .cancel => try cancel(gpa, s.arena, s.stdout, s.to_transcript, s.shown, pending, s.out),
-        .unknown => try emit(s, "Not a choice here. Type a number or id, `order a,b,c`, `off id`, `on id`, `test <query>`, or an empty line to go back.\n"),
+        .unknown => try settle(s, "Not a choice here. Pick a provider, `order`, `default`, `off id`, `on id`, `test <query>`, or an empty line to go back."),
         .test_query => |q| {
             const out = web_search.searchFromHome(gpa, io, home, q) catch |err| {
-                const msg = try std.fmt.allocPrint(s.arena, "The search did not run ({s}).\n", .{@errorName(err)});
-                try emit(s, msg);
+                const msg = try std.fmt.allocPrint(s.arena, "The search did not run ({s}).", .{@errorName(err)});
+                try settle(s, msg);
                 return;
             };
             defer gpa.free(out);
+            // Search hits are the answer; they stay in the scrollback.
             try emit(s, out);
-            try emitWebMenu(gpa, io, home, s);
         },
-        .order => |o| {
-            var file = settings.load(gpa, io, home);
-            defer file.deinit(gpa);
-            persistWeb(gpa, io, home, o.ids[0..o.n], file.web.exclude, file.web.searxng_endpoint) catch |err| {
-                const msg = try std.fmt.allocPrint(s.arena, "Nothing was saved ({s}).\n", .{@errorName(err)});
-                try emit(s, msg);
-                return;
-            };
-            try settle(s, "Saved the fallback order.");
-            try emitWebMenu(gpa, io, home, s);
-        },
+        .begin_order => try beginWebOrder(s, pending),
+        .use_default => try useBuiltInOrder(gpa, io, home, s, pending),
         .off => |id| {
             var file = settings.load(gpa, io, home);
             defer file.deinit(gpa);
             var buf: [settings.max_ids][]const u8 = undefined;
             const n = web_search.addId(file.web.exclude, id, &buf);
             persistWeb(gpa, io, home, file.web.order, buf[0..n], file.web.searxng_endpoint) catch |err| {
-                const msg = try std.fmt.allocPrint(s.arena, "Nothing was saved ({s}).\n", .{@errorName(err)});
-                try emit(s, msg);
+                const msg = try std.fmt.allocPrint(s.arena, "Nothing was saved ({s}).", .{@errorName(err)});
+                try settle(s, msg);
                 return;
             };
             const msg = try std.fmt.allocPrint(s.arena, "Turned {s} off.", .{id});
             try settle(s, msg);
-            try emitWebMenu(gpa, io, home, s);
         },
         .on => |id| {
             var file = settings.load(gpa, io, home);
@@ -341,16 +363,130 @@ fn feedWebHome(
             var buf: [settings.max_ids][]const u8 = undefined;
             const n = web_search.dropId(file.web.exclude, id, &buf);
             persistWeb(gpa, io, home, file.web.order, buf[0..n], file.web.searxng_endpoint) catch |err| {
-                const msg = try std.fmt.allocPrint(s.arena, "Nothing was saved ({s}).\n", .{@errorName(err)});
-                try emit(s, msg);
+                const msg = try std.fmt.allocPrint(s.arena, "Nothing was saved ({s}).", .{@errorName(err)});
+                try settle(s, msg);
                 return;
             };
             const msg = try std.fmt.allocPrint(s.arena, "Turned {s} on.", .{id});
             try settle(s, msg);
-            try emitWebMenu(gpa, io, home, s);
         },
         .pick => |spec| try pickWeb(gpa, io, home, s, pending, spec),
     }
+}
+
+fn beginWebOrder(s: Surface, pending: *Pending) !void {
+    const again = pending.* == .web_order;
+    pending.* = .{ .web_order = .{} };
+    if (again) {
+        try settle(s, "Starting over. Pick who should search first. Empty line cancels.");
+    } else {
+        try settle(s, "Pick who should search first. Pick one again to remove it. Empty line cancels.");
+    }
+}
+
+fn useBuiltInOrder(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: []const u8,
+    s: Surface,
+    pending: *Pending,
+) !void {
+    var file = settings.load(gpa, io, home);
+    defer file.deinit(gpa);
+    persistWeb(gpa, io, home, &.{}, file.web.exclude, file.web.searxng_endpoint) catch |err| {
+        const msg = try std.fmt.allocPrint(s.arena, "Nothing was saved ({s}).", .{@errorName(err)});
+        try settle(s, msg);
+        return;
+    };
+    pending.* = .none;
+    try settle(s, "Using the built-in search order.");
+}
+
+fn feedWebOrder(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: []const u8,
+    s: Surface,
+    pending: *Pending,
+    line: []const u8,
+) !void {
+    if (std.mem.eql(u8, line, web_search.order_pick_id) or std.mem.eql(u8, line, "order")) {
+        try beginWebOrder(s, pending);
+        return;
+    }
+    if (std.mem.eql(u8, line, web_search.default_pick_id) or std.mem.eql(u8, line, "default")) {
+        try useBuiltInOrder(gpa, io, home, s, pending);
+        return;
+    }
+    const spec = web_search.resolveToken(line) orelse {
+        try settle(s, "Pick a search provider from the list. Empty line saves (or cancels if none yet).");
+        return;
+    };
+    var order = pending.web_order;
+    // Pick again to undo a mistake — no separate reset step.
+    var remove_at: ?usize = null;
+    for (order.ids[0..order.n], 0..) |id, i| {
+        if (std.mem.eql(u8, id, spec.id)) {
+            remove_at = i;
+            break;
+        }
+    }
+    if (remove_at) |at| {
+        var i = at;
+        while (i + 1 < order.n) : (i += 1) order.ids[i] = order.ids[i + 1];
+        order.n -= 1;
+        pending.* = .{ .web_order = order };
+        if (order.n == 0) {
+            const msg = try std.fmt.allocPrint(s.arena, "Removed {s}. Pick who should search first, or empty line to cancel.", .{spec.name});
+            try settle(s, msg);
+        } else {
+            const msg = try std.fmt.allocPrint(s.arena, "Removed {s}. {d} left — pick another, or empty line to save.", .{ spec.name, order.n });
+            try settle(s, msg);
+        }
+        return;
+    }
+    if (order.n >= order.ids.len) {
+        try settle(s, "The order is full. Empty line saves it.");
+        return;
+    }
+    order.ids[order.n] = spec.id;
+    order.n += 1;
+    pending.* = .{ .web_order = order };
+    if (order.n == 1) {
+        const msg = try std.fmt.allocPrint(s.arena, "{s} first. Pick who to try next, pick again to remove, or empty line to save.", .{spec.name});
+        try settle(s, msg);
+    } else {
+        const msg = try std.fmt.allocPrint(s.arena, "Added {s} as #{d}. Pick another, pick again to remove, or empty line to save.", .{ spec.name, order.n });
+        try settle(s, msg);
+    }
+}
+
+fn finishWebOrder(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: []const u8,
+    s: Surface,
+    pending: *Pending,
+) !void {
+    const order = pending.web_order;
+    if (order.n == 0) {
+        pending.* = .none;
+        try settle(s, "Canceled.");
+        return;
+    }
+    var file = settings.load(gpa, io, home);
+    defer file.deinit(gpa);
+    persistWeb(gpa, io, home, order.ids[0..order.n], file.web.exclude, file.web.searxng_endpoint) catch |err| {
+        const msg = try std.fmt.allocPrint(s.arena, "Nothing was saved ({s}).", .{@errorName(err)});
+        try settle(s, msg);
+        return;
+    };
+    pending.* = .none;
+    const msg = try std.fmt.allocPrint(s.arena, "Saved. Replaces the previous order — {d} provider{s}.", .{
+        order.n,
+        if (order.n == 1) "" else "s",
+    });
+    try settle(s, msg);
 }
 
 fn pickWeb(
@@ -368,14 +504,13 @@ fn pickWeb(
     const has_cred = web_search.credential(json, spec) != null;
     if (spec.kind == .endpoint and !web_search.isAvailable(spec, json, file.web, true)) {
         pending.* = .web_endpoint;
-        try emit(s, "Paste the SearXNG URL (http://127.0.0.1:8888). Empty line cancels.\n");
+        try settle(s, "Paste the SearXNG URL (http://127.0.0.1:8888). Empty line cancels.");
         return;
     }
-    if ((spec.kind == .api_key or spec.kind == .chat_login) and !has_cred and !spec.keyless_explicit) {
+    if ((spec.kind == .api_key) and !has_cred and !spec.keyless_explicit) {
         pending.* = .{ .web_key = spec.id };
-        const extra: []const u8 = if (spec.kind == .chat_login) " (or type /login first)" else "";
-        const msg = try std.fmt.allocPrint(s.arena, "Paste the {s} API key{s}. Empty line cancels.\n", .{ spec.name, extra });
-        try emit(s, msg);
+        const msg = try std.fmt.allocPrint(s.arena, "Paste the {s} API key. Empty line cancels.", .{spec.name});
+        try settle(s, msg);
         return;
     }
     var order_buf: [settings.max_ids][]const u8 = undefined;
@@ -383,13 +518,12 @@ fn pickWeb(
     var exclude_buf: [settings.max_ids][]const u8 = undefined;
     const en = web_search.dropId(file.web.exclude, spec.id, &exclude_buf);
     persistWeb(gpa, io, home, order_buf[0..n], exclude_buf[0..en], file.web.searxng_endpoint) catch |err| {
-        const msg = try std.fmt.allocPrint(s.arena, "Nothing was saved ({s}).\n", .{@errorName(err)});
-        try emit(s, msg);
+        const msg = try std.fmt.allocPrint(s.arena, "Nothing was saved ({s}).", .{@errorName(err)});
+        try settle(s, msg);
         return;
     };
-    const msg = try std.fmt.allocPrint(s.arena, "Put {s} first in the fallback order.", .{spec.id});
+    const msg = try std.fmt.allocPrint(s.arena, "Trying {s} first.", .{spec.name});
     try settle(s, msg);
-    try emitWebMenu(gpa, io, home, s);
 }
 
 fn feedWebKey(
@@ -404,8 +538,8 @@ fn feedWebKey(
     var buf: [48]u8 = undefined;
     const store = web_search.storeKey(id, &buf);
     const path = login.saveApiKey(gpa, io, home, store, key) catch |err| {
-        const msg = try std.fmt.allocPrint(s.arena, "Nothing was saved ({s}).\n", .{@errorName(err)});
-        try emit(s, msg);
+        const msg = try std.fmt.allocPrint(s.arena, "Nothing was saved ({s}).", .{@errorName(err)});
+        try settle(s, msg);
         return;
     };
     defer gpa.free(path);
@@ -418,10 +552,9 @@ fn feedWebKey(
     persistWeb(gpa, io, home, order_buf[0..n], exclude_buf[0..en], file.web.searxng_endpoint) catch |err| {
         log.warn("persist web: {s}", .{@errorName(err)});
     };
-    pending.* = .web_home;
-    const msg = try std.fmt.allocPrint(s.arena, "Saved {s} and put it first in the fallback order.", .{id});
+    pending.* = .none;
+    const msg = try std.fmt.allocPrint(s.arena, "Saved {s} and put it first.", .{id});
     try settle(s, msg);
-    try emitWebMenu(gpa, io, home, s);
 }
 
 fn feedWebEndpoint(
@@ -437,13 +570,12 @@ fn feedWebEndpoint(
     var order_buf: [settings.max_ids][]const u8 = undefined;
     const n = web_search.prependOrder(file.web, "searxng", &order_buf);
     persistWeb(gpa, io, home, order_buf[0..n], file.web.exclude, url) catch |err| {
-        const msg = try std.fmt.allocPrint(s.arena, "Nothing was saved ({s}).\n", .{@errorName(err)});
-        try emit(s, msg);
+        const msg = try std.fmt.allocPrint(s.arena, "Nothing was saved ({s}).", .{@errorName(err)});
+        try settle(s, msg);
         return;
     };
-    pending.* = .web_home;
-    try emit(s, "saved SearXNG endpoint and put it first\n");
-    try emitWebMenu(gpa, io, home, s);
+    pending.* = .none;
+    try settle(s, "Saved the SearXNG endpoint and put it first.");
 }
 
 test "pending starts none" {
@@ -463,10 +595,34 @@ test "menu rows are styled, never raw at column zero" {
     var out = Out{ .cols = 80 };
     const s = Surface{ .stdout = &w, .to_transcript = "", .shown = &shown, .arena = scratch.allocator(), .out = &out };
 
-    try emit(s, "Paste the Command Code API key. Empty line cancels.\n");
+    try emit(s, "Unknown provider. Type a number or id. Empty line cancels.\n");
     const drawn = shown.bytes();
     try std.testing.expect(std.mem.startsWith(u8, drawn, "  "));
-    try std.testing.expect(std.mem.indexOf(u8, drawn, "Paste the Command Code API key.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, drawn, "Unknown provider.") != null);
+}
+
+test "a paste prompt settles in the footer, not the scrollback" {
+    const a = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w = Io.Writer.fixed(&buf);
+    var shown = tui.Transcript.init(a, 80);
+    defer shown.deinit();
+    var scratch = std.heap.ArenaAllocator.init(a);
+    defer scratch.deinit();
+    var out = Out{ .cols = 80 };
+    const s = Surface{ .stdout = &w, .to_transcript = "", .shown = &shown, .arena = scratch.allocator(), .out = &out };
+
+    try settle(s, "Paste the SearXNG URL (http://127.0.0.1:8888). Empty line cancels.");
+    try std.testing.expectEqualStrings("Paste the SearXNG URL (http://127.0.0.1:8888). Empty line cancels.", out.note);
+    try std.testing.expectEqual(@as(usize, 0), shown.bytes().len);
+}
+
+test "awaitingInput covers paste, URL, and order steps" {
+    try std.testing.expect(Pending.awaitingInput(.{ .login_key = "openai" }));
+    try std.testing.expect(Pending.awaitingInput(.web_endpoint));
+    try std.testing.expect(Pending.awaitingInput(.{ .web_order = .{} }));
+    try std.testing.expect(!Pending.awaitingInput(.none));
+    try std.testing.expect(!Pending.awaitingInput(.web_home));
 }
 
 test "a finished step confirms in the footer, not the scrollback" {
@@ -487,7 +643,7 @@ test "a finished step confirms in the footer, not the scrollback" {
     try std.testing.expectEqual(@as(usize, 0), shown.bytes().len);
 }
 
-test "an error stays in the transcript where it can still be read" {
+test "an error settles in the footer so it fades with the rest" {
     const a = std.testing.allocator;
     var buf: [4096]u8 = undefined;
     var w = Io.Writer.fixed(&buf);
@@ -498,9 +654,9 @@ test "an error stays in the transcript where it can still be read" {
     var out = Out{ .cols = 80 };
     const s = Surface{ .stdout = &w, .to_transcript = "", .shown = &shown, .arena = scratch.allocator(), .out = &out };
 
-    try emit(s, "Nothing was saved (AccessDenied).\n");
-    try std.testing.expect(std.mem.indexOf(u8, shown.bytes(), "Nothing was saved") != null);
-    try std.testing.expectEqual(@as(usize, 0), out.note.len);
+    try settle(s, "Nothing was saved (AccessDenied).");
+    try std.testing.expectEqualStrings("Nothing was saved (AccessDenied).", out.note);
+    try std.testing.expectEqual(@as(usize, 0), shown.bytes().len);
 }
 
 test "every menu string reads as a sentence, not a field" {
@@ -510,7 +666,7 @@ test "every menu string reads as a sentence, not a field" {
     const sentences = [_][]const u8{
         "Saved. Type /login to review.",
         "Canceled.",
-        "Not a choice here. Type a number or id, `order a,b,c`, `off id`, `on id`, `test <query>`, or an empty line to go back.",
+        "Not a choice here. Pick a provider, `order`, `default`, `off id`, `on id`, `test <query>`, or an empty line to go back.",
     };
     for (sentences) |line| {
         try std.testing.expect(line.len > 0);

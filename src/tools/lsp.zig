@@ -15,11 +15,26 @@ const deadline = @import("deadline.zig");
 
 const log = std.log.scoped(.lsp);
 
+pub const Error = error{
+    LspStdin,
+    LspStdout,
+    LspEof,
+    LspNoLength,
+    LspBadLength,
+    OutOfMemory,
+    WriteFailed,
+};
+
 /// Cold rust-analyzer can take several seconds; longer than this and the write
 /// loop feels hung. A miss names itself once, then the parse note stands alone.
 pub const lsp_secs: u32 = 12;
 pub const max_findings: usize = 24;
 pub const max_msg_bytes: usize = 160;
+const max_src_bytes: usize = 2 * 1024 * 1024;
+const max_rpc_body: usize = 4 * 1024 * 1024;
+const max_polls: usize = 48;
+const read_buf: usize = 8192;
+const write_buf: usize = 512;
 
 pub fn diagnose(
     allocator: std.mem.Allocator,
@@ -37,7 +52,7 @@ pub fn diagnose(
     const uri = try fileUri(allocator, abs);
     defer allocator.free(uri);
 
-    const src = dir.readFileAlloc(io, rel, allocator, .limited(2 * 1024 * 1024)) catch return null;
+    const src = dir.readFileAlloc(io, rel, allocator, .limited(max_src_bytes)) catch return null;
     defer allocator.free(src);
 
     const escaped = try escapeJson(allocator, src);
@@ -91,7 +106,7 @@ pub fn diagnose(
     defer if (diags_json) |d| allocator.free(d);
 
     var n: usize = 0;
-    while (n < 48) : (n += 1) {
+    while (n < max_polls) : (n += 1) {
         const msg = readMsg(allocator, io, child.stdout) catch break;
         defer allocator.free(msg);
         if (extractDiagnostics(msg, uri)) |blob| {
@@ -193,18 +208,18 @@ fn escapeJson(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-fn writeMsg(io: Io, file: ?Io.File, body: []const u8) !void {
+fn writeMsg(io: Io, file: ?Io.File, body: []const u8) Error!void {
     const f = file orelse return error.LspStdin;
-    var buf: [512]u8 = undefined;
+    var buf: [write_buf]u8 = undefined;
     var w = f.writer(io, &buf);
     try w.interface.print("Content-Length: {d}\r\n\r\n", .{body.len});
     try w.interface.writeAll(body);
     try w.interface.flush();
 }
 
-fn readMsg(allocator: std.mem.Allocator, io: Io, file: ?Io.File) ![]u8 {
+fn readMsg(allocator: std.mem.Allocator, io: Io, file: ?Io.File) Error![]u8 {
     const f = file orelse return error.LspStdout;
-    var buf: [8192]u8 = undefined;
+    var buf: [read_buf]u8 = undefined;
     var reader = Io.File.Reader.initStreaming(f, io, &buf);
     var content_len: ?usize = null;
     while (true) {
@@ -213,11 +228,11 @@ fn readMsg(allocator: std.mem.Allocator, io: Io, file: ?Io.File) ![]u8 {
         if (t.len == 0) break;
         if (std.mem.startsWith(u8, t, "Content-Length:")) {
             const n = std.mem.trim(u8, t["Content-Length:".len..], " \t");
-            content_len = try std.fmt.parseInt(usize, n, 10);
+            content_len = std.fmt.parseInt(usize, n, 10) catch return error.LspBadLength;
         }
     }
     const len = content_len orelse return error.LspNoLength;
-    if (len == 0 or len > 4 * 1024 * 1024) return error.LspBadLength;
+    if (len == 0 or len > max_rpc_body) return error.LspBadLength;
     const body = try allocator.alloc(u8, len);
     errdefer allocator.free(body);
     var got: usize = 0;

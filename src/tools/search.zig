@@ -1,13 +1,12 @@
 const std = @import("std");
 const Io = std.Io;
+const ignore = @import("ignore.zig");
 const pathing = @import("pathing.zig");
 const repomap = @import("../core/repomap.zig");
 
 fn listing(dir: Io.Dir, io: Io) !Io.Dir {
     return dir.openDir(io, ".", .{ .iterate = true });
 }
-
-const ignore = @import("ignore.zig");
 
 /// Tripwires, not guesses. A walk that hits one says so in its own output, so
 /// the model can narrow `path` or `glob` instead of trusting a short answer.

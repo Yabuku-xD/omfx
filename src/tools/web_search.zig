@@ -2,10 +2,10 @@ const std = @import("std");
 const Io = std.Io;
 const auth = @import("../providers/auth.zig");
 const settings = @import("../core/settings.zig");
+const clean = @import("web_clean.zig");
 
 pub const Kind = enum {
     api_key,
-    chat_login,
     endpoint,
     free,
 };
@@ -23,12 +23,13 @@ pub const Spec = struct {
     keyless_explicit: bool = false,
 };
 
+/// Pick-list id for the guided "set search order" row. Not a real backend.
+pub const order_pick_id = "_order";
+/// Pick-list id to drop a custom order and use the catalog default chain.
+pub const default_pick_id = "_default";
+
 pub const all = [_]Spec{
     .{ .id = "perplexity", .name = "Perplexity", .env_keys = &.{"PERPLEXITY_API_KEY"}, .kind = .api_key, .auth_ids = &.{"perplexity"}, .keyless_explicit = true },
-    .{ .id = "gemini", .name = "Gemini grounding", .env_keys = &.{ "GEMINI_API_KEY", "GOOGLE_API_KEY" }, .kind = .chat_login, .auth_ids = &.{ "google-gemini-cli", "google-antigravity", "google" } },
-    .{ .id = "anthropic", .name = "Anthropic web search", .env_keys = &.{ "ANTHROPIC_SEARCH_API_KEY", "ANTHROPIC_API_KEY" }, .kind = .chat_login, .auth_ids = &.{"anthropic"} },
-    .{ .id = "codex", .name = "ChatGPT search", .env_keys = &.{"OPENAI_CODEX_OAUTH_TOKEN"}, .kind = .chat_login, .auth_ids = &.{ "openai-codex", "openai-codex-device" } },
-    .{ .id = "xai", .name = "xAI web search", .env_keys = &.{ "XAI_OAUTH_TOKEN", "XAI_API_KEY" }, .kind = .chat_login, .auth_ids = &.{ "xai", "xai-oauth" } },
     .{ .id = "zai", .name = "Z.AI web_search_prime", .env_keys = &.{"ZAI_API_KEY"}, .kind = .api_key, .auth_ids = &.{"zai"} },
     .{ .id = "exa", .name = "Exa", .env_keys = &.{"EXA_API_KEY"}, .kind = .api_key, .keyless_explicit = true },
     .{ .id = "tinyfish", .name = "TinyFish", .env_keys = &.{"TINYFISH_API_KEY"}, .kind = .api_key },
@@ -95,14 +96,26 @@ pub fn isAvailable(spec: Spec, auth_json: []const u8, web: settings.Web, explici
     return switch (spec.kind) {
         .free => if (spec.explicit_only) explicit else true,
         .endpoint => web.searxng_endpoint.len > 0 or processEnv("SEARXNG_ENDPOINT") != null,
-        .api_key, .chat_login => credential(auth_json, spec) != null or (explicit and spec.keyless_explicit),
+        .api_key => credential(auth_json, spec) != null or (explicit and spec.keyless_explicit),
+    };
+}
+
+/// True when a key or endpoint has been set up for this backend.
+pub fn isConfigured(spec: Spec, auth_json: []const u8, web: settings.Web) bool {
+    return switch (spec.kind) {
+        .free => false,
+        .endpoint => web.searxng_endpoint.len > 0 or processEnv("SEARXNG_ENDPOINT") != null,
+        .api_key => credential(auth_json, spec) != null,
     };
 }
 
 pub const HomeCmd = union(enum) {
     cancel,
     pick: Spec,
-    order: struct { ids: [settings.max_ids][]const u8, n: usize },
+    /// Guided flow: pick providers one by one, empty line saves.
+    begin_order,
+    /// Clear a custom order; the catalog default chain runs again.
+    use_default,
     off: []const u8,
     on: []const u8,
     test_query: []const u8,
@@ -142,12 +155,8 @@ pub fn parseOrder(text: []const u8, out: *[settings.max_ids][]const u8) usize {
 pub fn parseHome(line: []const u8) HomeCmd {
     const t = std.mem.trim(u8, line, " \t");
     if (t.len == 0) return .cancel;
-    if (std.mem.startsWith(u8, t, "order") and (t.len == 5 or t[5] == ' ' or t[5] == ':' or t[5] == '=')) {
-        const rest = std.mem.trim(u8, t[5..], " \t:=");
-        var ids: [settings.max_ids][]const u8 = undefined;
-        const n = parseOrder(rest, &ids);
-        return .{ .order = .{ .ids = ids, .n = n } };
-    }
+    if (std.mem.eql(u8, t, "order") or std.mem.eql(u8, t, order_pick_id)) return .begin_order;
+    if (std.mem.eql(u8, t, "default") or std.mem.eql(u8, t, default_pick_id)) return .use_default;
     if (std.mem.startsWith(u8, t, "off ")) {
         const spec = resolveToken(t[4..]) orelse return .unknown;
         return .{ .off = spec.id };
@@ -296,73 +305,21 @@ fn http(
     return .{ .status = @intFromEnum(result.status), .body = try aw.toOwnedSlice() };
 }
 
-fn collectSources(allocator: std.mem.Allocator, provider: []const u8, body: []const u8, limit: usize) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "[");
-    try out.appendSlice(allocator, provider);
-    try out.appendSlice(allocator, "]\n");
-    var n: usize = 0;
-    var i: usize = 0;
-    while (n < limit) {
-        const u_key = std.mem.indexOfPos(u8, body, i, "\"url\"") orelse
-            std.mem.indexOfPos(u8, body, i, "\"href\"") orelse break;
-        const after = body[u_key..];
-        const q1 = std.mem.indexOfScalar(u8, after, '"') orelse break;
-        const rest = after[q1 + 1 ..];
-        const colon = std.mem.indexOfScalar(u8, rest, '"') orelse break;
-        const from = colon + 1;
-        var to = from;
-        while (to < rest.len and rest[to] != '"') : (to += 1) {}
-        const url = rest[from..to];
-        if (std.mem.startsWith(u8, url, "http")) {
-            n += 1;
-            var line_buf: [512]u8 = undefined;
-            const line = std.fmt.bufPrint(&line_buf, "{d}. {s}\n", .{ n, url }) catch continue;
-            try out.appendSlice(allocator, line);
-        }
-        i = u_key + 8;
-        if (i >= body.len) break;
+fn collectSources(allocator: std.mem.Allocator, provider: []const u8, body: []const u8, limit: usize, query: []const u8) ![]u8 {
+    const hits = try clean.hitsFromJson(allocator, body, @min(limit, clean.max_hits));
+    defer clean.freeHits(allocator, hits);
+    if (hits.len == 0) {
+        // Last resort: no structured hits — do not dump raw JSON into context.
+        return std.fmt.allocPrint(allocator, "[{s}] {s}\n(no structured results)\n", .{ provider, query });
     }
-    if (n == 0) {
-        const snippet = body[0..@min(body.len, 400)];
-        try out.appendSlice(allocator, snippet);
-        try out.append(allocator, '\n');
-    }
-    return out.toOwnedSlice(allocator);
+    return clean.formatHits(allocator, provider, query, hits);
 }
 
-fn htmlLinks(allocator: std.mem.Allocator, provider: []const u8, body: []const u8, limit: usize) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "[");
-    try out.appendSlice(allocator, provider);
-    try out.appendSlice(allocator, "]\n");
-    var n: usize = 0;
-    var i: usize = 0;
-    while (n < limit) {
-        const href = std.mem.indexOfPos(u8, body, i, "http") orelse break;
-        var end = href;
-        while (end < body.len) : (end += 1) {
-            const c = body[end];
-            if (c == '"' or c == '\'' or c == ' ' or c == '<' or c == '\n') break;
-        }
-        const url = body[href..end];
-        if (std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "http://")) {
-            if (std.mem.indexOf(u8, url, "duckduckgo.com") == null and
-                std.mem.indexOf(u8, url, "google.com/search") == null)
-            {
-                n += 1;
-                var line_buf: [512]u8 = undefined;
-                const line = std.fmt.bufPrint(&line_buf, "{d}. {s}\n", .{ n, url }) catch continue;
-                try out.appendSlice(allocator, line);
-            }
-        }
-        i = end + 1;
-        if (i >= body.len) break;
-    }
-    if (n == 0) return error.EmptyResults;
-    return out.toOwnedSlice(allocator);
+fn htmlLinks(allocator: std.mem.Allocator, provider: []const u8, body: []const u8, limit: usize, query: []const u8) ![]u8 {
+    const hits = try clean.hitsFromHtml(allocator, body, @min(limit, clean.max_hits));
+    defer clean.freeHits(allocator, hits);
+    if (hits.len == 0) return error.EmptyResults;
+    return clean.formatHits(allocator, provider, query, hits);
 }
 
 fn bearer(allocator: std.mem.Allocator, key: []const u8) ![]u8 {
@@ -388,7 +345,7 @@ fn searchOne(
         const res = try http(allocator, io, .POST, "https://api.tavily.com/search", "application/json", body, &.{});
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 8);
+        return collectSources(allocator, spec.id, res.body, 8, query);
     }
     if (std.mem.eql(u8, spec.id, "brave")) {
         const url = try std.fmt.allocPrint(allocator, "https://api.search.brave.com/res/v1/web/search?q={s}&count=10", .{qform});
@@ -399,7 +356,7 @@ fn searchOne(
         });
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 10);
+        return collectSources(allocator, spec.id, res.body, 10, query);
     }
     if (std.mem.eql(u8, spec.id, "exa")) {
         if (key.len == 0) {
@@ -408,7 +365,7 @@ fn searchOne(
             const res = try http(allocator, io, .POST, "https://mcp.exa.ai/mcp", "application/json", body, &.{});
             defer allocator.free(res.body);
             if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-            return collectSources(allocator, spec.id, res.body, 10);
+            return collectSources(allocator, spec.id, res.body, 10, query);
         }
         const body = try std.fmt.allocPrint(allocator, "{{\"query\":\"{s}\",\"numResults\":10}}", .{qesc});
         defer allocator.free(body);
@@ -419,7 +376,7 @@ fn searchOne(
         });
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 10);
+        return collectSources(allocator, spec.id, res.body, 10, query);
     }
     if (std.mem.eql(u8, spec.id, "jina")) {
         const url = try std.fmt.allocPrint(allocator, "https://s.jina.ai/{s}", .{qform});
@@ -432,7 +389,7 @@ fn searchOne(
         });
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 10);
+        return collectSources(allocator, spec.id, res.body, 10, query);
     }
     if (std.mem.eql(u8, spec.id, "kagi")) {
         const body = try std.fmt.allocPrint(allocator, "{{\"query\":\"{s}\",\"limit\":10}}", .{qesc});
@@ -444,7 +401,7 @@ fn searchOne(
         });
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 10);
+        return collectSources(allocator, spec.id, res.body, 10, query);
     }
     if (std.mem.eql(u8, spec.id, "firecrawl")) {
         const body = try std.fmt.allocPrint(allocator, "{{\"query\":\"{s}\",\"limit\":10}}", .{qesc});
@@ -461,7 +418,7 @@ fn searchOne(
         const res = try http(allocator, io, .POST, "https://api.firecrawl.dev/v2/search", "application/json", body, extra_buf[0..extra_len]);
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 10);
+        return collectSources(allocator, spec.id, res.body, 10, query);
     }
     if (std.mem.eql(u8, spec.id, "tinyfish")) {
         const url = try std.fmt.allocPrint(allocator, "https://api.search.tinyfish.ai?query={s}", .{qform});
@@ -469,7 +426,7 @@ fn searchOne(
         const res = try http(allocator, io, .GET, url, "", null, &.{.{ .name = "x-api-key", .value = key }});
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 10);
+        return collectSources(allocator, spec.id, res.body, 10, query);
     }
     if (std.mem.eql(u8, spec.id, "parallel")) {
         const body = try std.fmt.allocPrint(allocator, "{{\"objective\":\"{s}\",\"search_queries\":[\"{s}\"],\"mode\":\"fast\"}}", .{ qesc, qesc });
@@ -480,7 +437,7 @@ fn searchOne(
         });
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 10);
+        return collectSources(allocator, spec.id, res.body, 10, query);
     }
     if (std.mem.eql(u8, spec.id, "synthetic")) {
         const body = try std.fmt.allocPrint(allocator, "{{\"query\":\"{s}\"}}", .{qesc});
@@ -492,7 +449,7 @@ fn searchOne(
         });
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 10);
+        return collectSources(allocator, spec.id, res.body, 10, query);
     }
     if (std.mem.eql(u8, spec.id, "perplexity")) {
         const body = try std.fmt.allocPrint(allocator, "{{\"model\":\"sonar-pro\",\"search_mode\":\"web\",\"messages\":[{{\"role\":\"user\",\"content\":\"{s}\"}}]}}", .{qesc});
@@ -504,7 +461,7 @@ fn searchOne(
         });
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 8);
+        return collectSources(allocator, spec.id, res.body, 8, query);
     }
     if (std.mem.eql(u8, spec.id, "kimi")) {
         const body = try std.fmt.allocPrint(allocator, "{{\"text_query\":\"{s}\",\"limit\":10,\"enable_page_crawling\":false}}", .{qesc});
@@ -516,7 +473,7 @@ fn searchOne(
         });
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 10);
+        return collectSources(allocator, spec.id, res.body, 10, query);
     }
     if (std.mem.eql(u8, spec.id, "zai")) {
         const body = try std.fmt.allocPrint(allocator, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"web_search_prime\",\"arguments\":{{\"query\":\"{s}\",\"count\":10}}}}}}", .{qesc});
@@ -528,7 +485,7 @@ fn searchOne(
         });
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 10);
+        return collectSources(allocator, spec.id, res.body, 10, query);
     }
     if (std.mem.eql(u8, spec.id, "searxng")) {
         const endpoint = if (web.searxng_endpoint.len > 0) web.searxng_endpoint else (processEnv("SEARXNG_ENDPOINT") orelse return error.ProviderFailed);
@@ -547,77 +504,7 @@ fn searchOne(
         const res = try http(allocator, io, .GET, url, "", null, extra[0..extra_len]);
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 10);
-    }
-    if (std.mem.eql(u8, spec.id, "gemini")) {
-        const body = try std.fmt.allocPrint(allocator, "{{\"contents\":[{{\"parts\":[{{\"text\":\"{s}\"}}]}}],\"tools\":[{{\"google_search\":{{}}}}]}}", .{qesc});
-        defer allocator.free(body);
-        var extra: [2]std.http.Header = undefined;
-        var extra_len: usize = 0;
-        var authz_buf: []u8 = &.{};
-        if (std.mem.startsWith(u8, key, "AIza")) {
-            extra[0] = .{ .name = "x-goog-api-key", .value = key };
-            extra_len = 1;
-        } else {
-            authz_buf = try bearer(allocator, key);
-            extra[0] = .{ .name = "authorization", .value = authz_buf };
-            extra_len = 1;
-        }
-        defer if (authz_buf.len > 0) allocator.free(authz_buf);
-        const res = try http(allocator, io, .POST, "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent", "application/json", body, extra[0..extra_len]);
-        defer allocator.free(res.body);
-        if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 10);
-    }
-    if (std.mem.eql(u8, spec.id, "anthropic")) {
-        const body = try std.fmt.allocPrint(allocator, "{{\"model\":\"claude-haiku-4-5\",\"max_tokens\":2048,\"messages\":[{{\"role\":\"user\",\"content\":\"{s}\"}}],\"tools\":[{{\"type\":\"web_search_20250305\",\"name\":\"web_search\"}}]}}", .{qesc});
-        defer allocator.free(body);
-        var extra: [4]std.http.Header = undefined;
-        extra[0] = .{ .name = "anthropic-version", .value = "2023-06-01" };
-        extra[1] = .{ .name = "anthropic-beta", .value = "web-search-2025-03-05" };
-        var extra_len: usize = 2;
-        var authz_buf: []u8 = &.{};
-        if (std.mem.startsWith(u8, key, "sk-ant")) {
-            extra[extra_len] = .{ .name = "x-api-key", .value = key };
-            extra_len += 1;
-        } else {
-            authz_buf = try bearer(allocator, key);
-            extra[extra_len] = .{ .name = "authorization", .value = authz_buf };
-            extra_len += 1;
-        }
-        defer if (authz_buf.len > 0) allocator.free(authz_buf);
-        const res = try http(allocator, io, .POST, "https://api.anthropic.com/v1/messages", "application/json", body, extra[0..extra_len]);
-        defer allocator.free(res.body);
-        if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 10);
-    }
-    if (std.mem.eql(u8, spec.id, "xai")) {
-        const body = try std.fmt.allocPrint(allocator, "{{\"model\":\"grok-4.6\",\"input\":\"{s}\",\"tools\":[{{\"type\":\"web_search\"}}]}}", .{qesc});
-        defer allocator.free(body);
-        const authz = try bearer(allocator, key);
-        defer allocator.free(authz);
-        const res = try http(allocator, io, .POST, "https://api.x.ai/v1/responses", "application/json", body, &.{
-            .{ .name = "authorization", .value = authz },
-        });
-        defer allocator.free(res.body);
-        if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 10);
-    }
-    if (std.mem.eql(u8, spec.id, "codex")) {
-        const body = try std.fmt.allocPrint(allocator, "{{\"model\":\"gpt-5.5\",\"input\":\"{s}\",\"tools\":[{{\"type\":\"web_search\"}}]}}", .{qesc});
-        defer allocator.free(body);
-        const authz = try bearer(allocator, key);
-        defer allocator.free(authz);
-        const url: []const u8 = if (std.mem.startsWith(u8, key, "sk-"))
-            "https://api.openai.com/v1/responses"
-        else
-            "https://chatgpt.com/backend-api/codex/responses";
-        const res = try http(allocator, io, .POST, url, "application/json", body, &.{
-            .{ .name = "authorization", .value = authz },
-        });
-        defer allocator.free(res.body);
-        if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return collectSources(allocator, spec.id, res.body, 10);
+        return collectSources(allocator, spec.id, res.body, 10, query);
     }
     if (std.mem.eql(u8, spec.id, "public")) {
         const engines = [_][]const u8{ "startpage", "duckduckgo", "ecosia", "google", "mojeek" };
@@ -645,7 +532,7 @@ fn searchOne(
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
         if (std.mem.indexOf(u8, res.body, "anomaly-modal") != null) return error.ProviderFailed;
-        return htmlLinks(allocator, spec.id, res.body, 10);
+        return htmlLinks(allocator, spec.id, res.body, 10, query);
     }
     if (std.mem.eql(u8, spec.id, "startpage")) {
         const url = try std.fmt.allocPrint(allocator, "https://www.startpage.com/sp/search?query={s}", .{qform});
@@ -653,7 +540,7 @@ fn searchOne(
         const res = try http(allocator, io, .GET, url, "", null, &browser_headers);
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return htmlLinks(allocator, spec.id, res.body, 10);
+        return htmlLinks(allocator, spec.id, res.body, 10, query);
     }
     if (std.mem.eql(u8, spec.id, "ecosia")) {
         const url = try std.fmt.allocPrint(allocator, "https://www.ecosia.org/search?q={s}", .{qform});
@@ -661,7 +548,7 @@ fn searchOne(
         const res = try http(allocator, io, .GET, url, "", null, &browser_headers);
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return htmlLinks(allocator, spec.id, res.body, 10);
+        return htmlLinks(allocator, spec.id, res.body, 10, query);
     }
     if (std.mem.eql(u8, spec.id, "google")) {
         const url = try std.fmt.allocPrint(allocator, "https://www.google.com/search?q={s}&hl=en", .{qform});
@@ -669,7 +556,7 @@ fn searchOne(
         const res = try http(allocator, io, .GET, url, "", null, &browser_headers);
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return htmlLinks(allocator, spec.id, res.body, 10);
+        return htmlLinks(allocator, spec.id, res.body, 10, query);
     }
     if (std.mem.eql(u8, spec.id, "mojeek")) {
         const url = try std.fmt.allocPrint(allocator, "https://www.mojeek.com/search?q={s}", .{qform});
@@ -677,7 +564,7 @@ fn searchOne(
         const res = try http(allocator, io, .GET, url, "", null, &browser_headers);
         defer allocator.free(res.body);
         if (res.status < 200 or res.status >= 300) return error.ProviderFailed;
-        return htmlLinks(allocator, spec.id, res.body, 10);
+        return htmlLinks(allocator, spec.id, res.body, 10, query);
     }
     return error.ProviderFailed;
 }
@@ -727,18 +614,18 @@ pub fn searchFromHome(allocator: std.mem.Allocator, io: Io, home: []const u8, qu
 pub fn statusLine(spec: Spec, auth_json: []const u8, web: settings.Web) []const u8 {
     if (settings.excluded(web, spec.id)) return "off";
     return switch (spec.kind) {
-        .free => if (spec.explicit_only) "explicit" else "free",
-        .endpoint => if (web.searxng_endpoint.len > 0 or processEnv("SEARXNG_ENDPOINT") != null) "endpoint" else "need url",
-        .api_key, .chat_login => if (credential(auth_json, spec) != null) "key" else "need key",
+        .free => if (spec.explicit_only) "explicit" else "ready",
+        .endpoint => if (isConfigured(spec, auth_json, web)) "✓ configured" else "need url",
+        .api_key => if (isConfigured(spec, auth_json, web)) "✓ configured" else "need key",
     };
 }
 
 test "default chain skips public" {
     var buf: [settings.max_ids][]const u8 = undefined;
     const n = resolveChain(.{}, &buf);
-    try std.testing.expect(n >= 20);
+    try std.testing.expect(n >= 16);
     try std.testing.expectEqualStrings("perplexity", buf[0]);
-    try std.testing.expectEqualStrings("duckduckgo", buf[18]);
+    try std.testing.expectEqualStrings("duckduckgo", buf[14]);
     var has_public = false;
     for (buf[0..n]) |id| {
         if (std.mem.eql(u8, id, "public")) has_public = true;
@@ -765,8 +652,12 @@ test "public is explicit-only" {
     try std.testing.expect(isAvailable(byId("duckduckgo").?, "", .{}, false));
 }
 
-test "catalog has twenty three providers" {
-    try std.testing.expectEqual(@as(usize, 23), all.len);
+test "catalog has nineteen providers" {
+    try std.testing.expectEqual(@as(usize, 19), all.len);
+    try std.testing.expect(byId("anthropic") == null);
+    try std.testing.expect(byId("gemini") == null);
+    try std.testing.expect(byId("codex") == null);
+    try std.testing.expect(byId("xai") == null);
 }
 
 pub fn formatMenu(allocator: std.mem.Allocator, auth_json: []const u8, web: settings.Web) ![]u8 {
@@ -788,7 +679,7 @@ pub fn formatMenu(allocator: std.mem.Allocator, auth_json: []const u8, web: sett
         if (shown >= 8) break;
     }
     if (shown == 0) try out.appendSlice(allocator, "(none ready)");
-    try out.appendSlice(allocator, "\n\n");
+    try out.appendSlice(allocator, "\n\n  Set search order     pick first, then second, then third\n  Use built-in order    drop a custom list\n\n");
     for (all, 0..) |spec, i| {
         const st = statusLine(spec, auth_json, web);
         var line_buf: [160]u8 = undefined;
@@ -797,40 +688,38 @@ pub fn formatMenu(allocator: std.mem.Allocator, auth_json: []const u8, web: sett
     }
     try out.appendSlice(allocator,
         \\
-        \\number/id     set key (or SearXNG URL)
-        \\order a,b,c   fallback order
-        \\off id        skip in the chain
-        \\on id         include again
-        \\test query    run the chain now
-        \\empty         back
+        \\Pick a provider to try it first.
+        \\Pick "Set search order" to choose first, second, third… (pick again to remove one; start over to redo).
+        \\Pick "Use built-in order" if a custom list went wrong.
+        \\off id / on id   skip or include again
+        \\test query       run a search now
+        \\empty            back
         \\
     );
     return out.toOwnedSlice(allocator);
 }
 
-test "web menu lists tavily and order command" {
+test "web menu lists tavily and set search order" {
     const text = try formatMenu(std.testing.allocator, "", .{});
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "tavily") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "duckduckgo") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "order a,b,c") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Set search order") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Use built-in order") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "anthropic") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "gemini") == null);
 }
 
-test "parseHome order off and pick" {
-    switch (parseHome("order exa, tavily, 19")) {
-        .order => |o| {
-            try std.testing.expectEqual(@as(usize, 3), o.n);
-            try std.testing.expectEqualStrings("exa", o.ids[0]);
-            try std.testing.expectEqualStrings("tavily", o.ids[1]);
-            try std.testing.expectEqualStrings("duckduckgo", o.ids[2]);
-        },
-        else => return error.TestUnexpectedResult,
-    }
+test "parseHome begin_order off and pick" {
+    try std.testing.expect(parseHome("order") == .begin_order);
+    try std.testing.expect(parseHome(order_pick_id) == .begin_order);
+    try std.testing.expect(parseHome("default") == .use_default);
+    try std.testing.expect(parseHome(default_pick_id) == .use_default);
     switch (parseHome("off google")) {
         .off => |id| try std.testing.expectEqualStrings("google", id),
         else => return error.TestUnexpectedResult,
     }
-    switch (parseHome("11")) {
+    switch (parseHome("7")) {
         .pick => |s| try std.testing.expectEqualStrings("tavily", s.id),
         else => return error.TestUnexpectedResult,
     }
@@ -838,10 +727,10 @@ test "parseHome order off and pick" {
     try std.testing.expect(parseHome("nope") == .unknown);
 }
 
-test "credential prefers web_search store then chat login alias" {
+test "credential prefers web_search store then auth alias" {
     const json =
-        \\{"web_search.tavily":{"type":"api_key","key":"tvly"},"xai-oauth":{"type":"oauth","access_token":"grok"}}
+        \\{"web_search.tavily":{"type":"api_key","key":"tvly"},"perplexity":{"type":"api_key","key":"pplx"}}
     ;
     try std.testing.expectEqualStrings("tvly", credential(json, byId("tavily").?).?);
-    try std.testing.expectEqualStrings("grok", credential(json, byId("xai").?).?);
+    try std.testing.expectEqualStrings("pplx", credential(json, byId("perplexity").?).?);
 }

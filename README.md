@@ -3,7 +3,7 @@
 A coding agent CLI built to keep edits honest, memory inspectable, and context
 under control.
 
-**9** providers · **26** built-in tools · **23** search backends · **~3 MB** binary · **Zig 0.16**
+**9** providers · **27** built-in tools · **19** search backends · **~3 MB** binary · **Zig 0.16**
 
 ## Install
 

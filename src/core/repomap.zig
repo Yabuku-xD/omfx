@@ -314,7 +314,12 @@ fn queryTokens(query: []const u8, out: *[32][]const u8) usize {
     return n;
 }
 
-fn rankLex(hits: []SearchHit, ranks: *[max_search_hits]usize, n: usize) void {
+fn rankBy(
+    hits: []SearchHit,
+    ranks: *[max_search_hits]usize,
+    n: usize,
+    comptime field: enum { lex, sym, ref },
+) void {
     var order: [max_search_hits]usize = undefined;
     var i: usize = 0;
     while (i < n) : (i += 1) order[i] = i;
@@ -322,39 +327,17 @@ fn rankLex(hits: []SearchHit, ranks: *[max_search_hits]usize, n: usize) void {
         fn cmp(h: []SearchHit, a: usize, b: usize) bool {
             const ha = h[a];
             const hb = h[b];
-            if (ha.lex != hb.lex) return ha.lex > hb.lex;
-            return std.mem.lessThan(u8, ha.path, hb.path);
-        }
-    }.cmp);
-    i = 0;
-    while (i < n) : (i += 1) ranks[order[i]] = i + 1;
-}
-
-fn rankSym(hits: []SearchHit, ranks: *[max_search_hits]usize, n: usize) void {
-    var order: [max_search_hits]usize = undefined;
-    var i: usize = 0;
-    while (i < n) : (i += 1) order[i] = i;
-    std.mem.sort(usize, order[0..n], hits, struct {
-        fn cmp(h: []SearchHit, a: usize, b: usize) bool {
-            const ha = h[a];
-            const hb = h[b];
-            if (ha.sym != hb.sym) return ha.sym > hb.sym;
-            return std.mem.lessThan(u8, ha.path, hb.path);
-        }
-    }.cmp);
-    i = 0;
-    while (i < n) : (i += 1) ranks[order[i]] = i + 1;
-}
-
-fn rankRef(hits: []SearchHit, ranks: *[max_search_hits]usize, n: usize) void {
-    var order: [max_search_hits]usize = undefined;
-    var i: usize = 0;
-    while (i < n) : (i += 1) order[i] = i;
-    std.mem.sort(usize, order[0..n], hits, struct {
-        fn cmp(h: []SearchHit, a: usize, b: usize) bool {
-            const ha = h[a];
-            const hb = h[b];
-            if (ha.ref_score != hb.ref_score) return ha.ref_score > hb.ref_score;
+            const va: u64 = switch (field) {
+                .lex => ha.lex,
+                .sym => ha.sym,
+                .ref => ha.ref_score,
+            };
+            const vb: u64 = switch (field) {
+                .lex => hb.lex,
+                .sym => hb.sym,
+                .ref => hb.ref_score,
+            };
+            if (va != vb) return va > vb;
             return std.mem.lessThan(u8, ha.path, hb.path);
         }
     }.cmp);
@@ -449,9 +432,9 @@ pub fn search(
     @memset(&rank_lex, n + 1);
     @memset(&rank_sym, n + 1);
     @memset(&rank_ref, n + 1);
-    rankLex(hits[0..n], &rank_lex, n);
-    rankSym(hits[0..n], &rank_sym, n);
-    rankRef(hits[0..n], &rank_ref, n);
+    rankBy(hits[0..n], &rank_lex, n, .lex);
+    rankBy(hits[0..n], &rank_sym, n, .sym);
+    rankBy(hits[0..n], &rank_ref, n, .ref);
 
     var i: usize = 0;
     while (i < n) : (i += 1) {

@@ -75,6 +75,9 @@ pub fn write(
 ) !void {
     _ = allocator;
     try pathing.assertInside(workspace, rel);
+    if (std.fs.path.dirname(rel)) |parent| {
+        if (parent.len > 0) try dir.createDirPath(io, parent);
+    }
     var file = try dir.createFile(io, rel, .{ .truncate = true });
     defer file.close(io);
     var buf: [1024]u8 = undefined;
@@ -168,6 +171,9 @@ pub fn copy(
 ) !void {
     try pathing.assertInside(workspace, from);
     try pathing.assertInside(workspace, to);
+    if (std.fs.path.dirname(to)) |parent| {
+        if (parent.len > 0) try dir.createDirPath(io, parent);
+    }
     try Io.Dir.copyFile(dir, from, dir, to, io, .{});
 }
 
@@ -201,7 +207,7 @@ pub fn info(
     const st = file.stat(io) catch {
         return std.fmt.allocPrint(allocator, "file {s}\n", .{rel});
     };
-    return std.fmt.allocPrint(allocator, "file {s} size={d}\n", .{ rel, st.size });
+    return std.fmt.allocPrint(allocator, "file {s} size={d} bytes\n", .{ rel, st.size });
 }
 
 pub fn openPath(io: Io, abs: []const u8) void {
@@ -244,7 +250,18 @@ test "list copy mkdir info" {
     const inf = try info(tmp.dir, io, std.testing.allocator, "ws", "a.txt");
     defer std.testing.allocator.free(inf);
     try std.testing.expect(std.mem.indexOf(u8, inf, "file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inf, "bytes") != null);
     const nested = try list(tmp.dir, io, std.testing.allocator, "ws", "sub");
     defer std.testing.allocator.free(nested);
     try std.testing.expect(std.mem.indexOf(u8, nested, "b.txt") != null);
+}
+
+test "write creates missing parent directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try write(tmp.dir, io, std.testing.allocator, "ws", "deep/nested/f.txt", "x");
+    const got = try read(tmp.dir, io, std.testing.allocator, "ws", "deep/nested/f.txt");
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings("x", got);
 }
