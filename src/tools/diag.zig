@@ -662,7 +662,7 @@ test "diagnostics parse each language, or say the toolchain is missing" {
 }
 
 test "a checker leaves nothing behind in the workspace" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const io = std.testing.io;
     const a = std.testing.allocator;
