@@ -100,7 +100,6 @@ pub fn isAvailable(spec: Spec, auth_json: []const u8, web: settings.Web, explici
     };
 }
 
-/// True when a key or endpoint has been set up for this backend.
 pub fn isConfigured(spec: Spec, auth_json: []const u8, web: settings.Web) bool {
     return switch (spec.kind) {
         .free => false,

@@ -187,7 +187,6 @@ fn overlayFor(layout: Layout, n: usize) Overlay {
     return .{ .menu = h };
 }
 
-
 pub const width = @import("width.zig");
 
 /// Re-exported so paint and input code reads the same as before the split.

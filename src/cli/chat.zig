@@ -83,7 +83,6 @@ pub const formatAssistant = markdown.formatAssistant;
 pub const inlineCells = markdown.inlineCells;
 pub const clipInline = markdown.clipInline;
 
-
 /// User turn: blank row, accent gutter, wrapped text, blank row.
 /// A gutter reads as "mine" at a glance without a box or a fill fighting the
 /// transcript for contrast.
@@ -681,7 +680,6 @@ pub fn formatSystem(allocator: std.mem.Allocator, cols: u16, text: []const u8) !
     }
     return out.toOwnedSlice(allocator);
 }
-
 
 test "a todo card keeps its own styling and skips the preview cap" {
     const todos = @import("../core/todos.zig");

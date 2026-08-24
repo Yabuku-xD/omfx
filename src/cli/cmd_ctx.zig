@@ -256,4 +256,3 @@ pub fn emit(ctx: *Ctx, text: []const u8) !void {
 pub fn readAuth(arena: std.mem.Allocator, io: Io, home: []const u8) []const u8 {
     return auth.readJson(arena, io, home);
 }
-

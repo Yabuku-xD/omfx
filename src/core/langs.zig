@@ -191,7 +191,7 @@ pub const table = [_]Lang{
         .check = &.{ "bash", "-n" },
         .check_label = "bash -n",
         .language_id = "shellscript",
-        .lsp = &.{"bash-language-server", "start"},
+        .lsp = &.{ "bash-language-server", "start" },
     },
     .{
         .name = "zsh",
@@ -213,7 +213,7 @@ pub const table = [_]Lang{
         .check = &.{ "fish", "--no-execute" },
         .check_label = "fish --no-execute",
         .language_id = "fish",
-        .lsp = &.{"fish-lsp", "start"},
+        .lsp = &.{ "fish-lsp", "start" },
     },
     .{
         .name = "lua",
@@ -413,7 +413,7 @@ pub const table = [_]Lang{
         .bopen = "/*",
         .bclose = "*/",
         .language_id = "terraform",
-        .lsp = &.{"terraform-ls", "serve"},
+        .lsp = &.{ "terraform-ls", "serve" },
     },
     .{
         .name = "prisma",
@@ -490,7 +490,7 @@ pub const table = [_]Lang{
         .bclose = "-->",
         .balance = false,
         .language_id = "xml",
-        .lsp = &.{ "lemminx" },
+        .lsp = &.{"lemminx"},
     },
     .{
         .name = "json",
@@ -530,7 +530,7 @@ pub const table = [_]Lang{
         .bclose = "-->",
         .balance = false,
         .language_id = "markdown",
-        .lsp = &.{"marksman", "server"},
+        .lsp = &.{ "marksman", "server" },
     },
     .{
         .name = "dockerfile",
