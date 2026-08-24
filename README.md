@@ -55,7 +55,9 @@ sessions coordinate through a gist each turn; divergence detection keeps summari
 aligned without spamming the thread.
 
 **Peers** — teammates with the same tools, an isolated thread, and the shared board.
-Depth capped; nested peers denied. Optional git worktrees for isolation.
+Manual `/peers` always works; optional auto peers are task-gated when `peer=on`.
+Name a model in plain words like `sonnet 5 from anthropic` to pin it. Depth capped;
+nested peers denied. Optional git worktrees for isolation.
 
 **Ranked repo map** — orientation by symbol references, not directory walk order.
 Volatile status and the map refresh on the user message, not the cached system prefix.

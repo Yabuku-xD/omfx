@@ -395,13 +395,13 @@ fn chatTurn(
     const board_tail0 = board.loadTail(allocator, io, workspace);
     var last_summary = try ssvp.summary(allocator, board_tail0);
     const base_allow_peer = depth == 0 and settings.peerAutoOn(cfg) and !peer_denied;
-    const allow_peer = base_allow_peer and peer_policy.decide(.{
+    const allow_peer = base_allow_peer and peer_policy.allow(.{
         .prompt = user,
         .prior_user = run.prior_user,
         .prior_assistant = run.prior_assistant,
         .board_summary = last_summary,
         .plan = plan,
-    }).offer;
+    });
     const sys = try assembleSystem(allocator, io, dir, workspace, home, allow_peer, plan, run.lookup, run.auth_json, endpoint);
     if (trace) |t| {
         t.sys_bytes = @intCast(@min(sys.len, std.math.maxInt(u32)));
