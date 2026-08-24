@@ -113,12 +113,7 @@ fn session(
     }) catch {
         return std.fmt.allocPrint(allocator, "mcp: spawn failed ({s})", .{server.command});
     };
-    defer {
-        child.kill(io);
-        _ = child.wait(io) catch |err| {
-            log.debug("wait: {s}", .{@errorName(err)});
-        };
-    }
+    defer child.kill(io);
 
     const init_body =
         \\{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"omfx","version":"0.0.1"}}}

@@ -41,6 +41,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = test_optimize,
+            .link_libc = true,
         }),
     });
     const run_mod_tests = b.addRunArtifact(mod_tests);
@@ -50,6 +51,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = test_optimize,
+            .link_libc = true,
             .imports = &.{
                 .{ .name = "omfx", .module = mod },
             },

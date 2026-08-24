@@ -1,6 +1,6 @@
 # omfx documentation
 
-> Oh My Fx (`omfx`) is a coding agent CLI: parse gate, one-shot LSP, hybrid search, effort `auto`, ARC compaction, memory and board, credential-aware models, and local credentials — no gateway of its own.
+> Oh My Fx (`omfx`) is a coding agent CLI: parse gate, one-shot LSP, hybrid search, effort `auto`, ARC compaction, memory and board, credential-aware models, and local credentials — no gateway of its own. Licensed under MIT.
 
 Use the Markdown pages below for installation, configuration, and reference.
 
@@ -35,9 +35,13 @@ omfx ask "explain this repository"
 ## Capabilities
 
 - [Tools](capabilities/tools.md): Built-in agent tools, parse gate, hybrid search, LSP.
-- [Web search](capabilities/web-search.md): `/web` backends and fallback order.
+- [Web search](capabilities/web-search.md): `/web` backends (19), pick-to-order, fetch/scrape.
 - [Skills](capabilities/skills.md): Discovered slash skills and stacking.
 - [MCP](capabilities/mcp.md): Model Context Protocol servers.
 - [Peers and board](capabilities/peers.md): Teammates, board, memory, playbook.
 - [IDE](capabilities/ide.md): Open the workspace in an external editor.
 - [Plugins](capabilities/plugins.md): Claude-compatible marketplaces.
+
+## License
+
+[MIT](../LICENSE)

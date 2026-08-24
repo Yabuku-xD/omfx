@@ -67,12 +67,7 @@ pub fn diagnose(
         .stdout = .pipe,
         .stderr = .ignore,
     }) catch return null;
-    defer {
-        child.kill(io);
-        _ = child.wait(io) catch |err| {
-            log.debug("wait: {s}", .{@errorName(err)});
-        };
-    }
+    defer child.kill(io);
 
     const root_uri = try fileUri(allocator, workspace);
     defer allocator.free(root_uri);

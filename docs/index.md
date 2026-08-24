@@ -65,7 +65,7 @@ In an interactive session, type `/` for commands. See [Slash commands](using/sla
 - **Ranked repo map** — orientation by symbol references, not directory walk order.
 - **Credential-aware `/models`** — subscription and API windows capped correctly.
 - **Stacked skills + `@files`** — several skills and file anchors in one prompt.
-- **Web fallback chain** — twenty-three search backends; first that works wins.
+- **Web fallback chain** — nineteen search backends; pick an order in `/web`, first that works wins.
 - **External IDE** — `/ide open` launches code, cursor, zed, and friends on the workspace.
 
 ## What omfx asks before it acts

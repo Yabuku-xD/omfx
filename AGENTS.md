@@ -52,7 +52,7 @@ that shipped here was of that shape.
 
 ## Learned Workspace Facts
 
-- Product is Oh My Fx (`omfx`); this checkout may still be named `ffx`. Zig 0.16.0+, no registered dependencies.
+- Product is Oh My Fx (`omfx`); this checkout may still be named `ffx`. Zig 0.16.0+, no registered dependencies. MIT license.
 - Homemade ANSI TUI (not libvaxis). Sticky-footer composer, transcript pinned above it.
 - User data: `~/.omfx/auth.json` (0600), `~/.omfx/settings.json`; workspace playbook is `.omfx/playbook.jsonl`.
 - Settings is `/settings` (no `/config`). `/login` lists model providers; `/web` lists search backends.

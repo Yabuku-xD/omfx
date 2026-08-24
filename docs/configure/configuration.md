@@ -42,6 +42,7 @@ The settings panel and the one-shot form share one setter.
 | `cdp_port` | Chrome relay port |
 | `plugin_marketplaces` | Array of `owner/repo` marketplace ids |
 | `mcp` | Array of MCP server objects |
+| `web` | Search order, excludes, SearXNG endpoint — prefer `/web` over editing by hand |
 
 ## Last used
 
