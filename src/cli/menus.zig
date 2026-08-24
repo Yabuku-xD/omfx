@@ -18,7 +18,6 @@ pub const Pending = union(enum) {
     web_home,
     web_key: []const u8,
     web_endpoint,
-    /// Building a fallback order by picking providers one at a time.
     web_order: struct {
         ids: [settings.max_ids][]const u8 = undefined,
         n: usize = 0,
@@ -86,6 +85,14 @@ fn emit(s: Surface, text: []const u8) !void {
 /// those you need to still be there when you look back.
 fn settle(s: Surface, text: []const u8) !void {
     s.out.note = std.mem.trimEnd(u8, text, "\n");
+}
+
+fn isOrderPick(line: []const u8) bool {
+    return std.mem.eql(u8, line, web_search.order_pick_id) or std.mem.eql(u8, line, "order");
+}
+
+fn isDefaultPick(line: []const u8) bool {
+    return std.mem.eql(u8, line, web_search.default_pick_id) or std.mem.eql(u8, line, "default");
 }
 
 fn readAuth(allocator: std.mem.Allocator, io: Io, home: []const u8) []const u8 {
@@ -169,11 +176,11 @@ pub fn startWeb(
         return;
     }
     pending.deinit(gpa);
-    if (std.mem.eql(u8, rest, web_search.order_pick_id) or std.mem.eql(u8, rest, "order")) {
+    if (isOrderPick(rest)) {
         try beginWebOrder(s, pending);
         return;
     }
-    if (std.mem.eql(u8, rest, web_search.default_pick_id) or std.mem.eql(u8, rest, "default")) {
+    if (isDefaultPick(rest)) {
         try useBuiltInOrder(gpa, io, home, s, pending);
         return;
     }
@@ -410,11 +417,11 @@ fn feedWebOrder(
     pending: *Pending,
     line: []const u8,
 ) !void {
-    if (std.mem.eql(u8, line, web_search.order_pick_id) or std.mem.eql(u8, line, "order")) {
+    if (isOrderPick(line)) {
         try beginWebOrder(s, pending);
         return;
     }
-    if (std.mem.eql(u8, line, web_search.default_pick_id) or std.mem.eql(u8, line, "default")) {
+    if (isDefaultPick(line)) {
         try useBuiltInOrder(gpa, io, home, s, pending);
         return;
     }
@@ -423,18 +430,11 @@ fn feedWebOrder(
         return;
     };
     var order = pending.web_order;
-    // Pick again to undo a mistake — no separate reset step.
-    var remove_at: ?usize = null;
-    for (order.ids[0..order.n], 0..) |id, i| {
-        if (std.mem.eql(u8, id, spec.id)) {
-            remove_at = i;
-            break;
-        }
-    }
-    if (remove_at) |at| {
-        var i = at;
-        while (i + 1 < order.n) : (i += 1) order.ids[i] = order.ids[i + 1];
-        order.n -= 1;
+    var dropped: [settings.max_ids][]const u8 = undefined;
+    const kept = web_search.dropId(order.ids[0..order.n], spec.id, &dropped);
+    if (kept < order.n) {
+        @memcpy(order.ids[0..kept], dropped[0..kept]);
+        order.n = kept;
         pending.* = .{ .web_order = order };
         if (order.n == 0) {
             const msg = try std.fmt.allocPrint(s.arena, "Removed {s}. Pick who should search first, or empty line to cancel.", .{spec.name});

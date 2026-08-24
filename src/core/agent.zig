@@ -686,7 +686,6 @@ fn chatTurn(
     }
 }
 
-
 const AdmitOutcome = union(enum) {
     stop: []u8,
     result: []u8,

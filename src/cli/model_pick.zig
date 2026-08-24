@@ -406,4 +406,3 @@ fn effortListed(list: []const u8, want: []const u8) bool {
     }
     return false;
 }
-

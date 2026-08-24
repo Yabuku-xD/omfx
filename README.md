@@ -126,4 +126,4 @@ Inside a session: `/login`, `/models`, `/help`. Flags: `--provider`, `--model`,
 
 ## License
 
-See the repository license when published.
+[MIT](LICENSE)

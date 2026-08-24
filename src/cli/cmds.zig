@@ -745,6 +745,11 @@ fn doSkills(ctx: *Ctx) !void {
     for (names) |n| ctx.state.pick.push(n, "skill");
 }
 
+fn configuredLabel(arena: std.mem.Allocator, name: []const u8, on: bool) []const u8 {
+    if (!on) return name;
+    return std.fmt.allocPrint(arena, "{s}  ✓ configured", .{name}) catch name;
+}
+
 fn startLoginPick(ctx: *Ctx, rest: []const u8) !void {
     if (rest.len > 0) {
         try menus.startLogin(ctx.gpa, ctx.arena, ctx.io, ctx.home, ctx.stdout, ctx.to_transcript, ctx.shown, &ctx.state.pending, &ctx.state.menu, rest);
@@ -756,11 +761,7 @@ fn startLoginPick(ctx: *Ctx, rest: []const u8) !void {
     ctx.state.pick.open(.login);
     for (catalog.all) |spec| {
         const on = auth.extractKey(json, catalog.storeId(spec)) != null or auth.extractKey(json, spec.id) != null;
-        const label = if (on)
-            std.fmt.allocPrint(ctx.arena, "{s}  ✓ configured", .{spec.name}) catch spec.name
-        else
-            spec.name;
-        ctx.state.pick.pushFlipped(spec.id, label);
+        ctx.state.pick.pushFlipped(spec.id, configuredLabel(ctx.arena, spec.name, on));
     }
 }
 
@@ -779,11 +780,7 @@ fn fillWebPick(ctx: *Ctx) void {
     }
     for (web_search.all) |spec| {
         const on = web_search.isConfigured(spec, json, file.web);
-        const label = if (on)
-            std.fmt.allocPrint(ctx.arena, "{s}  ✓ configured", .{spec.name}) catch spec.name
-        else
-            spec.name;
-        ctx.state.pick.pushFlipped(spec.id, label);
+        ctx.state.pick.pushFlipped(spec.id, configuredLabel(ctx.arena, spec.name, on));
     }
 }
 

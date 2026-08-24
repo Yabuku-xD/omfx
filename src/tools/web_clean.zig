@@ -6,11 +6,36 @@ const std = @import("std");
 pub const max_hits: usize = 8;
 pub const max_snippet: usize = 280;
 pub const max_title: usize = 120;
+pub const max_query_display: usize = 160;
+
+const json_window: usize = 800;
+const tracking_key_cap: usize = 48;
+const anchor_text_cap: usize = 400;
+
+comptime {
+    if (max_hits == 0) @compileError("max_hits must be positive");
+    if (max_snippet == 0) @compileError("max_snippet must be positive");
+}
 
 pub const Hit = struct {
     title: []const u8 = "",
     url: []const u8 = "",
     snippet: []const u8 = "",
+};
+
+const tracking_keys = [_][]const u8{
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "gclid",      "fbclid",     "mc_cid",       "mc_eid",   "ref",
+};
+
+const noise_needles = [_][]const u8{
+    "duckduckgo.com",
+    "google.com/search",
+    "google.com/url",
+    "startpage.com",
+    "bing.com/search",
+    "javascript:",
+    "/cdn-cgi/",
 };
 
 /// Drop common tracking query params; leave the path and useful query alone.
@@ -41,22 +66,15 @@ pub fn cleanUrl(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
 }
 
 fn isTrackingKey(key: []const u8) bool {
-    const lower_buf_len = 48;
-    var buf: [lower_buf_len]u8 = undefined;
-    if (key.len > lower_buf_len) return false;
+    var buf: [tracking_key_cap]u8 = undefined;
+    if (key.len > tracking_key_cap) return false;
     for (key, 0..) |c, i| buf[i] = std.ascii.toLower(c);
     const k = buf[0..key.len];
-    return std.mem.eql(u8, k, "utm_source") or
-        std.mem.eql(u8, k, "utm_medium") or
-        std.mem.eql(u8, k, "utm_campaign") or
-        std.mem.eql(u8, k, "utm_term") or
-        std.mem.eql(u8, k, "utm_content") or
-        std.mem.eql(u8, k, "gclid") or
-        std.mem.eql(u8, k, "fbclid") or
-        std.mem.eql(u8, k, "mc_cid") or
-        std.mem.eql(u8, k, "mc_eid") or
-        std.mem.eql(u8, k, "ref") or
-        std.mem.startsWith(u8, k, "utm_");
+    if (std.mem.startsWith(u8, k, "utm_")) return true;
+    for (tracking_keys) |t| {
+        if (std.mem.eql(u8, k, t)) return true;
+    }
+    return false;
 }
 
 pub fn cleanText(allocator: std.mem.Allocator, raw: []const u8, cap: usize) ![]u8 {
@@ -83,7 +101,11 @@ pub fn cleanText(allocator: std.mem.Allocator, raw: []const u8, cap: usize) ![]u
 
 fn urlKey(url: []const u8) []const u8 {
     var s = url;
-    if (std.mem.startsWith(u8, s, "https://")) s = s[8..] else if (std.mem.startsWith(u8, s, "http://")) s = s[7..];
+    if (std.mem.startsWith(u8, s, "https://")) {
+        s = s[8..];
+    } else if (std.mem.startsWith(u8, s, "http://")) {
+        s = s[7..];
+    }
     if (std.mem.startsWith(u8, s, "www.")) s = s[4..];
     if (std.mem.indexOfScalar(u8, s, '#')) |h| s = s[0..h];
     if (s.len > 0 and s[s.len - 1] == '/') s = s[0 .. s.len - 1];
@@ -94,7 +116,14 @@ pub fn sameHit(a: []const u8, b: []const u8) bool {
     return std.ascii.eqlIgnoreCase(urlKey(a), urlKey(b));
 }
 
-/// Source-numbered blocks: title, URL, snippet. Snippets are data, not instructions.
+fn alreadyListed(hits: []const Hit, url: []const u8) bool {
+    for (hits) |prev| {
+        if (sameHit(prev.url, url)) return true;
+    }
+    return false;
+}
+
+/// Snippets are data, not instructions.
 pub fn formatHits(
     allocator: std.mem.Allocator,
     provider: []const u8,
@@ -106,35 +135,30 @@ pub fn formatHits(
     try out.appendSlice(allocator, "[");
     try out.appendSlice(allocator, provider);
     try out.appendSlice(allocator, "] ");
-    const q = try cleanText(allocator, query, 160);
+    const q = try cleanText(allocator, query, max_query_display);
     defer allocator.free(q);
     try out.appendSlice(allocator, q);
-    try out.appendSlice(allocator, "\n");
+    try out.append(allocator, '\n');
     if (hits.len == 0) {
         try out.appendSlice(allocator, "(no results)\n");
         return out.toOwnedSlice(allocator);
     }
     for (hits, 0..) |hit, i| {
-        var line: std.ArrayList(u8) = .empty;
-        defer line.deinit(allocator);
-        try line.print(allocator, "{d}. ", .{i + 1});
-        const title = if (hit.title.len > 0) hit.title else hit.url;
-        try line.appendSlice(allocator, title);
-        try line.append(allocator, '\n');
-        try line.appendSlice(allocator, "   ");
-        try line.appendSlice(allocator, hit.url);
-        try line.append(allocator, '\n');
+        try out.print(allocator, "{d}. ", .{i + 1});
+        try out.appendSlice(allocator, if (hit.title.len > 0) hit.title else hit.url);
+        try out.append(allocator, '\n');
+        try out.appendSlice(allocator, "   ");
+        try out.appendSlice(allocator, hit.url);
+        try out.append(allocator, '\n');
         if (hit.snippet.len > 0) {
-            try line.appendSlice(allocator, "   ");
-            try line.appendSlice(allocator, hit.snippet);
-            try line.append(allocator, '\n');
+            try out.appendSlice(allocator, "   ");
+            try out.appendSlice(allocator, hit.snippet);
+            try out.append(allocator, '\n');
         }
-        try out.appendSlice(allocator, line.items);
     }
     return out.toOwnedSlice(allocator);
 }
 
-/// Pull title/url/snippet objects out of JSON SERP bodies.
 pub fn hitsFromJson(allocator: std.mem.Allocator, body: []const u8, limit: usize) ![]Hit {
     var list: std.ArrayList(Hit) = .empty;
     errdefer {
@@ -154,8 +178,8 @@ pub fn hitsFromJson(allocator: std.mem.Allocator, body: []const u8, limit: usize
             i = u_key + 5;
             continue;
         }
-        const window_start = if (u_key > 800) u_key - 800 else 0;
-        const window_end = @min(body.len, u_key + 800);
+        const window_start = if (u_key > json_window) u_key - json_window else 0;
+        const window_end = @min(body.len, u_key + json_window);
         const window = body[window_start..window_end];
         const title_raw = jsonField(window, "title") orelse jsonField(window, "name") orelse "";
         const snip_raw = jsonField(window, "snippet") orelse
@@ -165,14 +189,7 @@ pub fn hitsFromJson(allocator: std.mem.Allocator, body: []const u8, limit: usize
 
         const url = try cleanUrl(allocator, url_raw);
         errdefer allocator.free(url);
-        var dup = false;
-        for (list.items) |prev| {
-            if (sameHit(prev.url, url)) {
-                dup = true;
-                break;
-            }
-        }
-        if (dup or isNoiseUrl(url)) {
+        if (alreadyListed(list.items, url) or isNoiseUrl(url)) {
             allocator.free(url);
             i = u_key + 5;
             continue;
@@ -248,23 +265,15 @@ pub fn hitsFromHtml(allocator: std.mem.Allocator, body: []const u8, limit: usize
         if (isNoiseUrl(url_raw)) continue;
         const url = try cleanUrl(allocator, url_raw);
         errdefer allocator.free(url);
-        var dup = false;
-        for (list.items) |prev| {
-            if (sameHit(prev.url, url)) {
-                dup = true;
-                break;
-            }
-        }
-        if (dup) {
+        if (alreadyListed(list.items, url)) {
             allocator.free(url);
             continue;
         }
-        // Anchor text between > and </a>
         var title: []u8 = &.{};
         if (std.mem.indexOfPos(u8, body, url_end, ">")) |gt| {
             const t0 = gt + 1;
             if (std.mem.indexOfPos(u8, body, t0, "</a>") orelse std.mem.indexOfPos(u8, body, t0, "</A>")) |close| {
-                if (close > t0 and close - t0 < 400) {
+                if (close > t0 and close - t0 < anchor_text_cap) {
                     title = try stripTagsBrief(allocator, body[t0..close], max_title);
                 }
             }
@@ -291,13 +300,10 @@ fn stripTagsBrief(allocator: std.mem.Allocator, raw: []const u8, cap: usize) ![]
 }
 
 fn isNoiseUrl(url: []const u8) bool {
-    return std.mem.indexOf(u8, url, "duckduckgo.com") != null or
-        std.mem.indexOf(u8, url, "google.com/search") != null or
-        std.mem.indexOf(u8, url, "google.com/url") != null or
-        std.mem.indexOf(u8, url, "startpage.com") != null or
-        std.mem.indexOf(u8, url, "bing.com/search") != null or
-        std.mem.indexOf(u8, url, "javascript:") != null or
-        std.mem.indexOf(u8, url, "/cdn-cgi/") != null;
+    for (noise_needles) |n| {
+        if (std.mem.indexOf(u8, url, n) != null) return true;
+    }
+    return false;
 }
 
 test "cleanUrl drops utm params" {

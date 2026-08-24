@@ -2,6 +2,32 @@ const std = @import("std");
 const Io = std.Io;
 
 pub const max_redirect_hops: usize = 10;
+pub const scrape_cap: usize = 12_000;
+pub const fetch_cap: usize = 24_000;
+
+const loc_buf_len: usize = 4096;
+const html_probe: usize = 512;
+const html_fetch_prefix: usize = 1_500;
+const status_snip: usize = 200;
+const title_cap: usize = 160;
+const role_main_cap: usize = 80_000;
+const text_slack: usize = 512;
+
+const skip_tags = [_][]const u8{
+    "script", "style",  "noscript", "svg",    "template",
+    "nav",    "header", "footer",   "aside",  "form",
+    "iframe", "button", "input",    "select", "option",
+    "label",
+};
+
+const block_tags = [_][]const u8{
+    "p",  "div",     "br",      "li",         "h1",  "h2", "h3", "h4",
+    "tr", "section", "article", "blockquote", "pre",
+};
+
+fn isHttpUrl(url: []const u8) bool {
+    return std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "http://");
+}
 
 pub fn isRedirectStatus(status: u16) bool {
     return status == 301 or status == 302 or status == 303 or status == 307 or status == 308;
@@ -9,9 +35,7 @@ pub fn isRedirectStatus(status: u16) bool {
 
 pub fn joinLocation(allocator: std.mem.Allocator, current: []const u8, location: []const u8) ![]u8 {
     const loc = std.mem.trim(u8, location, " \t");
-    if (std.mem.startsWith(u8, loc, "https://") or std.mem.startsWith(u8, loc, "http://")) {
-        return allocator.dupe(u8, loc);
-    }
+    if (isHttpUrl(loc)) return allocator.dupe(u8, loc);
     const scheme_end = std.mem.indexOf(u8, current, "://") orelse return error.InvalidUrl;
     const after = current[scheme_end + 3 ..];
     const host_end = std.mem.indexOfScalar(u8, after, '/') orelse after.len;
@@ -33,18 +57,13 @@ fn originOf(url: []const u8) []const u8 {
     return url[0 .. scheme_end + 3 + host_end];
 }
 
-pub const scrape_cap: usize = 12_000;
-pub const fetch_cap: usize = 24_000;
-
 pub fn fetch(allocator: std.mem.Allocator, io: Io, url: []const u8) ![]u8 {
-    if (!(std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "http://"))) {
-        return error.InvalidUrl;
-    }
+    if (!isHttpUrl(url)) return error.InvalidUrl;
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    var loc_buf: [4096]u8 = undefined;
+    var loc_buf: [loc_buf_len]u8 = undefined;
     const result = client.fetch(.{
         .location = .{ .url = url },
         .method = .GET,
@@ -57,27 +76,23 @@ pub fn fetch(allocator: std.mem.Allocator, io: Io, url: []const u8) ![]u8 {
     const status: u16 = @intFromEnum(result.status);
     const raw = aw.written();
     if (status < 200 or status >= 300) {
-        return std.fmt.allocPrint(allocator, "http {d}: {s}", .{ status, raw[0..@min(raw.len, 200)] });
+        return std.fmt.allocPrint(allocator, "http {d}: {s}", .{ status, raw[0..@min(raw.len, status_snip)] });
     }
     const body = raw[0..@min(raw.len, fetch_cap)];
     if (looksHtml(body)) {
-        // Raw markup is rarely useful in context; point at scrape and keep a short prefix.
-        const prefix = body[0..@min(body.len, 1_500)];
+        const prefix = body[0..@min(body.len, html_fetch_prefix)];
         return std.fmt.allocPrint(allocator, "URL: {s}\nkind: html ({d} bytes; prefer web_scrape for readable text)\n\n{s}\n", .{ url, raw.len, prefix });
     }
     return std.fmt.allocPrint(allocator, "URL: {s}\nkind: text ({d} bytes)\n\n{s}", .{ url, body.len, body });
 }
 
-/// Fetch a URL and return readable main text (nav/chrome stripped).
 pub fn scrape(allocator: std.mem.Allocator, io: Io, url: []const u8) ![]u8 {
-    if (!(std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "http://"))) {
-        return error.InvalidUrl;
-    }
+    if (!isHttpUrl(url)) return error.InvalidUrl;
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    var loc_buf: [4096]u8 = undefined;
+    var loc_buf: [loc_buf_len]u8 = undefined;
     const result = client.fetch(.{
         .location = .{ .url = url },
         .method = .GET,
@@ -90,7 +105,7 @@ pub fn scrape(allocator: std.mem.Allocator, io: Io, url: []const u8) ![]u8 {
     const status: u16 = @intFromEnum(result.status);
     const raw = aw.written();
     if (status < 200 or status >= 300) {
-        return std.fmt.allocPrint(allocator, "http {d}: {s}", .{ status, raw[0..@min(raw.len, 200)] });
+        return std.fmt.allocPrint(allocator, "http {d}: {s}", .{ status, raw[0..@min(raw.len, status_snip)] });
     }
     if (!looksHtml(raw)) {
         const body = raw[0..@min(raw.len, scrape_cap)];
@@ -100,12 +115,11 @@ pub fn scrape(allocator: std.mem.Allocator, io: Io, url: []const u8) ![]u8 {
 }
 
 fn looksHtml(body: []const u8) bool {
-    const head = body[0..@min(body.len, 512)];
-    if (std.ascii.indexOfIgnoreCase(head, "<html") != null) return true;
-    if (std.ascii.indexOfIgnoreCase(head, "<!doctype html") != null) return true;
-    if (std.ascii.indexOfIgnoreCase(head, "<head") != null) return true;
-    if (std.ascii.indexOfIgnoreCase(head, "<body") != null) return true;
-    return false;
+    const head = body[0..@min(body.len, html_probe)];
+    return std.ascii.indexOfIgnoreCase(head, "<html") != null or
+        std.ascii.indexOfIgnoreCase(head, "<!doctype html") != null or
+        std.ascii.indexOfIgnoreCase(head, "<head") != null or
+        std.ascii.indexOfIgnoreCase(head, "<body") != null;
 }
 
 fn readablePage(allocator: std.mem.Allocator, url: []const u8, html: []const u8) ![]u8 {
@@ -127,21 +141,17 @@ fn extractTitle(allocator: std.mem.Allocator, html: []const u8) ![]u8 {
     const gt = std.mem.indexOfScalarPos(u8, html, open, '>') orelse return allocator.dupe(u8, "");
     const start = gt + 1;
     const close = std.ascii.indexOfIgnoreCase(html[start..], "</title>") orelse return allocator.dupe(u8, "");
-    return collapseWs(allocator, html[start .. start + close], 160);
+    return collapseWs(allocator, html[start .. start + close], title_cap);
 }
 
 fn mainRegion(html: []const u8) []const u8 {
     if (taggedRegion(html, "article")) |r| return r;
     if (taggedRegion(html, "main")) |r| return r;
-    // role="main"
     if (std.ascii.indexOfIgnoreCase(html, "role=\"main\"")) |at| {
-        const open = std.mem.lastIndexOfScalar(u8, html[0..at], '<') orelse 0;
         if (std.mem.indexOfScalarPos(u8, html, at, '>')) |gt| {
             const start = gt + 1;
-            // crude: until next landmark close is hard; take a generous slice
-            return html[start..@min(html.len, start + 80_000)];
+            return html[start..@min(html.len, start + role_main_cap)];
         }
-        _ = open;
     }
     if (taggedRegion(html, "body")) |r| return r;
     return html;
@@ -154,7 +164,6 @@ fn taggedRegion(html: []const u8, name: []const u8) ?[]const u8 {
     @memcpy(open_pat[1..][0..name.len], name);
     const open_s = open_pat[0 .. name.len + 1];
     const open_at = std.ascii.indexOfIgnoreCase(html, open_s) orelse return null;
-    // must be <name or <name ...>
     const after = open_at + open_s.len;
     if (after < html.len and std.ascii.isAlphanumeric(html[after])) return null;
     const gt = std.mem.indexOfScalarPos(u8, html, open_at, '>') orelse return null;
@@ -240,7 +249,7 @@ fn htmlToText(allocator: std.mem.Allocator, html: []const u8) ![]u8 {
             newline_run = 0;
         }
         i += 1;
-        if (out.items.len >= scrape_cap + 512) break;
+        if (out.items.len >= scrape_cap + text_slack) break;
     }
     while (out.items.len > 0 and std.ascii.isWhitespace(out.items[out.items.len - 1])) {
         _ = out.pop();
@@ -253,7 +262,7 @@ fn collapseWs(allocator: std.mem.Allocator, raw: []const u8, cap: usize) ![]u8 {
     errdefer out.deinit(allocator);
     var last_space = true;
     for (raw) |c| {
-        if (c == '<') break; // stop if nested junk
+        if (c == '<') break;
         if (std.ascii.isWhitespace(c)) {
             if (!last_space and out.items.len < cap) {
                 try out.append(allocator, ' ');
@@ -270,38 +279,17 @@ fn collapseWs(allocator: std.mem.Allocator, raw: []const u8, cap: usize) ![]u8 {
 }
 
 fn isSkipTag(name: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(name, "script") or
-        std.ascii.eqlIgnoreCase(name, "style") or
-        std.ascii.eqlIgnoreCase(name, "noscript") or
-        std.ascii.eqlIgnoreCase(name, "svg") or
-        std.ascii.eqlIgnoreCase(name, "template") or
-        std.ascii.eqlIgnoreCase(name, "nav") or
-        std.ascii.eqlIgnoreCase(name, "header") or
-        std.ascii.eqlIgnoreCase(name, "footer") or
-        std.ascii.eqlIgnoreCase(name, "aside") or
-        std.ascii.eqlIgnoreCase(name, "form") or
-        std.ascii.eqlIgnoreCase(name, "iframe") or
-        std.ascii.eqlIgnoreCase(name, "button") or
-        std.ascii.eqlIgnoreCase(name, "input") or
-        std.ascii.eqlIgnoreCase(name, "select") or
-        std.ascii.eqlIgnoreCase(name, "option") or
-        std.ascii.eqlIgnoreCase(name, "label");
+    for (skip_tags) |t| {
+        if (std.ascii.eqlIgnoreCase(name, t)) return true;
+    }
+    return false;
 }
 
 fn isBlockTag(name: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(name, "p") or
-        std.ascii.eqlIgnoreCase(name, "div") or
-        std.ascii.eqlIgnoreCase(name, "br") or
-        std.ascii.eqlIgnoreCase(name, "li") or
-        std.ascii.eqlIgnoreCase(name, "h1") or
-        std.ascii.eqlIgnoreCase(name, "h2") or
-        std.ascii.eqlIgnoreCase(name, "h3") or
-        std.ascii.eqlIgnoreCase(name, "h4") or
-        std.ascii.eqlIgnoreCase(name, "tr") or
-        std.ascii.eqlIgnoreCase(name, "section") or
-        std.ascii.eqlIgnoreCase(name, "article") or
-        std.ascii.eqlIgnoreCase(name, "blockquote") or
-        std.ascii.eqlIgnoreCase(name, "pre");
+    for (block_tags) |t| {
+        if (std.ascii.eqlIgnoreCase(name, t)) return true;
+    }
+    return false;
 }
 
 const Entity = struct { bytes: [8]u8, len: usize, skip: usize };
