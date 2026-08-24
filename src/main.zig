@@ -203,6 +203,8 @@ pub fn main(init: std.process.Init) !void {
                     .trace = &trace,
                     .host = live.host(),
                     .max_peer_depth = peer_depth,
+                    .lookup = lookup,
+                    .auth_json = auth_json,
                 },
             );
             defer gpa.free(reply);

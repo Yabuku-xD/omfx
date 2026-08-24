@@ -8,7 +8,7 @@ Settings files, scopes, and preferences.
 | --- | --- | --- |
 | Auth | `~/.omfx/auth.json` | Credentials (0600) |
 | Settings | `~/.omfx/settings.json` | Global preferences |
-| Cache | `~/.omfx/cache/` | Provider model catalogs |
+| Cache | `~/.omfx/cache/` | Provider model catalogs and peer routing signals |
 | Plugins | `~/.omfx/plugins/` | Installed marketplace plugins |
 | User memory | `~/.omfx/memory.jsonl` | Facts reinjected every turn |
 | Workspace | `.omfx/` | Playbook, board, recall, memory.md, drafts, forks — created when written |
@@ -37,6 +37,7 @@ The settings panel and the one-shot form share one setter.
 | `bash_timeout` | Seconds a bash command may run (`0` = default) |
 | `keep_sessions` | Saved sessions to keep (`0` = all) |
 | `max_peer_depth` | How deep `/peers` may nest |
+| `peer` | `on` \| `off` — model may auto-invoke the `peer` tool (default off; `/peers` always works) |
 | `sandbox` | `on` \| `off` for OS sandbox on bash |
 | `review` | `llm` enables billed review after writes |
 | `cdp_port` | Chrome relay port |

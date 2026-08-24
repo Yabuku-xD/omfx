@@ -9,6 +9,23 @@ Start a teammate for a goal:
 Peers share the same tool set in an isolated thread, coordinate through a
 shared board, and do not nest further peers beyond `max_peer_depth`.
 
+## Auto peers
+
+By default (`peer=off`), only you can start teammates with `/peers`. Turn on
+auto delegation with `/settings peer=on` so the model may invoke the `peer` tool.
+The tool is only advertised on turns whose prompt shape and recent execution
+context clear the peer gate; it is not offered on every task. The prompt-shape
+part of that gate reuses the same `autoeffort` classifier omfx uses for
+reasoning allocation, then adds explicit delegation intent and recent execution
+state.
+
+Peer runs are auto-routed per goal — sometimes the main model, sometimes a
+signed-in alternate. You can pin one in plain words like `sonnet 5 from
+anthropic` or by naming `provider/model`. Reasoning stays `auto` unless you ask
+for a level like `high` for that specific model. The system prompt lists a
+compact signed-in catalog; pricing hints come from OpenRouter in
+`~/.omfx/cache/model_signals.json` (refreshed on `/reload` or when stale).
+
 ## Board
 
 Notes live in `.omfx/board.jsonl` as structured lines:

@@ -7,6 +7,7 @@ pub const oauth = @import("oauth.zig");
 pub const login = @import("login.zig");
 pub const models = @import("models.zig");
 pub const registry = @import("registry.zig");
+pub const model_signals = @import("model_signals.zig");
 
 test {
     _ = types;
@@ -18,4 +19,5 @@ test {
     _ = login;
     _ = models;
     _ = registry;
+    _ = model_signals;
 }

@@ -46,6 +46,18 @@ pub const Table = struct {
     }
 };
 
+const empty_ctx: u8 = 0;
+
+fn emptyGet(ctx: *const anyopaque, key: []const u8) ?[]const u8 {
+    _ = ctx;
+    _ = key;
+    return null;
+}
+
+pub fn emptyLookup() Lookup {
+    return .{ .ctx = &empty_ctx, .getFn = emptyGet };
+}
+
 /// FORCE_COLOR overrides NO_COLOR. Empty / 0 disables. 1, 2, 3, true enable.
 pub fn colorOn(lookup: Lookup) bool {
     if (lookup.get("FORCE_COLOR")) |v| {

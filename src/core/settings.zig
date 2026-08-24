@@ -67,6 +67,8 @@ pub const File = struct {
     /// they change nothing about the reply, and identifying the client is the
     /// user's call to make, not the default.
     telemetry: Toggle = .off,
+    /// When on, the model may invoke the peer tool. Manual `/peers` always works.
+    peer: Toggle = .off,
     workspace_dirs: []const []const u8 = &.{},
     mcp: []const McpServer = &.{},
     max_peer_depth: u8 = 1,
@@ -186,6 +188,7 @@ pub fn parse(allocator: std.mem.Allocator, json: []const u8) !File {
         .composer = extractString(raw, "composer"),
         .thinking = Toggle.fromSlice(extractString(raw, "thinking")),
         .telemetry = Toggle.fromSlice(extractString(raw, "telemetry")),
+        .peer = Toggle.fromSlice(extractString(raw, "peer")),
         .workspace_dirs = workspace_dirs,
         .plugin_marketplaces = plugin_marketplaces,
         .mcp = mcp,
@@ -373,6 +376,7 @@ pub fn encodeFile(allocator: std.mem.Allocator, file: File) ![]u8 {
     if (file.composer.len > 0) try w.print(",\n  \"composer\": \"{s}\"", .{file.composer});
     if (file.thinking == .on) try w.writeAll(",\n  \"thinking\": \"on\"");
     if (file.telemetry == .on) try w.writeAll(",\n  \"telemetry\": \"on\"");
+    if (file.peer == .on) try w.writeAll(",\n  \"peer\": \"on\"");
     if (file.workspace_dirs.len > 0) {
         try w.writeAll(",\n  \"workspace_dirs\": ");
         try writeQuotedList(w, file.workspace_dirs);
@@ -470,6 +474,7 @@ fn copyMeta(file: File, web: Web) File {
         .composer = file.composer,
         .thinking = file.thinking,
         .telemetry = file.telemetry,
+        .peer = file.peer,
         .workspace_dirs = file.workspace_dirs,
         .mcp = file.mcp,
         .max_peer_depth = file.max_peer_depth,
@@ -552,6 +557,7 @@ pub const Pref = enum {
     cdp_port,
     thinking,
     telemetry,
+    peer,
     statusline_place,
     statusline_fields,
 
@@ -566,6 +572,10 @@ pub fn thinkingOn(file: File) bool {
 
 pub fn telemetryOn(file: File) bool {
     return file.telemetry == .on;
+}
+
+pub fn peerAutoOn(file: File) bool {
+    return file.peer == .on;
 }
 
 /// Unset follows the host: a real player exists on macOS, so the chime is on
@@ -590,6 +600,7 @@ pub fn setPref(allocator: std.mem.Allocator, io: Io, home: []const u8, key: Pref
         .cdp_port => merged.cdp_port = value,
         .thinking => merged.thinking = Toggle.fromSlice(value),
         .telemetry => merged.telemetry = Toggle.fromSlice(value),
+        .peer => merged.peer = Toggle.fromSlice(value),
         .statusline_place => merged.statusline_place = value,
         .statusline_fields => merged.statusline_fields = value,
     }
@@ -807,6 +818,17 @@ test "encodeFile keeps permissions sandbox and mcp" {
     try std.testing.expect(sandboxOff(f));
     try std.testing.expectEqual(@as(usize, 1), f.mcp.len);
     try std.testing.expectEqualStrings("fs", f.mcp[0].name);
+}
+
+test "peer defaults off and round-trips" {
+    var missing = try parse(std.testing.allocator, "{}");
+    defer missing.deinit(std.testing.allocator);
+    try std.testing.expect(!peerAutoOn(missing));
+    const s = try encodeFile(std.testing.allocator, .{ .peer = .on });
+    defer std.testing.allocator.free(s);
+    var f = try parse(std.testing.allocator, s);
+    defer f.deinit(std.testing.allocator);
+    try std.testing.expect(peerAutoOn(f));
 }
 
 test "telemetry is off until the user says otherwise" {
