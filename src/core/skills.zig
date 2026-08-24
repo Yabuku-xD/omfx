@@ -704,7 +704,7 @@ test "skills mid-prompt expand without a leading slash" {
 }
 
 test "missing skills dir is zero" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     const n = try countSkills(tmp.dir, std.testing.io, std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), n);

@@ -13,6 +13,7 @@
 //! dependency, and output written before the kill is still captured.
 
 const std = @import("std");
+const Io = std.Io;
 
 /// Long enough for a real `cargo check` or a cold `tsc` on a large repo,
 /// short enough that a hung command does not read as a hung agent. Verify runs
@@ -186,6 +187,9 @@ test "a slow command with a piped stdout is still killed" {
 test "the login shell runs the command, whatever dialect it speaks" {
     // zsh with job control swallows a backgrounded job's output, so the
     // watchdog must never be written in the login shell's dialect.
+    // Ubuntu runners often omit /bin/zsh; skip rather than fail the matrix.
+    var zsh_file = Io.Dir.cwd().openFile(std.testing.io, "/bin/zsh", .{}) catch return;
+    zsh_file.close(std.testing.io);
     const term = try runCapped(&.{ "/bin/zsh", "-c", "printf 'one\ntwo\n'; exit 0" }, "5", true);
     try std.testing.expectEqual(@as(u8, 0), term.exited);
 }
