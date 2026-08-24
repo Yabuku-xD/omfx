@@ -318,17 +318,82 @@ fn clip(s: []const u8, cap: usize) []const u8 {
 
 /// Longest skill list a prompt can call in one go. Receipt: the machine this
 /// was written on has 167 skills; naming more than a handful in one prompt is
-/// not composition, it is a paste.
+/// not composition, it is a paste. Matches Claude Code's leading stack
+/// (first skill plus up to five more) with room for two inline extras.
 pub const max_in_prompt: usize = 8;
 
-/// A prompt with `/skill` tokens rewritten into instructions to read them.
+/// Rewrite `/skill` tokens into instructions to read those skills.
 ///
 /// Null when the prompt names no known skill, which leaves ordinary text and
-/// system commands alone. Several may be named at once and they are expanded
-/// in the order written: skills are documents, and reading two of them is a
-/// coherent thing to ask for, unlike running two system commands whose
-/// effects would race.
+/// system commands alone.
+///
+/// Two shapes, matching what the other CLIs do:
+///
+/// - **Leading stack** (Claude Code): `/a /b fix @src/foo.zig` peels consecutive
+///   known skills at the start; everything after the stack is the shared task
+///   for all of them, including `@file` mentions. Stops at the first token that
+///   is not a known skill.
+/// - **Inline** (omp / mid-prose): `fix @f with /deslop and /tdd` replaces each
+///   `/skill` in place and keeps the surrounding words and `@paths`.
+///
+/// Skills are documents, so stacking them is coherent; system commands are not
+/// stacked the same way because their effects would race.
 pub fn expand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    home: []const u8,
+    workspace: []const u8,
+    text: []const u8,
+) !?[]u8 {
+    const leading = std.mem.trimStart(u8, text, " \t");
+    if (leading.len > 0 and leading[0] == '/') {
+        if (try expandLeading(allocator, io, home, workspace, leading)) |out| return out;
+    }
+    return expandInline(allocator, io, home, workspace, text);
+}
+
+/// Peel consecutive `/skill` tokens from the start; remaining text is the task.
+fn expandLeading(
+    allocator: std.mem.Allocator,
+    io: Io,
+    home: []const u8,
+    workspace: []const u8,
+    text: []const u8,
+) !?[]u8 {
+    var paths: [max_in_prompt][]u8 = undefined;
+    var n: usize = 0;
+    var rest = text;
+    while (n < max_in_prompt) {
+        rest = std.mem.trimStart(u8, rest, " \t");
+        if (rest.len == 0 or rest[0] != '/') break;
+        const name = tokenAt(rest[1..]);
+        if (name.len == 0) break;
+        const path = pathOf(allocator, io, home, workspace, name) orelse break;
+        paths[n] = path;
+        n += 1;
+        rest = rest[1 + name.len ..];
+    }
+    if (n == 0) return null;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (paths[0..n]) |p| {
+        defer allocator.free(p);
+        try out.print(allocator, "Read {s} and follow it.\n", .{p});
+    }
+    rest = std.mem.trimStart(u8, rest, " \t");
+    // Mid-stack skills in the task text still expand; @paths stay for mention.
+    if (try expandInline(allocator, io, home, workspace, rest)) |inner| {
+        defer allocator.free(inner);
+        try out.appendSlice(allocator, inner);
+    } else if (rest.len != 0) {
+        try out.appendSlice(allocator, rest);
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+/// Replace every word-starting `/skill` in place; leave unknown slashes alone.
+fn expandInline(
     allocator: std.mem.Allocator,
     io: Io,
     home: []const u8,
@@ -585,6 +650,57 @@ test "a prompt can name several skills at once" {
     try std.testing.expect(try expand(a, io, "", ws, "look at src/tdd for it") == null);
     // Neither is a skill nobody has.
     try std.testing.expect(try expand(a, io, "", ws, "/nope") == null);
+}
+
+test "leading skills stack and share the trailing task including @files" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = try @import("../tools/pathing.zig").testWorkspace(a, &tmp);
+    defer a.free(ws);
+    for ([_][]const u8{ "deslop", "tdd" }) |name| {
+        const dir = try std.fs.path.join(a, &.{ ws, ".agents", "skills", name });
+        defer a.free(dir);
+        try Io.Dir.cwd().createDirPath(io, dir);
+        const file = try std.fs.path.join(a, &.{ dir, "SKILL.md" });
+        defer a.free(file);
+        var f = try Io.Dir.cwd().createFile(io, file, .{ .truncate = true });
+        f.close(io);
+    }
+
+    // Claude Code shape: `/a /b args` — both skills, shared task, @path intact.
+    const stacked = (try expand(a, io, "", ws, "/deslop /tdd fix @src/main.zig")).?;
+    defer a.free(stacked);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, stacked, "Read "));
+    try std.testing.expect(std.mem.indexOf(u8, stacked, "fix @src/main.zig") != null);
+    // Stack stops at the first unknown slash token; it becomes part of the task.
+    const stop = (try expand(a, io, "", ws, "/deslop /nope keep this")).?;
+    defer a.free(stop);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, stop, "Read "));
+    try std.testing.expect(std.mem.indexOf(u8, stop, "/nope keep this") != null);
+}
+
+test "skills mid-prompt expand without a leading slash" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = try @import("../tools/pathing.zig").testWorkspace(a, &tmp);
+    defer a.free(ws);
+    const dir = try std.fs.path.join(a, &.{ ws, ".agents", "skills", "deslop" });
+    defer a.free(dir);
+    try Io.Dir.cwd().createDirPath(io, dir);
+    const file = try std.fs.path.join(a, &.{ dir, "SKILL.md" });
+    defer a.free(file);
+    var f = try Io.Dir.cwd().createFile(io, file, .{ .truncate = true });
+    f.close(io);
+
+    const mid = (try expand(a, io, "", ws, "please /deslop this @note.txt")).?;
+    defer a.free(mid);
+    try std.testing.expect(std.mem.indexOf(u8, mid, "Read ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mid, "@note.txt") != null);
+    try std.testing.expect(std.mem.startsWith(u8, mid, "please "));
 }
 
 test "missing skills dir is zero" {

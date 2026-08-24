@@ -1726,6 +1726,7 @@ pub fn run(
         deadline.setDefaultSecs(cfg.bash_timeout);
         if (cfg.keep_sessions != 0) session.prune(gpa, io, home, cfg.keep_sessions);
         state.thinking = settings.thinkingOn(cfg);
+        state.telemetry = settings.telemetryOn(cfg);
         if (cfg.statusline.len > 0) state.statusline = !std.mem.eql(u8, cfg.statusline, "off");
         if (cfg.composer.len > 0) state.composer = try arena.dupe(u8, cfg.composer);
         if (!parsed.yolo and !parsed.auto) cmds.applySurface(state, cfg.last_mode);
@@ -2452,6 +2453,13 @@ pub fn run(
                     prompt_text = again;
                 },
             }
+        }
+
+        // Skills stack with @files in one prompt: Claude-style leading `/a /b
+        // task @path`, and omp-style mid-prose `/skill` tokens. After system
+        // slash commands so `/help` stays a command, not a skill.
+        if (try skills.expand(arena, io, home, workspace, prompt_text)) |expanded| {
+            prompt_text = expanded;
         }
 
         if (try cmds.runShell(&ctx, prompt_text)) {

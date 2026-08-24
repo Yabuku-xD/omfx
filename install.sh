@@ -1,5 +1,6 @@
 #!/bin/sh
-# Install omfx. Re-run it to upgrade: it always fetches the latest release.
+# Install omfx. Prefer `omfx update` once installed; re-running this script
+# also upgrades (it always fetches the latest release unless OMFX_VERSION is set).
 #
 #   curl -fsSL https://raw.githubusercontent.com/Yabuku-xD/omfx/main/install.sh | sh
 #

@@ -68,7 +68,6 @@ pub const cycleEffort = model_pick.cycleEffort;
 const doEffort = model_pick.doEffort;
 const doModels = model_pick.doModels;
 
-
 fn ensureDir(io: Io, dir: []const u8) void {
     Io.Dir.cwd().createDirPath(io, dir) catch |err| {
         log.warn("mkdir {s}: {s}", .{ dir, @errorName(err) });
@@ -271,6 +270,10 @@ fn runCmd(ctx: *Ctx, cmd: slash.Name, rest: []const u8) !Flow {
 }
 
 fn doReload(ctx: *Ctx) !void {
+    // The skill list is scanned once at startup, so a skill added or deleted
+    // since then is only visible after this. Flagged rather than rescanned
+    // here: the list lives on the session, which owns the arena it is in.
+    ctx.state.skills_stale = true;
     ctx.state.pending.deinit(ctx.gpa);
     ctx.state.reads.deinit();
     reloadFromDisk(ctx);
@@ -279,6 +282,7 @@ fn doReload(ctx: *Ctx) !void {
     const port = settings.cdpPort(cfg);
     ctx.state.sound = settings.soundOn(cfg);
     ctx.state.thinking = settings.thinkingOn(cfg);
+    ctx.state.telemetry = settings.telemetryOn(cfg);
     if (cfg.statusline.len > 0) ctx.state.statusline = !std.mem.eql(u8, cfg.statusline, "off");
     if (cfg.composer.len > 0) ctx.state.composer = try ctx.arena.dupe(u8, cfg.composer);
     ctx.state.extra_n = 0;
@@ -385,8 +389,7 @@ fn doResume(ctx: *Ctx, id_raw: []const u8) !void {
 
 fn doRename(ctx: *Ctx, rest: []const u8) !void {
     if (rest.len == 0) {
-        if (ctx.state.session_title.len == 0) try emit(ctx, "Give the session a title: /rename <title>.")
-        else try emit(ctx, try std.fmt.allocPrint(ctx.arena, "session={s}\n", .{ctx.state.session_title}));
+        if (ctx.state.session_title.len == 0) try emit(ctx, "Give the session a title: /rename <title>.") else try emit(ctx, try std.fmt.allocPrint(ctx.arena, "session={s}\n", .{ctx.state.session_title}));
         return;
     }
     var buf: [40]u8 = undefined;
@@ -442,7 +445,6 @@ fn doLogout(ctx: *Ctx, rest: []const u8) !void {
     ctx.state.resolved = auth.resolveStored(ctx.lookup, next, ctx.flag_provider, ctx.flag_model);
     try emit(ctx, try std.fmt.allocPrint(ctx.arena, "logged out {s}\n", .{id}));
 }
-
 
 fn doFast(ctx: *Ctx, rest: []const u8) !void {
     const next = OnOff.fromRest(rest, ctx.state.fast) orelse {

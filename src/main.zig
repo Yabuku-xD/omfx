@@ -113,6 +113,28 @@ pub fn main(init: std.process.Init) !void {
             try stdout.print("omfx {s}\n", .{omfx.cli.version});
             try stdout.flush();
         },
+        .update => {
+            omfx.update.run(gpa, io, stdout, .{
+                .check = parsed.check,
+                .force = parsed.force,
+            }) catch |err| switch (err) {
+                error.NoRelease => die(stderr, parsed.json, omfx.cli.exit_fail, .{
+                    .code = "NO_RELEASE",
+                    .message = "no GitHub release published yet",
+                    .fix = "publish a release, or curl install.sh when one exists",
+                }),
+                else => {
+                    var msg_buf: [80]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&msg_buf, "update failed ({s})", .{@errorName(err)}) catch "update failed";
+                    die(stderr, parsed.json, omfx.cli.exit_fail, .{
+                        .code = "UPDATE_FAILED",
+                        .message = msg,
+                        .fix = "omfx update --check    (or set GITHUB_TOKEN)",
+                    });
+                },
+            };
+            try stdout.flush();
+        },
         .doctor => {
             const text = try omfx.run.doctorText(arena, home, model_name, provider_id);
             try stdout.writeAll(text);
@@ -138,7 +160,7 @@ pub fn main(init: std.process.Init) !void {
                 std.process.exit(omfx.cli.exit_config);
             };
             applyEffort(&endpoint, parsed.effort);
-            const prompt_text = try omfx.run.joinPrompt(arena, parsed.rest);
+            var prompt_text = try omfx.run.joinPrompt(arena, parsed.rest);
             if (prompt_text.len == 0) {
                 die(stderr, parsed.json, omfx.cli.exit_usage, .{
                     .code = "MISSING_PROMPT",
@@ -146,6 +168,10 @@ pub fn main(init: std.process.Init) !void {
                     .fix = "omfx ask \"what does src/main.zig do?\"",
                 });
             }
+            if (try omfx.skills.expand(arena, io, home, workspace, prompt_text)) |expanded| {
+                prompt_text = expanded;
+            }
+            prompt_text = try omfx.mention.expand(arena, Io.Dir.cwd(), io, workspace, prompt_text);
             const stdin_tty = Io.File.stdin().isTty(io) catch false;
             const can_prompt = parsed.prompt_permissions and stdin_tty;
             var cfg = omfx.settings.load(gpa, io, home);

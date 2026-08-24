@@ -48,6 +48,7 @@ pub const repomap = @import("core/repomap.zig");
 pub const langs = @import("core/langs.zig");
 pub const lex = @import("core/lex.zig");
 pub const diagram = @import("core/diagram.zig");
+pub const update = @import("core/update.zig");
 
 test {
     _ = ansi;
@@ -98,4 +99,5 @@ test {
     _ = recall;
     _ = trim;
     _ = diagram;
+    _ = update;
 }

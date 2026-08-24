@@ -14,6 +14,7 @@ Run `omfx` with no command to start an interactive session. `omfx --help` prints
 | `session [resume\|id]` | Session helpers (prefer `/resume` inside a session) |
 | `browser-relay [install]` | Chrome relay listener / extension files |
 | `doctor` | Runtime status |
+| `update [--check\|--force]` | Check for and install the latest GitHub release |
 | `version` | Print version |
 | `help [command]` | Help |
 
@@ -22,12 +23,13 @@ Examples:
 ```sh
 omfx ask "what does src/main.zig do?"
 omfx ask --json --provider groq "summarize this repo"
+omfx update --check
 omfx doctor
 ```
 
 ## Global flags
 
-Place flags before the command.
+Place flags before or after the command.
 
 | Flag | Purpose |
 | --- | --- |
@@ -39,6 +41,8 @@ Place flags before the command.
 | `--prompt-permissions` | Force prompts |
 | `--resume [last\|id]` | Continue a saved session |
 | `--json` | Structured output where supported (`ask`) |
+| `--check` | With `update`: report only, do not install |
+| `--force` | With `update`: reinstall even if current |
 | `-h`, `--help` | Help |
 | `-V`, `--version` | Version |
 
@@ -47,5 +51,6 @@ Place flags before the command.
 | Variable | Purpose |
 | --- | --- |
 | `OMFX_BASE_URL` | Override provider base URL |
+| `GITHUB_TOKEN` / `GH_TOKEN` | Optional auth for `omfx update` release metadata |
 | `VISUAL` / `EDITOR` | External editor for ctrl-g |
 | `HOME` | Locates `~/.omfx` |

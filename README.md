@@ -1,8 +1,7 @@
 # Oh My Fx
 
-A coding agent that stays out of the way — until it shouldn't.
-
-Native Zig core. Sticky-footer TUI. Your providers, your keys, nothing in the middle.
+A coding agent CLI that refuses to ship broken edits, spends reasoning where it
+helps, and keeps your history inspectable.
 
 **9** providers · **26** built-in tools · **23** search backends · **~3 MB** binary · **Zig 0.16**
 
@@ -14,7 +13,15 @@ Native Zig core. Sticky-footer TUI. Your providers, your keys, nothing in the mi
 curl -fsSL https://raw.githubusercontent.com/Yabuku-xD/omfx/main/install.sh | sh
 ```
 
-Re-run it to upgrade. The script verifies `SHA256SUMS` before it replaces the binary in `~/.local/bin`.
+Upgrade later with:
+
+```sh
+omfx update
+omfx update --check    # report only
+```
+
+The installer verifies `SHA256SUMS` before it replaces `~/.local/bin/omfx`. Pin a
+release with `OMFX_VERSION=<tag>`.
 
 **From source** ([Zig 0.16.0+](https://ziglang.org/download/))
 
@@ -25,70 +32,88 @@ zig build
 
 Use `./zig-out/bin/omfx` while developing — never an older `omfx` on your `PATH`.
 
-## Every turn, _harnessed_.
+## Why omfx
 
-Edits that fail the parse gate are undone, not reported. Effort `auto` spends budget where the prompt is responsive, not on the easy or the hopeless. Compaction cites what it drops so the model can still find it.
+### Parse gate
 
-| surface | what it does |
-| --- | --- |
-| sticky footer | Composer pinned; transcript scrolls above it — no modal editor, no vim mode |
-| parse gate | A write that breaks a previously clean file is rewound before the model sees “success” |
-| `auto` effort | Per-prompt reasoning level; floor on easy and hard, budget for the middle |
-| ARC compact | Local cites at `.omfx/recall/` — never an LLM rewrite of your history |
+An edit that leaves a previously clean file unparseable is undone before the
+model sees success. The agent is not rewarded for breaking the tree.
 
-## The agent surface, _complete enough to ship_.
+### Effort `auto`
 
-### 01 · Your login, not ours
+Reasoning level is chosen per prompt. Easy and hard both get the floor; the
+budget goes to the responsive middle. Two failed turns route effort down.
 
-`/login` lists model providers. OAuth where the vendor has a route; paste a key everywhere else. Credentials live in `~/.omfx/auth.json` (0600). Stored OAuth beats a leftover env var. omfx is not a gateway and has no key of its own.
+### ARC compaction
 
-### 02 · Models that match the credential
+When the context window fills, omfx cites what it drops into `.omfx/recall/` —
+local, inspectable files — instead of rewriting your history through another
+LLM call.
 
-`/models` is one command. It shows what the provider you are signed into actually lists — subscription caps and API windows included — then offers `auto` plus every reasoning level that model declares.
+### Credential-aware models
 
-### 03 · Permissions you can feel
+`/models` shows what the provider you signed into actually lists. Subscription
+windows and API keys for the same model are capped correctly. `auto` plus every
+declared reasoning level appear when the model offers them.
 
-Normal asks. Plan is read-only until `/plan go`. Yolo runs tools without prompting for this session only and is never written to disk. Shift-Tab cycles the three.
+### Permissions you can feel
 
-### 04 · Web search with a fallback chain
+Ask prompts before sensitive tools. Plan is read-only until `/plan go`. Yolo
+runs without prompts for this session only and is never written to disk.
+Shift-Tab cycles the three.
 
-`/web` configures twenty-three backends. Set an order, turn one off, `test` the chain. First working provider wins; the rest wait their turn.
+### Web search with a fallback chain
 
-### 05 · Skills, discovered
+`/web` configures twenty-three backends. Set an order, disable one, `test` the
+chain. First working provider wins.
 
-Walk the skill roots your other agent CLIs already use. Each `SKILL.md` becomes a slash command; its `description:` is the help. `/reload` rescans. No product-owned skill marketplace required.
+### Skills, discovered
 
-### 06 · Peers on a board
+Walk the skill roots your other agent CLIs already use. Each `SKILL.md` becomes
+a slash command; its `description:` is the help. `/reload` rescans. No
+product-owned marketplace required.
 
-`/peers <goal>` starts a teammate with the same tools, an isolated thread, and a shared board (`FACT` / `FAIL` / `PATH`). Depth is capped. No nested peer storms.
+### Peers on a board
 
-### 07 · Browser on tabs you already have
+`/peers <goal>` starts a teammate with the same tools, an isolated thread, and
+a shared board (`FACT` / `FAIL` / `PATH`). Depth is capped — no nested peer
+storms.
 
-`/browser` installs a Chrome relay. Keep `omfx browser-relay` listening; the extension dials localhost. No headless browser farm — existing tabs.
+### Browser on tabs you already have
 
-### 08 · MCP without the ceremony
+`/browser` installs a Chrome relay. Keep `omfx browser-relay` listening; the
+extension dials localhost. Existing tabs, not a headless farm.
 
-`/mcp` lists configured servers. Definitions stay under `~/.omfx`. Nothing ships a remote MCP gateway on your behalf.
+### MCP without a gateway
 
-### 09 · Project rules that stay cache-stable
+`/mcp` lists servers you configured under `~/.omfx`. omfx does not run a remote
+MCP gateway on your behalf.
 
-`AGENTS.md` is parsed into a harness contract (8 KiB cap), not dumped wholesale. Volatile orientation — git status, repo map — rides on the user message so the system prefix can stay byte-identical for provider caching.
+### Cache-stable project rules
 
-### 10 · Unapologetically native
+`AGENTS.md` is parsed into a harness contract (8 KiB cap), not dumped wholesale.
+Volatile orientation — git status, repo map — rides on the user message so the
+system prefix stays byte-identical for provider prompt caching.
 
-One Zig binary. Homemade ANSI TUI — press, release, and drag only, so the terminal keeps drag-select. No Node host, no TypeScript extension runtime, no second language for product features.
+### Your keys, your providers
+
+`/login` lists model providers. OAuth where the vendor has a route; paste a key
+everywhere else. Credentials live in `~/.omfx/auth.json` (0600). Stored OAuth
+beats a leftover env var. omfx is not a gateway and has no key of its own.
 
 ## Use
 
 ```
 omfx                         Interactive full-screen session
 omfx ask <prompt>            One-shot request (no alt screen)
+omfx update [--check|--force]  Install the latest GitHub release
 omfx doctor                  Runtime status
 omfx version                 Print version
 omfx help [command]          Help
 ```
 
-Inside a session: `/login`, `/models`, `/help`. Flags: `--provider`, `--model`, `--effort`, `--yolo`, `--resume`, `-h`, `-V`.
+Inside a session: `/login`, `/models`, `/help`. Flags: `--provider`, `--model`,
+`--effort`, `--yolo`, `--resume`, `-h`, `-V`.
 
 ## Docs
 

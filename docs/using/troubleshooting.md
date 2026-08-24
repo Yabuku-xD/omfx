@@ -16,6 +16,10 @@ Confirm with `omfx version`. Prefer `./zig-out/bin/omfx` when developing from th
 
 The installer refuses a tarball that does not match `SHA256SUMS`. Retry when the release assets finish uploading, or set `OMFX_VERSION` to a known-good tag.
 
+## `omfx update` fails
+
+Confirm network access to `api.github.com` and `github.com`. If you hit rate limits on release metadata, set `GITHUB_TOKEN` or `GH_TOKEN`. Prefer `omfx update --check` before installing. From a source build, `update` still installs into the detected binary directory or `~/.local/bin` — it does not replace `./zig-out/bin/omfx` unless that is where the running binary lives.
+
 ## Not signed in
 
 Run `/login` and finish OAuth or paste a key. Check `~/.omfx/auth.json` exists and is readable by your user. Stored OAuth wins over env API keys.

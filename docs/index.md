@@ -8,7 +8,13 @@ Install omfx, sign in, and run a first request.
 curl -fsSL https://raw.githubusercontent.com/Yabuku-xD/omfx/main/install.sh | sh
 ```
 
-The installer places `omfx` in `~/.local/bin`. See [Installation](getting-started/installation.md) if it is missing from your `PATH`.
+The installer places `omfx` in `~/.local/bin`. Later upgrades:
+
+```sh
+omfx update
+```
+
+See [Installation](getting-started/installation.md) if the binary is missing from your `PATH`.
 
 Or build from this tree:
 
@@ -44,6 +50,15 @@ In an interactive session, type `/` for commands. See [Slash commands](using/sla
 | Permissions | `/permissions` or Shift-Tab |
 | Status | `/status` |
 | Usage | `/usage` |
+
+## What omfx does better
+
+- **Parse gate** — a write that breaks a previously clean file is rewound before the model sees success.
+- **Effort `auto`** — reasoning budget goes to the responsive middle of the prompt, not the easy or the hopeless.
+- **ARC compact** — dropped context is cited into `.omfx/recall/`, not rewritten by another model.
+- **Credential-aware `/models`** — subscription and API windows for the same model are capped correctly.
+- **Web fallback chain** — twenty-three search backends; first that works wins.
+- **Discovered skills** — other agent CLIs' `SKILL.md` files become slash commands after `/reload`.
 
 ## What omfx asks before it acts
 

@@ -37,4 +37,14 @@ omfx --help
 
 ## Upgrade
 
-Re-run the install script. It always fetches the latest release unless `OMFX_VERSION` is set.
+```sh
+omfx update
+omfx update --check    # report whether a newer release exists
+omfx update --force    # reinstall even when already current
+```
+
+`omfx update` fetches the latest GitHub release and runs the same install path as a fresh install (checksum verified). It keeps the binary in the directory of the running executable when that can be detected, otherwise `~/.local/bin`.
+
+If GitHub rate-limits release metadata, set `GITHUB_TOKEN` or `GH_TOKEN`.
+
+You can still re-run the install script directly; it always fetches the latest release unless `OMFX_VERSION` is set.

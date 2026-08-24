@@ -1,6 +1,6 @@
 # omfx documentation
 
-> Oh My Fx (`omfx`) is a native coding agent CLI written in Zig. Sticky-footer TUI, multi-provider, local credentials. No gateway of its own.
+> Oh My Fx (`omfx`) is a coding agent CLI: parse gate, effort `auto`, ARC compaction, credential-aware models, and local credentials — no gateway of its own.
 
 Use the Markdown pages below for installation, configuration, and reference.
 
@@ -8,6 +8,7 @@ Use the Markdown pages below for installation, configuration, and reference.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Yabuku-xD/omfx/main/install.sh | sh
+omfx update --check
 omfx
 omfx ask "explain this repository"
 ```
@@ -15,7 +16,7 @@ omfx ask "explain this repository"
 ## Getting started
 
 - [Quick start](index.md): Install, sign in, and learn the commands worth knowing.
-- [Installation](getting-started/installation.md): Install or build omfx and verify the binary.
+- [Installation](getting-started/installation.md): Install, build, verify, and `omfx update`.
 - [Authentication](getting-started/authentication.md): Providers, OAuth, and API keys.
 
 ## Using omfx

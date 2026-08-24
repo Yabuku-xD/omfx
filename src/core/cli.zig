@@ -12,6 +12,7 @@ pub const Command = enum {
     login,
     session,
     browser_relay,
+    update,
     version,
     help,
 };
@@ -29,6 +30,7 @@ pub const commands = [_]Spec{
     .{ .name = "session", .tag = .session, .summary = "Prefer /session inside a session", .usage = "Prefer `/session` or `/resume` inside an interactive session.\n\nAlso:\n  omfx session\n  omfx session resume last\n  omfx session <id>" },
     .{ .name = "browser-relay", .tag = .browser_relay, .summary = "Prefer /browser inside a session", .usage = "Prefer `/browser` inside an interactive session.\n\nAlso: omfx browser-relay [install]\n  omfx browser-relay          Listen on 127.0.0.1:9224 (Chrome extension dials /ext)\n  omfx browser-relay install  Write ~/.omfx/browser-relay/extension for Load unpacked" },
     .{ .name = "doctor", .tag = .doctor, .summary = "Print runtime status", .usage = "omfx doctor" },
+    .{ .name = "update", .tag = .update, .summary = "Check for and install updates", .usage = "omfx update [--check] [--force]\n\n  omfx update         Install the latest GitHub release\n  omfx update --check  Report whether a newer release exists\n  omfx update --force  Reinstall even when already current\n\nUses the same install.sh path as a fresh install (SHA256 verified).\nIf GitHub rate-limits release metadata, set GITHUB_TOKEN or GH_TOKEN." },
     .{ .name = "version", .tag = .version, .summary = "Print version", .usage = "omfx version" },
     .{ .name = "help", .tag = .help, .summary = "Show this help", .usage = "omfx help [command]" },
 };
@@ -53,6 +55,8 @@ pub const Parsed = struct {
     want_help: bool = false,
     help_topic: ?[]const u8 = null,
     json: bool = false,
+    check: bool = false,
+    force: bool = false,
 };
 
 const Flag = enum {
@@ -70,6 +74,8 @@ const Flag = enum {
     model,
     model_eq,
     json,
+    check,
+    force,
     end_opts,
     positional,
     unknown,
@@ -91,6 +97,8 @@ fn classify(a: []const u8) Flag {
     if (std.mem.eql(u8, a, "--model")) return .model;
     if (std.mem.startsWith(u8, a, "--model=")) return .model_eq;
     if (std.mem.eql(u8, a, "--json")) return .json;
+    if (std.mem.eql(u8, a, "--check")) return .check;
+    if (std.mem.eql(u8, a, "--force")) return .force;
     if (a.len > 0 and a[0] == '-') return .unknown;
     return .positional;
 }
@@ -156,6 +164,8 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) ParseEr
             .model => parsed.model = try takeValue(args, &i),
             .model_eq => parsed.model = args[i]["--model=".len..],
             .json => parsed.json = true,
+            .check => parsed.check = true,
+            .force => parsed.force = true,
             .positional => try positionals.append(allocator, args[i]),
             .unknown => return error.UnknownFlag,
         }
@@ -204,6 +214,7 @@ pub const help_text =
     \\  ask            One-shot request (no alt screen)
     \\  browser-relay  Chrome extension relay (existing tabs)
     \\  doctor         Print runtime status
+    \\  update         Check for and install updates
     \\  version        Print version
     \\  help           Show this help
     \\
@@ -218,6 +229,8 @@ pub const help_text =
     \\      --prompt-permissions  Y/N on stderr for `omfx ask` when stdin is a TTY
     \\      --json                omfx ask emits JSONL events
     \\      --resume [last|id]    Continue a saved session
+    \\      --check               With update: report only, do not install
+    \\      --force               With update: reinstall even if current
     \\
     \\Exit:
     \\  0   ok
@@ -358,8 +371,23 @@ test "help flags" {
 }
 
 test "subcommand list is complete" {
-    try std.testing.expectEqual(@as(usize, 7), commands.len);
+    try std.testing.expectEqual(@as(usize, 8), commands.len);
     try std.testing.expectEqualStrings("ask", commands[0].name);
+}
+
+test "update flags" {
+    const a = [_][]const u8{ "omfx", "update", "--check" };
+    const p = try parseArgs(std.testing.allocator, &a);
+    defer std.testing.allocator.free(p.rest);
+    try std.testing.expectEqual(Command.update, p.command);
+    try std.testing.expect(p.check);
+    try std.testing.expect(!p.force);
+
+    const b = [_][]const u8{ "omfx", "update", "--force" };
+    const q = try parseArgs(std.testing.allocator, &b);
+    defer std.testing.allocator.free(q.rest);
+    try std.testing.expectEqual(Command.update, q.command);
+    try std.testing.expect(q.force);
 }
 
 test "known subcommands and flags" {
