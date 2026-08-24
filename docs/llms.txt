@@ -1,0 +1,40 @@
+# omfx documentation
+
+> Oh My Fx (`omfx`) is a native coding agent CLI written in Zig. Sticky-footer TUI, multi-provider, local credentials. No gateway of its own.
+
+Use the Markdown pages below for installation, configuration, and reference.
+
+## Install and run
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Yabuku-xD/omfx/main/install.sh | sh
+omfx
+omfx ask "explain this repository"
+```
+
+## Getting started
+
+- [Quick start](index.md): Install, sign in, and learn the commands worth knowing.
+- [Installation](getting-started/installation.md): Install or build omfx and verify the binary.
+- [Authentication](getting-started/authentication.md): Providers, OAuth, and API keys.
+
+## Using omfx
+
+- [CLI commands](using/cli.md): Top-level commands and global flags.
+- [Slash commands](using/slash-commands.md): Commands inside the interactive session.
+- [Sessions](using/sessions.md): Save, resume, rewind, fork, and compact.
+- [Troubleshooting](using/troubleshooting.md): Install, auth, and terminal issues.
+
+## Configure
+
+- [Configuration](configure/configuration.md): Settings files and preferences.
+- [Models](configure/models.md): Model list, effort, and last-used persistence.
+- [Permissions](configure/permissions.md): Ask, plan, yolo, allowlist, sandbox.
+
+## Capabilities
+
+- [Tools](capabilities/tools.md): Built-in agent tools.
+- [Web search](capabilities/web-search.md): `/web` backends and fallback order.
+- [Skills](capabilities/skills.md): Discovered slash skills.
+- [MCP](capabilities/mcp.md): Model Context Protocol servers.
+- [Peers](capabilities/peers.md): Teammates via `/peers`.
