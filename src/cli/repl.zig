@@ -30,6 +30,7 @@ const config = @import("../core/config.zig");
 const env = @import("../core/env.zig");
 const cli = @import("../core/cli.zig");
 const catalog = @import("../providers/catalog.zig");
+const ide_mod = @import("../core/ide.zig");
 const types = @import("../providers/types.zig");
 const pathing = @import("../tools/pathing.zig");
 const relay = @import("../tools/relay.zig");
@@ -895,6 +896,16 @@ fn settingsPanel(sess: *Session) panel_mod.Panel {
         .kind = .{ .choice = editors[0..found] },
         .value = if (cfg.editor.len == 0) editors[0] else sess.arena.dupe(u8, cfg.editor) catch editors[0],
         .help = "ctrl-g opens this; auto follows $VISUAL then $EDITOR",
+    });
+    var ides: [ide_mod.max_ides + 1][]const u8 = undefined;
+    ides[0] = "auto";
+    const ide_n = ide_mod.detect(sess.io, sess.lookup.get("PATH") orelse "", ides[1..]);
+    p.add(.{
+        .key = "ide",
+        .label = "IDE",
+        .kind = .{ .choice = ides[0 .. ide_n + 1] },
+        .value = if (cfg.ide.len == 0) ides[0] else sess.arena.dupe(u8, cfg.ide) catch ides[0],
+        .help = "/ide open launches this in your graphical editor",
     });
     p.add(.{
         .key = "bash_timeout",

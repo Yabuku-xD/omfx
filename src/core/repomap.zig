@@ -242,6 +242,262 @@ pub fn build(allocator: std.mem.Allocator, dir: Io.Dir, io: Io) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
+/// Hybrid retrieval: RepoGraph reference scores + lexical token hits + symbol
+/// names, fused with reciprocal rank fusion. No embeddings, no index on disk.
+pub const max_search_hits: usize = 32;
+const rrf_k: usize = 60;
+
+const SearchHit = struct {
+    path: []const u8,
+    sig: []const u8,
+    lex: usize = 0,
+    sym: usize = 0,
+    ref_score: u64 = 0,
+    rrf: f64 = 0,
+};
+
+fn isLower(c: u8) bool {
+    return c >= 'a' and c <= 'z';
+}
+
+fn isUpper(c: u8) bool {
+    return c >= 'A' and c <= 'Z';
+}
+
+fn pushToken(out: *[32][]const u8, n: *usize, tok: []const u8) void {
+    if (tok.len < 2 or n.* >= out.len) return;
+    for (out[0..n.*]) |existing| {
+        if (std.ascii.eqlIgnoreCase(existing, tok)) return;
+    }
+    out[n.*] = tok;
+    n.* += 1;
+}
+
+/// Split query and identifiers into searchable tokens (camelCase / snake_case).
+fn queryTokens(query: []const u8, out: *[32][]const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < query.len) {
+        while (i < query.len and !isIdentByte(query[i])) i += 1;
+        if (i >= query.len) break;
+        const start = i;
+        while (i < query.len and isIdentByte(query[i])) i += 1;
+        const word = query[start..i];
+        pushToken(out, &n, word);
+        var j: usize = 0;
+        while (j < word.len) {
+            const c = word[j];
+            if (c == '_' or c == '-') {
+                j += 1;
+                continue;
+            }
+            if (j + 1 < word.len and isLower(c) and isUpper(word[j + 1])) {
+                pushToken(out, &n, word[0 .. j + 1]);
+                j += 1;
+                continue;
+            }
+            if (j + 1 < word.len and isUpper(c) and isUpper(word[j + 1]) and j + 2 < word.len and isLower(word[j + 2])) {
+                pushToken(out, &n, word[0 .. j + 1]);
+                j += 1;
+                continue;
+            }
+            j += 1;
+        }
+        var words = std.mem.splitAny(u8, word, "_-");
+        while (words.next()) |part| pushToken(out, &n, part);
+    }
+    var spaced = std.mem.splitAny(u8, query, " \t\r\n");
+    while (spaced.next()) |w| {
+        const t = std.mem.trim(u8, w, " \t");
+        if (t.len >= 2) pushToken(out, &n, t);
+    }
+    return n;
+}
+
+fn rankLex(hits: []SearchHit, ranks: *[max_search_hits]usize, n: usize) void {
+    var order: [max_search_hits]usize = undefined;
+    var i: usize = 0;
+    while (i < n) : (i += 1) order[i] = i;
+    std.mem.sort(usize, order[0..n], hits, struct {
+        fn cmp(h: []SearchHit, a: usize, b: usize) bool {
+            const ha = h[a];
+            const hb = h[b];
+            if (ha.lex != hb.lex) return ha.lex > hb.lex;
+            return std.mem.lessThan(u8, ha.path, hb.path);
+        }
+    }.cmp);
+    i = 0;
+    while (i < n) : (i += 1) ranks[order[i]] = i + 1;
+}
+
+fn rankSym(hits: []SearchHit, ranks: *[max_search_hits]usize, n: usize) void {
+    var order: [max_search_hits]usize = undefined;
+    var i: usize = 0;
+    while (i < n) : (i += 1) order[i] = i;
+    std.mem.sort(usize, order[0..n], hits, struct {
+        fn cmp(h: []SearchHit, a: usize, b: usize) bool {
+            const ha = h[a];
+            const hb = h[b];
+            if (ha.sym != hb.sym) return ha.sym > hb.sym;
+            return std.mem.lessThan(u8, ha.path, hb.path);
+        }
+    }.cmp);
+    i = 0;
+    while (i < n) : (i += 1) ranks[order[i]] = i + 1;
+}
+
+fn rankRef(hits: []SearchHit, ranks: *[max_search_hits]usize, n: usize) void {
+    var order: [max_search_hits]usize = undefined;
+    var i: usize = 0;
+    while (i < n) : (i += 1) order[i] = i;
+    std.mem.sort(usize, order[0..n], hits, struct {
+        fn cmp(h: []SearchHit, a: usize, b: usize) bool {
+            const ha = h[a];
+            const hb = h[b];
+            if (ha.ref_score != hb.ref_score) return ha.ref_score > hb.ref_score;
+            return std.mem.lessThan(u8, ha.path, hb.path);
+        }
+    }.cmp);
+    i = 0;
+    while (i < n) : (i += 1) ranks[order[i]] = i + 1;
+}
+
+fn scoreLex(tokens: []const []const u8, path: []const u8, sigs: []const u8) usize {
+    var score: usize = 0;
+    for (tokens) |tok| {
+        if (std.mem.indexOf(u8, path, tok) != null) score += 3;
+        var count: usize = 0;
+        var at: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, sigs, at, '\n')) |nl| : (at = nl + 1) {
+            const line = sigs[at..nl];
+            if (std.ascii.indexOfIgnoreCase(line, tok) != null) count += 1;
+        }
+        if (at < sigs.len and std.ascii.indexOfIgnoreCase(sigs[at..], tok) != null) count += 1;
+        score += @min(count, 4);
+    }
+    return score;
+}
+
+fn scoreSym(tokens: []const []const u8, names: []const u64) usize {
+    var score: usize = 0;
+    for (tokens) |tok| {
+        if (tok.len < min_ident) continue;
+        const h = hash(tok);
+        for (names) |n| {
+            if (n == h) score += 5;
+        }
+    }
+    return score;
+}
+
+pub fn search(
+    allocator: std.mem.Allocator,
+    dir: Io.Dir,
+    io: Io,
+    query: []const u8,
+) ![]u8 {
+    if (query.len == 0) return error.EmptyNeedle;
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var s = Scan{
+        .files = .empty,
+        .counts = std.AutoHashMap(u64, u32).init(arena),
+    };
+
+    var root = dir.openDir(io, ".", .{ .iterate = true }) catch {
+        return allocator.dupe(u8, "(no matches)\n");
+    };
+    defer root.close(io);
+    walk(arena, root, io, "", &s);
+
+    for (s.files.items) |*f| {
+        for (f.names) |h| f.score +|= s.counts.get(h) orelse 0;
+    }
+
+    var tokens: [32][]const u8 = undefined;
+    const tok_n = queryTokens(query, &tokens);
+    if (tok_n == 0) return allocator.dupe(u8, "(no matches)\n");
+
+    var hits: [max_search_hits]SearchHit = undefined;
+    var n: usize = 0;
+    for (s.files.items) |f| {
+        if (n >= hits.len) break;
+        const lex_score = scoreLex(tokens[0..tok_n], f.path, f.sigs);
+        const sym = scoreSym(tokens[0..tok_n], f.names);
+        if (lex_score == 0 and sym == 0 and f.score == 0) continue;
+        const sig_line = blk: {
+            const nl = std.mem.indexOfScalar(u8, f.sigs, '\n') orelse f.sigs.len;
+            break :blk if (nl > 0) f.sigs[0..nl] else "";
+        };
+        hits[n] = .{
+            .path = try arena.dupe(u8, f.path),
+            .sig = sig_line,
+            .lex = lex_score,
+            .sym = sym,
+            .ref_score = f.score,
+        };
+        n += 1;
+    }
+    if (n == 0) return allocator.dupe(u8, "(no matches)\n");
+
+    var rank_lex: [max_search_hits]usize = undefined;
+    var rank_sym: [max_search_hits]usize = undefined;
+    var rank_ref: [max_search_hits]usize = undefined;
+    @memset(&rank_lex, n + 1);
+    @memset(&rank_sym, n + 1);
+    @memset(&rank_ref, n + 1);
+    rankLex(hits[0..n], &rank_lex, n);
+    rankSym(hits[0..n], &rank_sym, n);
+    rankRef(hits[0..n], &rank_ref, n);
+
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const rl = rank_lex[i];
+        const rs = rank_sym[i];
+        const rr = rank_ref[i];
+        hits[i].rrf = 1.0 / @as(f64, @floatFromInt(rrf_k + rl)) +
+            1.0 / @as(f64, @floatFromInt(rrf_k + rs)) +
+            1.0 / @as(f64, @floatFromInt(rrf_k + rr));
+    }
+
+    std.mem.sort(SearchHit, hits[0..n], {}, struct {
+        fn cmp(_: void, a: SearchHit, b: SearchHit) bool {
+            if (a.rrf != b.rrf) return a.rrf > b.rrf;
+            return std.mem.lessThan(u8, a.path, b.path);
+        }
+    }.cmp);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "semantic_search (hybrid: repo rank + symbols + tokens)\n");
+    for (hits[0..n]) |h| {
+        if (h.sig.len > 0) {
+            try out.print(allocator, "{s}\n  {s}\n", .{ h.path, std.mem.trim(u8, h.sig, " \t") });
+        } else {
+            try out.appendSlice(allocator, h.path);
+            try out.append(allocator, '\n');
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+test "search finds files by symbol reference and token" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFile(tmp.dir, io, "hot.zig", "pub fn sharedHelper() void {}\n");
+    try writeFile(tmp.dir, io, "cold.zig", "pub fn lonelyThing() void {}\n");
+    try writeFile(tmp.dir, io, "one.zig", "pub fn useA() void { sharedHelper(); }\n");
+    try writeFile(tmp.dir, io, "two.zig", "pub fn useB() void { sharedHelper(); }\n");
+    const got = try search(a, tmp.dir, io, "sharedHelper");
+    defer a.free(got);
+    try std.testing.expect(std.mem.indexOf(u8, got, "hot.zig") != null);
+}
+
 test "the map ranks by how often a file's names are used elsewhere" {
     const a = std.testing.allocator;
     const io = std.testing.io;

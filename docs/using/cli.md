@@ -22,7 +22,7 @@ Examples:
 
 ```sh
 omfx ask "what does src/main.zig do?"
-omfx ask --json --provider groq "summarize this repo"
+omfx ask --json --provider anthropic-api "summarize this repo"
 omfx update --check
 omfx doctor
 ```
@@ -54,3 +54,4 @@ Place flags before or after the command.
 | `GITHUB_TOKEN` / `GH_TOKEN` | Optional auth for `omfx update` release metadata |
 | `VISUAL` / `EDITOR` | External editor for ctrl-g |
 | `HOME` | Locates `~/.omfx` |
+| `PATH` | IDE and language-server discovery (`/ide`, one-shot LSP) |

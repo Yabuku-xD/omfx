@@ -20,6 +20,8 @@ const commands = @import("../core/commands.zig");
 const context = @import("../core/context.zig");
 const mention = @import("../core/mention.zig");
 const runlog = @import("../core/runlog.zig");
+const ide_mod = @import("../core/ide.zig");
+const plugins = @import("../core/plugins.zig");
 const menus = @import("menus.zig");
 const tui = @import("tui.zig");
 const run = @import("run.zig");
@@ -265,6 +267,8 @@ fn runCmd(ctx: *Ctx, cmd: slash.Name, rest: []const u8) !Flow {
         .rewind => if (rest.len == 0) return .{ .panel = .rewind } else try doRewind(ctx, rest),
         .fork => try doFork(ctx),
         .handoff => try doHandoff(ctx),
+        .ide => try doIde(ctx, rest),
+        .plugin => try emit(ctx, try plugins.run(ctx.arena, ctx.io, ctx.home, rest)),
     }
     return .handled;
 }
@@ -646,7 +650,7 @@ pub fn applySetting(ctx: *Ctx, pair: []const u8) !bool {
     } else if (settings.Pref.fromSlice(key)) |pref| {
         // `auto` is omfx's own level: stored as empty, because it is resolved
         // per prompt rather than sent.
-        const stored = if ((pref == .effort or pref == .editor) and std.mem.eql(u8, value, auto_effort)) "" else value;
+        const stored = if ((pref == .effort or pref == .editor or pref == .ide) and std.mem.eql(u8, value, auto_effort)) "" else value;
         try settings.setPref(ctx.gpa, ctx.io, ctx.home, pref, stored);
     } else return false;
 
@@ -659,12 +663,13 @@ pub fn applySetting(ctx: *Ctx, pair: []const u8) !bool {
     if (std.mem.eql(u8, key, "composer") and value.len > 0) ctx.state.composer = try ctx.arena.dupe(u8, value);
     // "auto" is how the panel spells unset: fall back to $VISUAL then $EDITOR.
     if (std.mem.eql(u8, key, "editor")) ctx.state.editor = if (std.mem.eql(u8, value, "auto")) "" else try ctx.arena.dupe(u8, value);
+    if (std.mem.eql(u8, key, "ide")) ctx.state.ide = if (std.mem.eql(u8, value, "auto")) "" else try ctx.arena.dupe(u8, value);
     if (std.mem.eql(u8, key, "bash_timeout")) deadline.setDefaultSecs(std.fmt.parseInt(u32, value, 10) catch 0);
     if (std.mem.eql(u8, key, "effort")) ctx.state.effort = if (std.mem.eql(u8, value, auto_effort)) "" else try ctx.arena.dupe(u8, value);
     return true;
 }
 
-const settings_usage = "usage: /settings <key>=<value>\n  sound thinking telemetry statusline sandbox mode composer editor\n  review cdp_port effort bash_timeout keep_sessions max_peer_depth\n";
+const settings_usage = "usage: /settings <key>=<value>\n  sound thinking telemetry statusline sandbox mode composer editor ide\n  review cdp_port effort bash_timeout keep_sessions max_peer_depth\n";
 
 fn doSettings(ctx: *Ctx, rest: []const u8) !void {
     if (rest.len > 0) {
@@ -1293,6 +1298,38 @@ fn doHandoff(ctx: *Ctx) !void {
         log.warn("handoff flush: {s}", .{@errorName(err)});
     };
     try emit(ctx, try std.fmt.allocPrint(ctx.arena, "handoff {s}\n/resume {s}\n", .{ id, id }));
+}
+
+fn doIde(ctx: *Ctx, rest: []const u8) !void {
+    const trimmed = std.mem.trim(u8, rest, " \t");
+    const path_env = ctx.lookup.get("PATH") orelse "";
+    if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "open")) {
+        var cfg = settings.load(ctx.gpa, ctx.io, ctx.home);
+        defer cfg.deinit(ctx.gpa);
+        try emit(ctx, try ide_mod.open(ctx.arena, ctx.io, path_env, ctx.workspace, cfg.ide));
+        return;
+    }
+    if (std.mem.eql(u8, trimmed, "list")) {
+        var found: [ide_mod.max_ides][]const u8 = undefined;
+        const n = ide_mod.detect(ctx.io, path_env, &found);
+        if (n == 0) {
+            try emit(ctx, "no IDE binaries on PATH (code, cursor, zed, windsurf, …)\n");
+            return;
+        }
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(ctx.arena);
+        try out.appendSlice(ctx.arena, "IDEs on PATH:\n");
+        for (found[0..n]) |id| {
+            try out.appendSlice(ctx.arena, "  ");
+            try out.appendSlice(ctx.arena, id);
+            try out.append(ctx.arena, '\n');
+        }
+        try emit(ctx, try out.toOwnedSlice(ctx.arena));
+        return;
+    }
+    try settings.setPref(ctx.gpa, ctx.io, ctx.home, .ide, trimmed);
+    ctx.state.ide = try ctx.arena.dupe(u8, trimmed);
+    try emit(ctx, try std.fmt.allocPrint(ctx.arena, "IDE set to {s}. /ide open launches it.\n", .{trimmed}));
 }
 
 test "reload report names every surface" {

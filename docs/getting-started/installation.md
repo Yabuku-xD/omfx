@@ -10,7 +10,7 @@ curl -fsSL https://raw.githubusercontent.com/Yabuku-xD/omfx/main/install.sh | sh
 
 By default the binary lands in `~/.local/bin/omfx`. Override with `OMFX_BIN_DIR`. Pin a release with `OMFX_VERSION=<tag>`.
 
-Supported targets: macOS and Linux, `aarch64` and `x86_64`. The script checks `SHA256SUMS` before installing.
+Supported targets: macOS and Linux, `aarch64` and `x86_64`. The script checks `SHA256SUMS` before installing. Language servers and IDE CLIs used by omfx are not installed by this script — add them to `PATH` yourself if you want one-shot LSP or `/ide open`.
 
 If the shell cannot find `omfx`:
 

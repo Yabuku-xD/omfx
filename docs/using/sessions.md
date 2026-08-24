@@ -4,7 +4,7 @@ Save, resume, rewind, fork, and compact conversation history.
 
 ## Where sessions live
 
-Session files are under `~/.omfx/sessions/`. The live thread is `last.jsonl`. Workspace-local state (playbook, recall, drafts) appears under `.omfx/` in the workspace only when written.
+Session files are under `~/.omfx/sessions/`. The live thread is `last.jsonl`. Workspace-local state (playbook, board, recall, memory, drafts) appears under `.omfx/` in the workspace only when written.
 
 ## Resume
 
@@ -32,9 +32,11 @@ Bare `/resume` opens the sessions panel. Outside the TUI: `omfx session resume l
 - `/fork` — copy the session to a new id; keep working here
 - `/handoff` — start a new session with a brief of the current goal
 
-## Compact
+## Compact and recall
 
-`/compact` runs local ARC compaction. Dropped tool bodies become cites under `.omfx/recall/`. Compaction never encrypts and never stops the agent loop.
+`/compact` runs local ARC compaction. Dropped tool bodies become cites under `.omfx/recall/` — inspectable files, not an LLM rewrite of your history. Compaction never encrypts and never stops the agent loop.
+
+Memory (workspace and user) is reinjected every turn and survives compaction.
 
 ## Keep
 

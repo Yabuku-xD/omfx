@@ -36,6 +36,8 @@ Use `./zig-out/bin/omfx` while developing — never an older `omfx` on your `PAT
 
 **Parse gate** — broken edits are undone before the model sees success. Thirty-six
 languages, one check table; verify after writes and feed the playbook on clean runs.
+When a language server is already on PATH, one-shot LSP diagnostics append after a
+clean parse — no daemon, nothing bundled.
 
 **Effort auto** — reasoning budget follows the prompt, not a fixed default. Easy and
 hard get the floor; the responsive middle gets the spend. Two failures route down.
@@ -71,9 +73,17 @@ first working provider wins.
 **Skills** — discovered from your other agent CLIs, stackable in one prompt or
 mid-sentence, with file anchors inline. Reload rescans.
 
+**External IDE** — `/ide open` launches code, cursor, zed, and friends on the
+workspace. Separate from ctrl-g's terminal editor.
+
+**Plugins** — Claude-compatible marketplaces via `/plugin marketplace add`.
+
 **Browser relay** — your open Chrome tabs via a local listener, not a headless farm.
 
-**MCP** — your configured servers only; no remote gateway.
+**MCP** — your configured servers only; no remote gateway. Many servers allowed.
+
+**Hybrid search** — `semantic_search` fuses repo rank, symbols, and tokens. No
+embeddings required.
 
 **Sessions** — save, resume, rewind, fork, handoff, undo. Background shell runs
 survive clear.
@@ -108,7 +118,10 @@ Inside a session: `/login`, `/models`, `/help`. Flags: `--provider`, `--model`,
 - [Documentation index](docs/llms.txt)
 - [Slash commands](docs/using/slash-commands.md)
 - [Sessions](docs/using/sessions.md)
+- [Tools](docs/capabilities/tools.md)
 - [Peers and board](docs/capabilities/peers.md)
+- [IDE](docs/capabilities/ide.md)
+- [Plugins](docs/capabilities/plugins.md)
 - [Configuration](docs/configure/configuration.md)
 
 ## License

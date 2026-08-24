@@ -46,6 +46,8 @@ pub const Name = enum {
     rewind,
     fork,
     handoff,
+    ide,
+    plugin,
 
     pub fn fromToken(token: []const u8) ?Name {
         if (token.len < 2 or token[0] != '/') return null;
@@ -126,6 +128,8 @@ pub const builtin = [_]Spec{
     .{ .name = "/reload", .help = "reload settings, auth, reads, relay" },
     .{ .name = "/background", .help = "list background commands", .args = "[id]" },
     .{ .name = "/mcp", .help = "list MCP servers", .args = "[name]" },
+    .{ .name = "/ide", .help = "open workspace in your IDE", .args = "[open|<ide>]" },
+    .{ .name = "/plugin", .help = "plugin marketplaces (Claude-compatible)", .args = "[list|marketplace add|install]" },
     .{ .name = "/init", .help = "scaffold AGENTS.md from the repo", .args = "[path]" },
     .{ .name = "/workspace", .help = "show workspace; add extra dirs", .args = "[path]" },
     .{ .name = "/undo", .help = "undo the most recent tracked file change" },
@@ -182,7 +186,7 @@ pub const groups = [_]Group{
     .{ .title = "Session", .names = &.{ "/help", "/clear", "/reset", "/resume", "/continue", "/rename", "/compact", "/rewind", "/fork", "/handoff", "/quit" } },
     .{ .title = "Account / model", .names = &.{ "/login", "/logout", "/models", "/fast", "/permissions", "/allowlist", "/sandbox", "/yolo", "/effort", "/plan" } },
     .{ .title = "Inspect", .names = &.{ "/status", "/stats", "/usage", "/context", "/shortcuts", "/settings", "/appearance", "/statusline", "/sound", "/thinking", "/version" } },
-    .{ .title = "Tools", .names = &.{ "/web", "/browser", "/reload", "/background", "/mcp", "/init", "/workspace", "/undo", "/copy", "/diagram", "/feedback", "/trace", "/peers" } },
+    .{ .title = "Tools", .names = &.{ "/web", "/browser", "/reload", "/background", "/mcp", "/ide", "/plugin", "/init", "/workspace", "/undo", "/copy", "/diagram", "/feedback", "/trace", "/peers" } },
 };
 
 fn specNamed(specs: []const Spec, name: []const u8) ?Spec {

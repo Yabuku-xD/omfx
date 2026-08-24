@@ -372,7 +372,7 @@ const tool_defs = [_]ToolDef{
     .{ .name = "rename", .description = "Rename or move a file", .parameters = "{\"type\":\"object\",\"properties\":{\"from\":{\"type\":\"string\"},\"to\":{\"type\":\"string\"}},\"required\":[\"from\",\"to\"]}" },
     .{ .name = "file_info", .description = "File or directory metadata", .parameters = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}" },
     .{ .name = "open_file", .description = "Open a local file in the OS default app", .parameters = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}" },
-    .{ .name = "semantic_search", .description = "Lexical keyword search when the exact symbol is unknown", .parameters = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}" },
+    .{ .name = "semantic_search", .description = "Hybrid repo search: reference rank, symbols, and tokens (no embeddings)", .parameters = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}" },
     .{ .name = "web_fetch", .description = "Fetch text from a public HTTP URL", .parameters = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}" },
     .{ .name = "web_search", .description = "Search the web using the user fallback providers", .parameters = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}" },
     .{ .name = "ask_user", .description = "Ask the user a question", .parameters = "{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\"}},\"required\":[\"question\"]}" },

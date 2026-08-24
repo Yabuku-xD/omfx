@@ -19,6 +19,7 @@ pub const mcp = @import("mcp.zig");
 pub const undo = @import("undo.zig");
 pub const patch = @import("patch.zig");
 pub const gate = @import("gate.zig");
+pub const lsp = @import("lsp.zig");
 pub const isolate = @import("isolate.zig");
 pub const confine = @import("confine.zig");
 
@@ -36,6 +37,7 @@ test {
     _ = web;
     _ = web_search;
     _ = diag;
+    _ = lsp;
     _ = symbols;
     _ = memory;
     _ = cdp;

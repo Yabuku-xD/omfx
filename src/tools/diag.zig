@@ -5,6 +5,7 @@ const deadline = @import("deadline.zig");
 const bash = @import("bash.zig");
 const langs = @import("../core/langs.zig");
 const lex = @import("../core/lex.zig");
+const lsp = @import("lsp.zig");
 
 const log = std.log.scoped(.diag);
 
@@ -136,7 +137,32 @@ pub fn reviewPrompt(diff: []const u8) []const u8 {
 /// which is why every language in the table gets an answer rather than the
 /// dozen or so with a parser on this machine.
 /// After write/edit. Empty/unavailable is not clean.
+///
+/// Parse probe first (what the edit gate reads). When that is clean and a
+/// language server is on PATH, append one-shot LSP diagnostics under `lsp:`
+/// so type errors inform the model without undoing the edit.
 pub fn afterWrite(
+    allocator: std.mem.Allocator,
+    io: Io,
+    workspace: []const u8,
+    dir: Io.Dir,
+    rel: []const u8,
+) ![]u8 {
+    const parse = try afterWriteParse(allocator, io, workspace, dir, rel);
+    if (!isClean(parse)) return parse;
+    const lsp_note = lsp.diagnose(allocator, io, workspace, dir, rel) catch null;
+    const extra = lsp_note orelse return parse;
+    defer allocator.free(extra);
+    const joined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ parse, extra });
+    allocator.free(parse);
+    return joined;
+}
+
+fn isClean(note: []const u8) bool {
+    return std.mem.startsWith(u8, note, "diagnostics: clean");
+}
+
+fn afterWriteParse(
     allocator: std.mem.Allocator,
     io: Io,
     workspace: []const u8,

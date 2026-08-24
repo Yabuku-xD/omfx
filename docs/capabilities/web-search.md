@@ -4,7 +4,7 @@ Configure search backends with `/web`.
 
 Keys and enable/disable state live in `~/.omfx/auth.json`. Fallback order lives in `~/.omfx/settings.json`.
 
-Examples inside `/web`:
+Twenty-three backends are available (API, OAuth-backed, endpoint, and free). Examples inside `/web`:
 
 - Numbered pick of backends
 - `order exa,tavily,duckduckgo` — try in that order

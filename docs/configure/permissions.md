@@ -26,3 +26,10 @@ Shift-Tab cycles normal → plan → yolo. Yolo is never written to disk.
 ## Sandbox
 
 `/sandbox on|off` toggles the OS sandbox on bash (network denied when on). Prefer the settings panel for the same control.
+
+- macOS: seatbelt
+- Linux: landlock or bubblewrap when available
+
+## Parse gate vs permissions
+
+Permissions decide *whether* a tool may run. The parse gate decides *whether a write stands*: an edit that breaks a previously clean file is undone regardless of yolo. LSP type diagnostics (`lsp:`) never undo an edit.

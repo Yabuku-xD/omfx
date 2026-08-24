@@ -25,8 +25,23 @@ peers sync when summaries diverge enough to matter.
 When git is available, a peer may use a worktree under `.omfx/peers/`; otherwise
 it shares the workspace and relies on the board for isolation.
 
-## Playbook and memory
+## Playbook
 
-Verified work also feeds `.omfx/playbook.jsonl` (helpful/harmful lessons).
-Long-lived facts belong in `.omfx/memory.md` or the user `memory` store under
-`~/.omfx/`. See [Tools](tools.md).
+Verified work feeds `.omfx/playbook.jsonl` — helpful and harmful lessons,
+incremental items rather than a rewritten paragraph. Clean verifies can record
+entries even in a solo session with no board notes. Repeated verified facts may
+graduate into workspace skills under `.omfx/skills/`.
+
+## Memory
+
+Long-lived facts the model should see every turn:
+
+| Store | Where | How |
+| --- | --- | --- |
+| Workspace | `.omfx/memory.md` | Edit by hand or let the agent write |
+| User | `~/.omfx/memory.jsonl` | `memory` tool: save / list / clear |
+
+Both survive compaction and are reinjected into the prompt. They are separate
+from the board (coordination) and the playbook (verified lessons).
+
+See [Tools](tools.md).

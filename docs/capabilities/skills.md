@@ -10,16 +10,24 @@ omfx walks known agent skill roots under your home directory (one and two levels
 
 rescans. Built-in system commands still own the slash line when they match first.
 
+## Where skills are found
+
+Workspace and home trees participate, including roots used by other agent CLIs (for example `.claude/skills`, `.agents/skills`, `.codex/skills`, `.omfx/skills`). Dot-directories are skipped when walking. Verified playbook facts may also graduate into workspace skills under `.omfx/skills/`.
+
 ## Stacking skills and files
 
 Other CLIs converge on the same idea: name several skills in one prompt, keep the rest of the line as the task, and attach files with `@`.
 
 | Shape | Example | Behaviour |
 | --- | --- | --- |
-| Leading stack (Claude Code) | `/deslop /tdd fix @src/main.zig` | Consecutive known skills at the start expand; everything after is the shared task, including `@paths` |
-| Mid-prompt (omp-style) | `please /deslop this @note.txt` | Each `/skill` in prose expands in place; `@files` still inject |
-| Codex | `$skill` + `@file` | Multiple skill mentions mean use them all; files are anchors |
+| Leading stack | `/deslop /tdd fix @src/main.zig` | Consecutive known skills at the start expand; everything after is the shared task, including `@paths` |
+| Mid-prompt | `please /deslop this @note.txt` | Each `/skill` in prose expands in place; `@files` still inject |
+| Codex-style | `$skill` + `@file` | Multiple skill mentions mean use them all; files are anchors |
 
-omfx follows the Claude leading stack and the mid-prompt form. Expansion stops at the first token that is not a known skill. Cap is eight skills per prompt. Skill bodies stay on disk (`Read …/SKILL.md and follow it`) so context stays progressive, like Codex.
+omfx follows the leading stack and the mid-prompt form. Expansion stops at the first token that is not a known skill. Cap is eight skills per prompt. Skill bodies stay on disk (`Read …/SKILL.md and follow it`) so context stays progressive.
 
-Workspace and home `skills/` directories participate. A sample skill ships at `skills/hello-omfx/` in this repository.
+A sample skill ships at `skills/hello-omfx/` in this repository.
+
+## Plugins
+
+Curated catalogs use `/plugin marketplace add`. Day-to-day skills usually need no marketplace. See [Plugins](plugins.md).

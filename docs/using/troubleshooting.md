@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Common install, auth, and terminal problems.
+Common install, auth, diagnostics, and terminal problems.
 
 ## `omfx: command not found`
 
@@ -42,6 +42,22 @@ Mouse support is press, release, and drag only — not any-event tracking — so
 
 Check `/permissions` and `/allowlist`. Plan mode blocks writes until `/plan go`. Yolo is session-only.
 
+## Edits undone after write
+
+The parse gate undoes an edit that left a previously clean file unparseable. Read the file again and make the edit whole. Type errors from `lsp:` lines do not undo the edit — only `diagnostics: findings` does.
+
+## No `lsp:` lines after edits
+
+One-shot LSP runs only after a clean parse, and only when that language's server is on `PATH` (for example `zls`, `gopls`, `rust-analyzer`, `typescript-language-server`). Missing binaries are skipped silently. Install the server you care about; omfx never bundles one.
+
+## `/ide open` finds nothing
+
+Install the editor's shell command (`code`, `cursor`, `zed`, …) so it appears on `PATH`. `/ide list` shows what omfx can see. Pin with `/ide cursor` or `/settings ide=cursor`.
+
+## MCP server missing
+
+Confirm the entry under `mcp` in `~/.omfx/settings.json` and that the `command` is on `PATH`. `/mcp` lists configured servers.
+
 ## Still stuck
 
-`/doctor` (or `omfx doctor`), `/trace`, and `/feedback` collect local diagnostics. Traces stay on disk and do not upload prompts by default.
+`omfx doctor`, `/trace`, and `/feedback` collect local diagnostics. Traces stay on disk and do not upload prompts by default.

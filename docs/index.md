@@ -49,20 +49,24 @@ In an interactive session, type `/` for commands. See [Slash commands](using/sla
 | Choose a model | `/models` |
 | Permissions | `/permissions` or Shift-Tab |
 | Context window | `/context` |
+| Open IDE | `/ide open` |
 | Status | `/status` |
 | Usage | `/usage` |
 
 ## What omfx does better
 
 - **Parse gate** — a write that breaks a previously clean file is rewound before the model sees success.
+- **One-shot LSP** — after a clean parse, diagnostics from a language server already on PATH (nothing bundled, no daemon).
 - **Effort `auto`** — reasoning budget follows the prompt, not a fixed default.
-- **ARC compact + recall** — dropped context is cited into `.omfx/recall/`, not rewritten by another model.
-- **Memory + playbook** — `.omfx/memory.md`, user jsonl facts, and verified lessons in `.omfx/playbook.jsonl`.
-- **Shared board** — `FACT` / `FAIL` / `PATH` notes in `.omfx/board.jsonl` for peers and coordination.
+- **ARC compact + recall** — dropped context is cited into inspectable recall files, not rewritten by another model.
+- **Hybrid semantic search** — repo-rank + symbols + tokens fused; no embeddings required.
+- **Memory + playbook** — workspace and user facts, plus verified lessons that can graduate into skills.
+- **Shared board** — structured notes for facts, failures, and paths for peers and coordination.
 - **Ranked repo map** — orientation by symbol references, not directory walk order.
 - **Credential-aware `/models`** — subscription and API windows capped correctly.
 - **Stacked skills + `@files`** — several skills and file anchors in one prompt.
 - **Web fallback chain** — twenty-three search backends; first that works wins.
+- **External IDE** — `/ide open` launches code, cursor, zed, and friends on the workspace.
 
 ## What omfx asks before it acts
 
@@ -73,6 +77,7 @@ In normal mode, sensitive tools prompt before they run. Plan mode is read-only. 
 - [CLI commands](using/cli.md)
 - [Sessions](using/sessions.md)
 - [Peers](capabilities/peers.md)
+- [Tools](capabilities/tools.md)
 - [Configuration](configure/configuration.md)
 - [Troubleshooting](using/troubleshooting.md)
 

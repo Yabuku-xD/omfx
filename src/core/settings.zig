@@ -35,8 +35,9 @@ pub const Web = struct {
 };
 
 pub const max_rules: usize = 32;
-pub const max_mcp: usize = 4;
-pub const max_mcp_args: usize = 8;
+/// Tripwire for a settings file that stopped being configuration.
+pub const max_mcp: usize = 128;
+pub const max_mcp_args: usize = 32;
 
 pub const McpServer = struct {
     name: []const u8 = "",
@@ -74,6 +75,10 @@ pub const File = struct {
     effort: []const u8 = "",
     /// Editor for ctrl-g. Empty follows $VISUAL then $EDITOR then vi.
     editor: []const u8 = "",
+    /// Graphical IDE for `/ide open`. Empty means the first one found on PATH.
+    ide: []const u8 = "",
+    /// GitHub owner/repo or URL entries for `/plugin marketplace add`.
+    plugin_marketplaces: []const []const u8 = &.{},
     /// Seconds a bash command may run. Zero means `deadline.default_secs`.
     bash_timeout: u32 = 0,
     /// Saved sessions kept on disk. Zero means keep every one.
@@ -88,6 +93,7 @@ pub const File = struct {
         if (self.web.exclude.len > 0) allocator.free(self.web.exclude);
         if (self.rules.len > 0) allocator.free(self.rules);
         if (self.workspace_dirs.len > 0) allocator.free(self.workspace_dirs);
+        if (self.plugin_marketplaces.len > 0) allocator.free(self.plugin_marketplaces);
         if (self.mcp.len > 0) allocator.free(self.mcp);
         if (self.raw.len > 0) allocator.free(self.raw);
         self.* = .{};
@@ -149,12 +155,15 @@ pub fn parse(allocator: std.mem.Allocator, json: []const u8) !File {
     const rule_n = extractPermRules(raw, &rule_store);
     const rules = try allocator.dupe(permissions.Rule, rule_store[0..rule_n]);
     errdefer allocator.free(rules);
-    var mcp_store: [max_mcp]McpServer = undefined;
-    const mcp_n = extractMcp(raw, &mcp_store);
-    const mcp = try allocator.dupe(McpServer, mcp_store[0..mcp_n]);
+    const mcp = try extractMcp(allocator, raw);
+    errdefer allocator.free(mcp);
     var dirs_store: [max_ids][]const u8 = undefined;
     const dirs_n = extractArray(raw, "workspace_dirs", &dirs_store);
     const workspace_dirs = try allocator.dupe([]const u8, dirs_store[0..dirs_n]);
+    var market_store: [max_ids][]const u8 = undefined;
+    const market_n = extractArray(raw, "plugin_marketplaces", &market_store);
+    const plugin_marketplaces = try allocator.dupe([]const u8, market_store[0..market_n]);
+    errdefer allocator.free(plugin_marketplaces);
     return .{
         .raw = raw,
         .web = .{
@@ -174,10 +183,12 @@ pub fn parse(allocator: std.mem.Allocator, json: []const u8) !File {
         .thinking = Toggle.fromSlice(extractString(raw, "thinking")),
         .telemetry = Toggle.fromSlice(extractString(raw, "telemetry")),
         .workspace_dirs = workspace_dirs,
+        .plugin_marketplaces = plugin_marketplaces,
         .mcp = mcp,
         .max_peer_depth = extractU8(raw, "max_peer_depth", 1),
         .effort = extractString(raw, "effort"),
         .editor = extractString(raw, "editor"),
+        .ide = extractString(raw, "ide"),
         .bash_timeout = extractU32(raw, "bash_timeout"),
         .keep_sessions = extractU32(raw, "keep_sessions"),
 
@@ -215,10 +226,10 @@ fn extractU32(json: []const u8, key: []const u8) u32 {
     return std.fmt.parseInt(u32, json[i..j], 10) catch 0;
 }
 
-fn extractMcp(json: []const u8, out: *[max_mcp]McpServer) usize {
-    const key = std.mem.indexOf(u8, json, "\"mcp\"") orelse return 0;
+fn extractMcp(allocator: std.mem.Allocator, json: []const u8) ![]McpServer {
+    const key = std.mem.indexOf(u8, json, "\"mcp\"") orelse return &.{};
     const rest = json[key..];
-    const lb = std.mem.indexOfScalar(u8, rest, '[') orelse return 0;
+    const lb = std.mem.indexOfScalar(u8, rest, '[') orelse return &.{};
     var depth: i32 = 0;
     var rb: usize = lb;
     for (rest[lb..], lb..) |c, idx| {
@@ -231,11 +242,12 @@ fn extractMcp(json: []const u8, out: *[max_mcp]McpServer) usize {
             }
         }
     }
-    if (rb <= lb) return 0;
+    if (rb <= lb) return &.{};
     const inner = rest[lb + 1 .. rb];
-    var n: usize = 0;
+    var list: std.ArrayList(McpServer) = .empty;
+    errdefer list.deinit(allocator);
     var i: usize = 0;
-    while (i < inner.len and n < max_mcp) {
+    while (i < inner.len and list.items.len < max_mcp) {
         const ob = std.mem.indexOfScalarPos(u8, inner, i, '{') orelse break;
         const cb = std.mem.indexOfScalarPos(u8, inner, ob, '}') orelse break;
         const obj = inner[ob .. cb + 1];
@@ -250,12 +262,11 @@ fn extractMcp(json: []const u8, out: *[max_mcp]McpServer) usize {
         server.argv_n = @min(args_n, max_mcp_args);
         if (server.command.len > 0) {
             if (server.name.len == 0) server.name = server.command;
-            out[n] = server;
-            n += 1;
+            try list.append(allocator, server);
         }
         i = cb + 1;
     }
-    return n;
+    return try list.toOwnedSlice(allocator);
 }
 
 fn extractPermRules(json: []const u8, out: *[max_rules]permissions.Rule) usize {
@@ -364,6 +375,11 @@ pub fn encodeFile(allocator: std.mem.Allocator, file: File) ![]u8 {
     if (file.max_peer_depth != 1) try w.print(",\n  \"max_peer_depth\": {d}", .{file.max_peer_depth});
     if (file.effort.len > 0) try w.print(",\n  \"effort\": \"{s}\"", .{file.effort});
     if (file.editor.len > 0) try w.print(",\n  \"editor\": \"{s}\"", .{file.editor});
+    if (file.ide.len > 0) try w.print(",\n  \"ide\": \"{s}\"", .{file.ide});
+    if (file.plugin_marketplaces.len > 0) {
+        try w.writeAll(",\n  \"plugin_marketplaces\": ");
+        try writeQuotedList(w, file.plugin_marketplaces);
+    }
     if (file.bash_timeout != 0) try w.print(",\n  \"bash_timeout\": {d}", .{file.bash_timeout});
     if (file.keep_sessions != 0) try w.print(",\n  \"keep_sessions\": {d}", .{file.keep_sessions});
 
@@ -454,6 +470,8 @@ fn copyMeta(file: File, web: Web) File {
         .max_peer_depth = file.max_peer_depth,
         .effort = file.effort,
         .editor = file.editor,
+        .ide = file.ide,
+        .plugin_marketplaces = file.plugin_marketplaces,
         .bash_timeout = file.bash_timeout,
         .keep_sessions = file.keep_sessions,
 
@@ -522,6 +540,7 @@ pub const Pref = enum {
     sound,
     effort,
     editor,
+    ide,
     statusline,
     composer,
     review,
@@ -559,6 +578,7 @@ pub fn setPref(allocator: std.mem.Allocator, io: Io, home: []const u8, key: Pref
         .sound => merged.sound = value,
         .effort => merged.effort = value,
         .editor => merged.editor = value,
+        .ide => merged.ide = value,
         .statusline => merged.statusline = value,
         .composer => merged.composer = value,
         .review => merged.review = value,
@@ -603,6 +623,23 @@ pub fn setLastChat(
     merged.last_provider = provider;
     merged.last_model = model;
     merged.last_mode = mode;
+    const body = try encodeFile(allocator, merged);
+    defer allocator.free(body);
+    try writePath(allocator, io, home, body);
+}
+
+pub fn addPluginMarketplace(allocator: std.mem.Allocator, io: Io, home: []const u8, id: []const u8) !void {
+    var file = load(allocator, io, home);
+    defer file.deinit(allocator);
+    for (file.plugin_marketplaces) |m| {
+        if (std.mem.eql(u8, m, id)) return;
+    }
+    var store: [max_ids][]const u8 = undefined;
+    const n = @min(file.plugin_marketplaces.len, store.len - 1);
+    @memcpy(store[0..n], file.plugin_marketplaces[0..n]);
+    store[n] = id;
+    var merged = copyMeta(file, file.web);
+    merged.plugin_marketplaces = store[0 .. n + 1];
     const body = try encodeFile(allocator, merged);
     defer allocator.free(body);
     try writePath(allocator, io, home, body);

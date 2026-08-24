@@ -58,6 +58,13 @@ pub const Lang = struct {
     /// the language has no probe that meets that bar, and the edit gate falls
     /// back to the balance scan.
     check: []const []const u8 = &.{},
+    /// LSP `languageId` for `textDocument/didOpen`. Empty means no LSP row.
+    language_id: []const u8 = "",
+    /// Stdio language server argv. Never bundled — must already be on PATH.
+    /// One-shot after a clean parse; idle servers are not kept alive.
+    lsp: []const []const u8 = &.{},
+    /// Fallback when `lsp[0]` is missing from PATH (e.g. pylsp vs pyright).
+    lsp_alt: []const []const u8 = &.{},
 };
 
 const sh_quotes = "\"'`";
@@ -84,6 +91,8 @@ pub const table = [_]Lang{
         .line_string = "\\\\",
         .check = &.{ "zig", "ast-check" },
         .check_label = "zig ast-check",
+        .language_id = "zig",
+        .lsp = &.{"zls"},
     },
     .{
         .name = "javascript",
@@ -95,6 +104,8 @@ pub const table = [_]Lang{
         .quotes = "\"'`",
         .check = &.{ "node", "--check" },
         .check_label = "node --check",
+        .language_id = "javascript",
+        .lsp = &.{ "typescript-language-server", "--stdio" },
     },
     .{
         .name = "typescript",
@@ -109,6 +120,8 @@ pub const table = [_]Lang{
         // than as a syntax error.
         .check = &.{ "node", "--experimental-strip-types", "--check" },
         .check_label = "node --check (types stripped)",
+        .language_id = "typescript",
+        .lsp = &.{ "typescript-language-server", "--stdio" },
     },
     .{
         .name = "python",
@@ -117,6 +130,9 @@ pub const table = [_]Lang{
         .triple = true,
         .check = &.{ "python3", "-c", py_parse },
         .check_label = "python parse",
+        .language_id = "python",
+        .lsp = &.{ "pyright-langserver", "--stdio" },
+        .lsp_alt = &.{"pylsp"},
     },
     .{
         .name = "ruby",
@@ -124,6 +140,8 @@ pub const table = [_]Lang{
         .line = "#",
         .check = &.{ "ruby", "-c" },
         .check_label = "ruby -c",
+        .language_id = "ruby",
+        .lsp = &.{ "solargraph", "stdio" },
     },
     .{
         .name = "php",
@@ -134,6 +152,8 @@ pub const table = [_]Lang{
         .bclose = "*/",
         .check = &.{ "php", "-l" },
         .check_label = "php -l",
+        .language_id = "php",
+        .lsp = &.{ "intelephense", "--stdio" },
     },
     .{
         .name = "go",
@@ -147,6 +167,8 @@ pub const table = [_]Lang{
         // unformatted file still exits 0.
         .check = &.{ "gofmt", "-e" },
         .check_label = "gofmt -e",
+        .language_id = "go",
+        .lsp = &.{"gopls"},
     },
     .{
         .name = "rust",
@@ -157,6 +179,8 @@ pub const table = [_]Lang{
         .line = "//",
         .bopen = "/*",
         .bclose = "*/",
+        .language_id = "rust",
+        .lsp = &.{"rust-analyzer"},
     },
     .{
         .name = "shell",
@@ -166,6 +190,8 @@ pub const table = [_]Lang{
         .quotes = sh_quotes,
         .check = &.{ "bash", "-n" },
         .check_label = "bash -n",
+        .language_id = "shellscript",
+        .lsp = &.{"bash-language-server", "start"},
     },
     .{
         .name = "zsh",
@@ -175,6 +201,8 @@ pub const table = [_]Lang{
         .quotes = sh_quotes,
         .check = &.{ "zsh", "-n" },
         .check_label = "zsh -n",
+        .language_id = "shellscript",
+        .lsp = &.{ "bash-language-server", "start" },
     },
     .{
         .name = "fish",
@@ -184,6 +212,8 @@ pub const table = [_]Lang{
         .quotes = sh_quotes,
         .check = &.{ "fish", "--no-execute" },
         .check_label = "fish --no-execute",
+        .language_id = "fish",
+        .lsp = &.{"fish-lsp", "start"},
     },
     .{
         .name = "lua",
@@ -193,6 +223,8 @@ pub const table = [_]Lang{
         .bclose = "]]",
         .check = &.{ "luac", "-p" },
         .check_label = "luac -p",
+        .language_id = "lua",
+        .lsp = &.{"lua-language-server"},
     },
     .{
         .name = "swift",
@@ -204,6 +236,8 @@ pub const table = [_]Lang{
         .bclose = "*/",
         .check = &.{ "swiftc", "-parse" },
         .check_label = "swiftc -parse",
+        .language_id = "swift",
+        .lsp = &.{"sourcekit-lsp"},
     },
     .{
         .name = "c",
@@ -214,6 +248,8 @@ pub const table = [_]Lang{
         .bopen = "/*",
         .bclose = "*/",
         .cstyle = true,
+        .language_id = "c",
+        .lsp = &.{"clangd"},
     },
     .{
         .name = "cpp",
@@ -224,6 +260,8 @@ pub const table = [_]Lang{
         .bopen = "/*",
         .bclose = "*/",
         .cstyle = true,
+        .language_id = "cpp",
+        .lsp = &.{"clangd"},
     },
     .{
         .name = "java",
@@ -234,6 +272,8 @@ pub const table = [_]Lang{
         .bopen = "/*",
         .bclose = "*/",
         .cstyle = true,
+        .language_id = "java",
+        .lsp = &.{"jdtls"},
     },
     .{
         .name = "csharp",
@@ -244,6 +284,9 @@ pub const table = [_]Lang{
         .bopen = "/*",
         .bclose = "*/",
         .cstyle = true,
+        .language_id = "csharp",
+        .lsp = &.{"csharp-ls"},
+        .lsp_alt = &.{ "omnisharp", "-lsp" },
     },
     .{
         .name = "fsharp",
@@ -251,6 +294,8 @@ pub const table = [_]Lang{
         .line = "//",
         .bopen = "(*",
         .bclose = "*)",
+        .language_id = "fsharp",
+        .lsp = &.{ "fsautocomplete", "--adaptive-lsp-server-enabled" },
     },
     .{
         .name = "kotlin",
@@ -260,6 +305,8 @@ pub const table = [_]Lang{
         .line = "//",
         .bopen = "/*",
         .bclose = "*/",
+        .language_id = "kotlin",
+        .lsp = &.{"kotlin-language-server"},
     },
     .{
         .name = "scala",
@@ -269,6 +316,8 @@ pub const table = [_]Lang{
         .line = "//",
         .bopen = "/*",
         .bclose = "*/",
+        .language_id = "scala",
+        .lsp = &.{"metals"},
     },
     .{
         .name = "dart",
@@ -276,6 +325,8 @@ pub const table = [_]Lang{
         .line = "//",
         .bopen = "/*",
         .bclose = "*/",
+        .language_id = "dart",
+        .lsp = &.{ "dart", "language-server", "--protocol=lsp" },
     },
     .{
         .name = "haskell",
@@ -285,22 +336,31 @@ pub const table = [_]Lang{
         .line = "--",
         .bopen = "{-",
         .bclose = "-}",
+        .language_id = "haskell",
+        .lsp = &.{ "haskell-language-server-wrapper", "--lsp" },
     },
     .{
         .name = "elixir",
         .exts = &.{ ".ex", ".exs" },
         .line = "#",
         .triple = true,
+        .language_id = "elixir",
+        .lsp = &.{"language_server.sh"},
+        .lsp_alt = &.{"elixir-ls"},
     },
     .{
         .name = "erlang",
         .exts = &.{ ".erl", ".hrl" },
         .line = "%",
+        .language_id = "erlang",
+        .lsp = &.{"erlang_ls"},
     },
     .{
         .name = "gleam",
         .exts = &.{".gleam"},
         .line = "//",
+        .language_id = "gleam",
+        .lsp = &.{ "gleam", "lsp" },
     },
     .{
         .name = "ocaml",
@@ -309,16 +369,22 @@ pub const table = [_]Lang{
         .exts = &.{ ".ml", ".mli" },
         .bopen = "(*",
         .bclose = "*)",
+        .language_id = "ocaml",
+        .lsp = &.{"ocamllsp"},
     },
     .{
         .name = "clojure",
         .exts = &.{ ".clj", ".cljs", ".cljc", ".edn" },
         .line = ";",
+        .language_id = "clojure",
+        .lsp = &.{"clojure-lsp"},
     },
     .{
         .name = "perl",
         .exts = &.{ ".pl", ".pm" },
         .line = "#",
+        .language_id = "perl",
+        .lsp = &.{ "perlnavigator", "--stdio" },
     },
     .{
         .name = "powershell",
@@ -326,6 +392,8 @@ pub const table = [_]Lang{
         .line = "#",
         .bopen = "<#",
         .bclose = "#>",
+        .language_id = "powershell",
+        .lsp = &.{"powershell-editor-services"},
     },
     .{
         .name = "nix",
@@ -333,6 +401,9 @@ pub const table = [_]Lang{
         .line = "#",
         .bopen = "/*",
         .bclose = "*/",
+        .language_id = "nix",
+        .lsp = &.{"nil"},
+        .lsp_alt = &.{"nixd"},
     },
     .{
         .name = "terraform",
@@ -341,16 +412,22 @@ pub const table = [_]Lang{
         .line2 = "//",
         .bopen = "/*",
         .bclose = "*/",
+        .language_id = "terraform",
+        .lsp = &.{"terraform-ls", "serve"},
     },
     .{
         .name = "prisma",
         .exts = &.{".prisma"},
         .line = "//",
+        .language_id = "prisma",
+        .lsp = &.{ "prisma-language-server", "--stdio" },
     },
     .{
         .name = "cue",
         .exts = &.{".cue"},
         .line = "//",
+        .language_id = "cue",
+        .lsp = &.{ "cue", "lsp", "stdio" },
     },
     .{
         .name = "sql",
@@ -358,6 +435,8 @@ pub const table = [_]Lang{
         .line = "--",
         .bopen = "/*",
         .bclose = "*/",
+        .language_id = "sql",
+        .lsp = &.{ "sql-language-server", "up", "--method", "stdio" },
     },
     .{
         .name = "vue",
@@ -368,6 +447,8 @@ pub const table = [_]Lang{
         .bclose = "-->",
         .quotes = "\"'`",
         .balance = false,
+        .language_id = "vue",
+        .lsp = &.{ "vue-language-server", "--stdio" },
     },
     .{
         .name = "svelte",
@@ -378,6 +459,8 @@ pub const table = [_]Lang{
         .bclose = "-->",
         .quotes = "\"'`",
         .balance = false,
+        .language_id = "svelte",
+        .lsp = &.{ "svelteserver", "--stdio" },
     },
     .{
         .name = "css",
@@ -386,6 +469,8 @@ pub const table = [_]Lang{
         .line = "//",
         .bopen = "/*",
         .bclose = "*/",
+        .language_id = "css",
+        .lsp = &.{ "vscode-css-language-server", "--stdio" },
     },
     .{
         .name = "html",
@@ -394,6 +479,8 @@ pub const table = [_]Lang{
         .bopen = "<!--",
         .bclose = "-->",
         .balance = false,
+        .language_id = "html",
+        .lsp = &.{ "vscode-html-language-server", "--stdio" },
     },
     .{
         .name = "xml",
@@ -402,6 +489,8 @@ pub const table = [_]Lang{
         .bopen = "<!--",
         .bclose = "-->",
         .balance = false,
+        .language_id = "xml",
+        .lsp = &.{ "lemminx" },
     },
     .{
         .name = "json",
@@ -410,6 +499,8 @@ pub const table = [_]Lang{
         .quotes = "\"",
         .check = &.{ "python3", "-c", json_parse },
         .check_label = "json parse",
+        .language_id = "json",
+        .lsp = &.{ "vscode-json-language-server", "--stdio" },
     },
     .{
         .name = "yaml",
@@ -419,6 +510,8 @@ pub const table = [_]Lang{
         // Block scalars carry arbitrary text, so a stray bracket in one is not
         // a syntax error and must not read as one.
         .balance = false,
+        .language_id = "yaml",
+        .lsp = &.{ "yaml-language-server", "--stdio" },
     },
     .{
         .name = "toml",
@@ -426,6 +519,8 @@ pub const table = [_]Lang{
         .exts = &.{".toml"},
         .line = "#",
         .balance = false,
+        .language_id = "toml",
+        .lsp = &.{ "taplo", "lsp", "stdio" },
     },
     .{
         .name = "markdown",
@@ -434,6 +529,8 @@ pub const table = [_]Lang{
         .bopen = "<!--",
         .bclose = "-->",
         .balance = false,
+        .language_id = "markdown",
+        .lsp = &.{"marksman", "server"},
     },
     .{
         .name = "dockerfile",
@@ -441,6 +538,8 @@ pub const table = [_]Lang{
         .exts = &.{".dockerfile"},
         .line = "#",
         .balance = false,
+        .language_id = "dockerfile",
+        .lsp = &.{ "docker-langserver", "--stdio" },
     },
     .{
         .name = "make",
@@ -448,6 +547,8 @@ pub const table = [_]Lang{
         .exts = &.{".mk"},
         .line = "#",
         .balance = false,
+        .language_id = "makefile",
+        .lsp = &.{"autotools-language-server"},
     },
 };
 
@@ -475,6 +576,19 @@ pub fn label(l: *const Lang) []const u8 {
     if (l.check_label.len > 0) return l.check_label;
     if (l.check.len > 0) return l.check[0];
     return l.name;
+}
+
+/// Preferred stdio language-server argv, or null when none is configured.
+pub fn lspArgv(l: *const Lang) ?[]const []const u8 {
+    if (l.lsp.len > 0) return l.lsp;
+    if (l.lsp_alt.len > 0) return l.lsp_alt;
+    return null;
+}
+
+/// Fallback server when the preferred binary is missing from PATH.
+pub fn lspAltArgv(l: *const Lang) ?[]const []const u8 {
+    if (l.lsp.len > 0 and l.lsp_alt.len > 0) return l.lsp_alt;
+    return null;
 }
 
 pub fn byName(name: []const u8) ?*const Lang {
@@ -550,6 +664,14 @@ test "a language the scan cannot judge has a parser to fall back on" {
     for (&table) |*l| {
         if (l.balance or !l.code) continue;
         try std.testing.expect(l.check.len > 0);
+    }
+}
+
+test "every language with an lsp row names a languageId" {
+    for (&table) |*l| {
+        if (l.lsp.len == 0 and l.lsp_alt.len == 0) continue;
+        try std.testing.expect(l.language_id.len > 0);
+        try std.testing.expect(l.lsp.len > 0 or l.lsp_alt.len > 0);
     }
 }
 

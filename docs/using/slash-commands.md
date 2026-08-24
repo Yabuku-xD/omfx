@@ -55,9 +55,11 @@ Type `/` in the interactive session to search commands. Everything else is sent 
 | --- | --- |
 | `/web` | Web search keys and fallback order |
 | `/browser` | Install Chrome relay extension |
-| `/reload` | Reload settings, auth, reads, relay |
+| `/reload` | Reload settings, auth, skills, relay |
 | `/background` | Background commands |
 | `/mcp` | MCP servers |
+| `/ide` | Open workspace in external IDE (`open` \| `list` \| pin) |
+| `/plugin` | Plugin marketplaces (`list` \| `marketplace add` \| `install`) |
 | `/init` | Scaffold `AGENTS.md` |
 | `/workspace` | Extra directories |
 | `/undo` | Undo last tracked file change |
@@ -67,4 +69,4 @@ Type `/` in the interactive session to search commands. Everything else is sent 
 | `/trace` | Private diagnostic trace |
 | `/peers` | Run a teammate |
 
-Discovered skills appear as additional slash commands after `/reload`.
+Discovered skills appear as additional slash commands after `/reload`. Stack several skills and `@paths` in one prompt; see [Skills](../capabilities/skills.md).

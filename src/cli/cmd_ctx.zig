@@ -100,6 +100,8 @@ pub const State = struct {
     skills_stale: bool = false,
     /// Editor for ctrl-g, when the user named one.
     editor: []const u8 = "",
+    /// Graphical IDE for /ide open.
+    ide: []const u8 = "",
     had_turn: bool = false,
     last_goal: []const u8 = "",
     last_prompt: []const u8 = "",

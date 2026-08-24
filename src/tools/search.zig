@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const pathing = @import("pathing.zig");
+const repomap = @import("../core/repomap.zig");
 
 fn listing(dir: Io.Dir, io: Io) !Io.Dir {
     return dir.openDir(io, ".", .{ .iterate = true });
@@ -327,56 +328,8 @@ pub fn semanticSearch(
     workspace: []const u8,
     query: []const u8,
 ) ![]u8 {
-    if (query.len == 0) return error.EmptyNeedle;
-    var child = listing(dir, io) catch return allocator.dupe(u8, "(no matches; lexical search, not embeddings)\n");
-    defer child.close(io);
-    var it = child.iterate();
-    const Hit = struct { name: []const u8, score: usize };
-    var hits: [32]Hit = undefined;
-    var n: usize = 0;
-    while (it.next(io) catch null) |entry| {
-        if (entry.kind != .file) continue;
-        pathing.assertInside(workspace, entry.name) catch continue;
-        const body = dir.readFileAlloc(io, entry.name, allocator, .limited(80_000)) catch continue;
-        defer allocator.free(body);
-        var score: usize = 0;
-        var words = std.mem.splitAny(u8, query, " \t");
-        while (words.next()) |w| {
-            if (w.len < 2) continue;
-            if (std.mem.indexOf(u8, body, w) != null) score += 1;
-            if (std.mem.indexOf(u8, entry.name, w) != null) score += 2;
-        }
-        if (score == 0) continue;
-        if (n < hits.len) {
-            hits[n] = .{ .name = try allocator.dupe(u8, entry.name), .score = score };
-            n += 1;
-        }
-    }
-    defer {
-        var i: usize = 0;
-        while (i < n) : (i += 1) allocator.free(hits[i].name);
-    }
-    if (n == 0) return allocator.dupe(u8, "(no matches; lexical search, not embeddings)\n");
-    var i: usize = 0;
-    while (i + 1 < n) : (i += 1) {
-        var j: usize = i + 1;
-        while (j < n) : (j += 1) {
-            if (hits[j].score > hits[i].score) {
-                const tmp = hits[i];
-                hits[i] = hits[j];
-                hits[j] = tmp;
-            }
-        }
-    }
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "semantic_search (lexical, not embeddings)\n");
-    for (hits[0..n]) |h| {
-        var line_buf: [128]u8 = undefined;
-        const line = std.fmt.bufPrint(&line_buf, "{d} {s}\n", .{ h.score, h.name }) catch continue;
-        try out.appendSlice(allocator, line);
-    }
-    return out.toOwnedSlice(allocator);
+    _ = workspace;
+    return repomap.search(allocator, dir, io, query);
 }
 
 test "glob matches basenames, paths, and **" {
@@ -499,9 +452,9 @@ test "semantic search ranks by tokens" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const fs = @import("fs.zig");
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "alpha.txt", "workspace agent loop");
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "beta.txt", "unrelated");
+    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "alpha.zig", "pub fn agentLoop() void {}\n");
+    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "beta.zig", "pub fn unrelated() void {}\n");
     const got = try semanticSearch(tmp.dir, io, std.testing.allocator, "ws", "agent loop");
     defer std.testing.allocator.free(got);
-    try std.testing.expect(std.mem.indexOf(u8, got, "alpha.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "alpha.zig") != null);
 }
