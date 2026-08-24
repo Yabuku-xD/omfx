@@ -13,80 +13,6 @@ const Item = struct {
     end: u32,
 };
 
-pub fn moduleReport(
-    dir: Io.Dir,
-    io: Io,
-    allocator: std.mem.Allocator,
-    workspace: []const u8,
-    rel: []const u8,
-) ![]u8 {
-    const src = fs.read(dir, io, allocator, workspace, rel) catch {
-        return std.fmt.allocPrint(
-            allocator,
-            "[module_report]\npath: {s}\nhonesty: unavailable (read failed); not a semantic outline\n",
-            .{rel},
-        );
-    };
-    defer allocator.free(src);
-    return formatReport(allocator, rel, src);
-}
-
-pub fn readSymbol(
-    dir: Io.Dir,
-    io: Io,
-    allocator: std.mem.Allocator,
-    workspace: []const u8,
-    rel: []const u8,
-    symbol: []const u8,
-) ![]u8 {
-    const src = fs.read(dir, io, allocator, workspace, rel) catch {
-        return std.fmt.allocPrint(
-            allocator,
-            "honesty: unavailable (read failed); not a symbol body\n",
-            .{},
-        );
-    };
-    defer allocator.free(src);
-    var items: [max_symbols]Item = undefined;
-    const n = scan(rel, src, &items);
-    for (items[0..n]) |it| {
-        if (std.mem.eql(u8, it.name, symbol)) {
-            const body = sliceLines(src, it.start, it.end);
-            return std.fmt.allocPrint(
-                allocator,
-                "{s} {s}  {s}:{d}-{d}\n{s}",
-                .{ it.kind, it.name, rel, it.start, it.end, body },
-            );
-        }
-    }
-    return std.fmt.allocPrint(
-        allocator,
-        "honesty: unavailable (symbol '{s}' not found in {s}); not a symbol body\n",
-        .{ symbol, rel },
-    );
-}
-
-pub fn formatReport(allocator: std.mem.Allocator, rel: []const u8, src: []const u8) ![]u8 {
-    var items: [max_symbols]Item = undefined;
-    const n = scan(rel, src, &items);
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "[module_report]\npath: ");
-    try out.appendSlice(allocator, rel);
-    try out.append(allocator, '\n');
-    if (n == 0) {
-        try out.appendSlice(allocator, "honesty: unavailable (no symbols extracted); not a semantic outline\n");
-        return out.toOwnedSlice(allocator);
-    }
-    try out.appendSlice(allocator, "honesty: heuristic outline (not LSP)\n");
-    for (items[0..n]) |it| {
-        var line_buf: [160]u8 = undefined;
-        const line = std.fmt.bufPrint(&line_buf, "{s} {s} L{d}-{d}\n", .{ it.kind, it.name, it.start, it.end }) catch continue;
-        try out.appendSlice(allocator, line);
-    }
-    return out.toOwnedSlice(allocator);
-}
-
 /// Outlines whatever `langs.table` describes, which is every language omfx
 /// reads rather than the handful this file used to name itself.
 fn scan(rel: []const u8, src: []const u8, out: *[max_symbols]Item) usize {
@@ -248,7 +174,7 @@ fn closingLineOff(src: []const u8, start: u32, end: u32) ?usize {
     return last;
 }
 
-pub fn bracesOk(src: []const u8) bool {
+fn bracesOk(src: []const u8) bool {
     var depth: i32 = 0;
     var i: usize = 0;
     while (i < src.len) : (i += 1) {
@@ -270,25 +196,7 @@ pub fn bracesOk(src: []const u8) bool {
     return depth == 0;
 }
 
-fn sliceLines(src: []const u8, start: u32, end: u32) []const u8 {
-    var line_no: u32 = 1;
-    var i: usize = 0;
-    var from: usize = 0;
-    var to: usize = src.len;
-    while (i < src.len) {
-        const nl = std.mem.indexOfScalarPos(u8, src, i, '\n') orelse src.len;
-        if (line_no == start) from = i;
-        if (line_no == end) {
-            to = if (nl < src.len) nl + 1 else src.len;
-            break;
-        }
-        line_no += 1;
-        i = if (nl < src.len) nl + 1 else src.len;
-    }
-    return src[from..to];
-}
-
-test "module report extracts zig fns" {
+test "outline extracts zig fns" {
     const src =
         \\const std = @import("std");
         \\pub fn foo() void {
@@ -299,11 +207,16 @@ test "module report extracts zig fns" {
         \\}
         \\
     ;
-    const text = try formatReport(std.testing.allocator, "a.zig", src);
+    const text = try outlinePrefix(std.testing.allocator, "a.zig", src);
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "fn foo") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "fn bar") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "unavailable") == null);
+}
+
+test "empty outline is empty not a report" {
+    const text = try outlinePrefix(std.testing.allocator, "empty.txt", "hello\n");
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqual(@as(usize, 0), text.len);
 }
 
 test "splice inserts inside a fn without breaking braces" {
@@ -346,31 +259,6 @@ test "splice delete removes a whole fn" {
     try std.testing.expect(bracesOk(got));
 }
 
-test "empty file is unavailable not clean" {
-    const text = try formatReport(std.testing.allocator, "empty.txt", "hello\n");
-    defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "unavailable") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "not a semantic outline") != null);
-}
-
-test "read_symbol returns body lines" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const io = std.testing.io;
-    const src =
-        \\pub fn foo() void {
-        \\    return;
-        \\}
-        \\fn bar() void {}
-        \\
-    ;
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "a.zig", src);
-    const body = try readSymbol(tmp.dir, io, std.testing.allocator, "ws", "a.zig", "foo");
-    defer std.testing.allocator.free(body);
-    try std.testing.expect(std.mem.indexOf(u8, body, "pub fn foo") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "fn bar") == null);
-}
-
 test "the outline covers every language the table describes" {
     const a = std.testing.allocator;
     const cases = [_]struct { rel: []const u8, src: []const u8, want: []const u8 }{
@@ -382,7 +270,7 @@ test "the outline covers every language the table describes" {
         .{ .rel = "a.ex", .src = "defmodule Thing do\nend\n", .want = "Thing" },
     };
     for (cases) |c| {
-        const text = try formatReport(a, c.rel, c.src);
+        const text = try outlinePrefix(a, c.rel, c.src);
         defer a.free(text);
         try std.testing.expect(std.mem.indexOf(u8, text, c.want) != null);
     }

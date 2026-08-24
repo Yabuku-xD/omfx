@@ -578,19 +578,6 @@ pub fn label(l: *const Lang) []const u8 {
     return l.name;
 }
 
-/// Preferred stdio language-server argv, or null when none is configured.
-pub fn lspArgv(l: *const Lang) ?[]const []const u8 {
-    if (l.lsp.len > 0) return l.lsp;
-    if (l.lsp_alt.len > 0) return l.lsp_alt;
-    return null;
-}
-
-/// Fallback server when the preferred binary is missing from PATH.
-pub fn lspAltArgv(l: *const Lang) ?[]const []const u8 {
-    if (l.lsp.len > 0 and l.lsp_alt.len > 0) return l.lsp_alt;
-    return null;
-}
-
 pub fn byName(name: []const u8) ?*const Lang {
     for (&table) |*l| {
         if (std.mem.eql(u8, l.name, name)) return l;

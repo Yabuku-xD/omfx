@@ -1369,11 +1369,6 @@ pub fn inComposer(layout: Layout, row: u16) bool {
     return row == composerRow(layout);
 }
 
-pub fn inTranscript(layout: Layout, row: u16) bool {
-    if (layout.transcript_rows == 0) return false;
-    return row >= layout.transcript_start_row and row < layout.footer_start_row;
-}
-
 pub fn maxScroll(total: usize, rows: u16) usize {
     return if (total > rows) total - rows else 0;
 }

@@ -1,7 +1,6 @@
 const std = @import("std");
 const types = @import("types.zig");
 const sse = @import("sse.zig");
-const env = @import("../core/env.zig");
 const tool = @import("../core/tool.zig");
 
 pub const PostError = error{ OutOfMemory, Transport };
@@ -79,22 +78,6 @@ pub const Message = struct {
     content: []const u8,
     images: []const types.Image = &.{},
 };
-
-pub fn defaultModel(vendor: types.Vendor) []const u8 {
-    return switch (vendor) {
-        .openai => "gpt-4o-mini",
-        .anthropic => "claude-sonnet-4-5",
-        .google => "gemini-2.5-flash",
-        .xai => "grok-3",
-        .custom => "gpt-4o-mini",
-    };
-}
-
-pub fn resolveVendor(lookup: env.Lookup) ?types.Vendor {
-    const catalog = @import("catalog.zig");
-    const resolved = catalog.resolve(lookup) orelse return null;
-    return catalog.vendorOf(resolved.spec);
-}
 
 pub fn jsonEscape(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -464,21 +447,6 @@ fn toolsJson(allocator: std.mem.Allocator, allow_peer: bool, shape: ToolShape) !
     return out.toOwnedSlice(allocator);
 }
 
-pub fn buildAnthropicBody(allocator: std.mem.Allocator, model: []const u8, user: []const u8, system: []const u8) ![]u8 {
-    return buildAnthropicBodyEx(allocator, .{
-        .vendor = .anthropic,
-        .protocol = .anthropic,
-        .base_url = "",
-        .api_key = "",
-        .model = model,
-    }, user, system);
-}
-
-pub fn buildAnthropicBodyEx(allocator: std.mem.Allocator, endpoint: types.Endpoint, user: []const u8, system: []const u8) ![]u8 {
-    const msgs = [_]Message{.{ .role = "user", .content = user }};
-    return buildAnthropicBodyMsgs(allocator, endpoint, &msgs, system);
-}
-
 /// Anthropic caching is opt-in: without this field nothing is cached, and the
 /// whole conversation is reprocessed on every turn.
 ///
@@ -514,16 +482,6 @@ pub fn buildAnthropicBodyMsgs(
     return std.fmt.allocPrint(allocator,
         \\{{"model":"{s}",{s}{s}"stream":true,"system":"{s}","messages":{s}}}
     , .{ esc_model, extra, anthropicCacheJson(endpoint.api_key), esc_sys, msgs_json });
-}
-
-pub fn buildResponsesBody(allocator: std.mem.Allocator, model: []const u8, user: []const u8, system: []const u8) ![]u8 {
-    return buildResponsesBodyEx(allocator, .{
-        .vendor = .openai,
-        .protocol = .openai_responses,
-        .base_url = "",
-        .api_key = "",
-        .model = model,
-    }, user, system);
 }
 
 pub fn buildResponsesBodyEx(allocator: std.mem.Allocator, endpoint: types.Endpoint, user: []const u8, system: []const u8) ![]u8 {
@@ -606,13 +564,6 @@ pub fn collectCalls(body: []const u8, out: *[max_calls]CallHit) usize {
         i += at + needle.len;
     }
     return n;
-}
-
-pub fn collectTool(body: []const u8) ?CallHit {
-    var buf: [max_calls]CallHit = undefined;
-    const n = collectCalls(body, &buf);
-    if (n == 0) return null;
-    return buf[0];
 }
 
 const Extra = struct {
@@ -781,17 +732,6 @@ const HostWriter = struct {
 
 pub fn shouldRetry(status: u16, attempt: u8) bool {
     return status == 429 and attempt == 0;
-}
-
-pub fn postChat(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    endpoint: types.Endpoint,
-    user: []const u8,
-    system: []const u8,
-) PostError!ChatResult {
-    const msgs = [_]Message{.{ .role = "user", .content = user }};
-    return postChatMsgs(allocator, io, endpoint, &msgs, system);
 }
 
 pub fn postChatMsgs(

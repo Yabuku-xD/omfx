@@ -116,13 +116,6 @@ pub fn commandFromName(name: []const u8) ?Command {
     return null;
 }
 
-pub fn specByName(name: []const u8) ?Spec {
-    for (commands) |spec| {
-        if (std.mem.eql(u8, spec.name, name)) return spec;
-    }
-    return null;
-}
-
 pub fn specByTag(tag: Command) ?Spec {
     for (commands) |spec| {
         if (spec.tag == tag) return spec;
