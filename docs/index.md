@@ -48,17 +48,21 @@ In an interactive session, type `/` for commands. See [Slash commands](using/sla
 | Sign in | `/login` |
 | Choose a model | `/models` |
 | Permissions | `/permissions` or Shift-Tab |
+| Context window | `/context` |
 | Status | `/status` |
 | Usage | `/usage` |
 
 ## What omfx does better
 
 - **Parse gate** — a write that breaks a previously clean file is rewound before the model sees success.
-- **Effort `auto`** — reasoning budget goes to the responsive middle of the prompt, not the easy or the hopeless.
-- **ARC compact** — dropped context is cited into `.omfx/recall/`, not rewritten by another model.
-- **Credential-aware `/models`** — subscription and API windows for the same model are capped correctly.
+- **Effort `auto`** — reasoning budget follows the prompt, not a fixed default.
+- **ARC compact + recall** — dropped context is cited into `.omfx/recall/`, not rewritten by another model.
+- **Memory + playbook** — `.omfx/memory.md`, user jsonl facts, and verified lessons in `.omfx/playbook.jsonl`.
+- **Shared board** — `FACT` / `FAIL` / `PATH` notes in `.omfx/board.jsonl` for peers and coordination.
+- **Ranked repo map** — orientation by symbol references, not directory walk order.
+- **Credential-aware `/models`** — subscription and API windows capped correctly.
+- **Stacked skills + `@files`** — several skills and file anchors in one prompt.
 - **Web fallback chain** — twenty-three search backends; first that works wins.
-- **Discovered skills** — other agent CLIs' `SKILL.md` files become slash commands after `/reload`.
 
 ## What omfx asks before it acts
 
@@ -68,6 +72,7 @@ In normal mode, sensitive tools prompt before they run. Plan mode is read-only. 
 
 - [CLI commands](using/cli.md)
 - [Sessions](using/sessions.md)
+- [Peers](capabilities/peers.md)
 - [Configuration](configure/configuration.md)
 - [Troubleshooting](using/troubleshooting.md)
 

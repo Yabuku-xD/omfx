@@ -1,9 +1,9 @@
 # Oh My Fx
 
-A coding agent CLI that refuses to ship broken edits, spends reasoning where it
-helps, and keeps your history inspectable.
+A coding agent CLI built to keep edits honest, memory inspectable, and context
+under control.
 
-**9** providers · **26** built-in tools · **23** search backends · **~3 MB** binary · **Zig 0.16**
+**9** providers · **26** built-in tools · **23** search backends · **~3 MB** binary · **Zig 0.16**
 
 ## Install
 
@@ -13,7 +13,7 @@ helps, and keeps your history inspectable.
 curl -fsSL https://raw.githubusercontent.com/Yabuku-xD/omfx/main/install.sh | sh
 ```
 
-Upgrade later with:
+Upgrade later:
 
 ```sh
 omfx update
@@ -34,72 +34,59 @@ Use `./zig-out/bin/omfx` while developing — never an older `omfx` on your `PAT
 
 ## Why omfx
 
-### Parse gate
+**Parse gate** — broken edits are undone before the model sees success. Thirty-six
+languages, one check table; verify after writes and feed the playbook on clean runs.
 
-An edit that leaves a previously clean file unparseable is undone before the
-model sees success. The agent is not rewarded for breaking the tree.
+**Effort auto** — reasoning budget follows the prompt, not a fixed default. Easy and
+hard get the floor; the responsive middle gets the spend. Two failures route down.
 
-### Effort `auto`
+**ARC compact and recall** — when the window fills, older turns compact locally.
+Dropped bodies stay as inspectable cites, not an LLM rewrite of your history. Compact
+one side or rewind from a point.
 
-Reasoning level is chosen per prompt. Easy and hard both get the floor; the
-budget goes to the responsive middle. Two failed turns route effort down.
+**Memory and playbook** — workspace and user facts reinjected every turn, surviving
+compaction. Helpful and harmful lessons from verified work accumulate incrementally;
+verified facts can graduate into skills.
 
-### ARC compaction
+**Shared board** — structured notes for facts, failures, and paths. Peers and solo
+sessions coordinate through a gist each turn; divergence detection keeps summaries
+aligned without spamming the thread.
 
-When the context window fills, omfx cites what it drops into `.omfx/recall/` —
-local, inspectable files — instead of rewriting your history through another
-LLM call.
+**Peers** — teammates with the same tools, an isolated thread, and the shared board.
+Depth capped; nested peers denied. Optional git worktrees for isolation.
 
-### Credential-aware models
+**Ranked repo map** — orientation by symbol references, not directory walk order.
+Volatile status and the map refresh on the user message, not the cached system prefix.
 
-`/models` shows what the provider you signed into actually lists. Subscription
-windows and API keys for the same model are capped correctly. `auto` plus every
-declared reasoning level appear when the model offers them.
+**Credential-aware models** — the list matches what your login actually offers.
+Subscription and API windows capped correctly. Auto effort plus every reasoning
+level the model declares. Vision when supported.
 
-### Permissions you can feel
+**Permissions** — ask before sensitive tools; plan is read-only until you go; yolo
+is session-only and never persisted. Allowlist, sandbox, Shift-Tab cycling.
 
-Ask prompts before sensitive tools. Plan is read-only until `/plan go`. Yolo
-runs without prompts for this session only and is never written to disk.
-Shift-Tab cycles the three.
+**Web fallback chain** — twenty-three search backends in your order; test the chain;
+first working provider wins.
 
-### Web search with a fallback chain
+**Skills** — discovered from your other agent CLIs, stackable in one prompt or
+mid-sentence, with file anchors inline. Reload rescans.
 
-`/web` configures twenty-three backends. Set an order, disable one, `test` the
-chain. First working provider wins.
+**Browser relay** — your open Chrome tabs via a local listener, not a headless farm.
 
-### Skills, discovered
+**MCP** — your configured servers only; no remote gateway.
 
-Walk the skill roots your other agent CLIs already use. Each `SKILL.md` becomes
-a slash command; its `description:` is the help. `/reload` rescans. No
-product-owned marketplace required.
+**Sessions** — save, resume, rewind, fork, handoff, undo. Background shell runs
+survive clear.
 
-### Peers on a board
+**Cache-stable rules** — project rules parsed into a contract, not dumped wholesale.
+System prefix stays stable; orientation changes every turn. Provider caching always on.
 
-`/peers <goal>` starts a teammate with the same tools, an isolated thread, and
-a shared board (`FACT` / `FAIL` / `PATH`). Depth is capped — no nested peer
-storms.
+**Context audit** — provider totals versus local parts: system, tools, transcript,
+cache read and write.
 
-### Browser on tabs you already have
-
-`/browser` installs a Chrome relay. Keep `omfx browser-relay` listening; the
-extension dials localhost. Existing tabs, not a headless farm.
-
-### MCP without a gateway
-
-`/mcp` lists servers you configured under `~/.omfx`. omfx does not run a remote
-MCP gateway on your behalf.
-
-### Cache-stable project rules
-
-`AGENTS.md` is parsed into a harness contract (8 KiB cap), not dumped wholesale.
-Volatile orientation — git status, repo map — rides on the user message so the
-system prefix stays byte-identical for provider prompt caching.
-
-### Your keys, your providers
-
-`/login` lists model providers. OAuth where the vendor has a route; paste a key
-everywhere else. Credentials live in `~/.omfx/auth.json` (0600). Stored OAuth
-beats a leftover env var. omfx is not a gateway and has no key of its own.
+**Your keys** — OAuth or API keys stored locally; stored login beats leftover env
+vars. Hooks deny risky calls and redact secrets in output. Telemetry off unless asked.
+Run logs stay local with no prompt text uploaded.
 
 ## Use
 
@@ -120,6 +107,8 @@ Inside a session: `/login`, `/models`, `/help`. Flags: `--provider`, `--model`,
 - [Quick start](docs/index.md)
 - [Documentation index](docs/llms.txt)
 - [Slash commands](docs/using/slash-commands.md)
+- [Sessions](docs/using/sessions.md)
+- [Peers and board](docs/capabilities/peers.md)
 - [Configuration](docs/configure/configuration.md)
 
 ## License
