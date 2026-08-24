@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      # Formatting first: it is the cheapest failure and the noisiest diff.
+      - run: zig fmt --check src build.zig
+      - run: zig build
+      - run: zig build test
+      # The unit tests pass on a harness that cannot launch; the end-to-end
+      # cases are what prove the binary still runs a turn.
+      - run: bash scripts/e2e.sh
+        env:
+          OMFX_E2E_OFFLINE: "1"

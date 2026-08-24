@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "omfx browser relay",
+  "version": "0.0.3",
+  "description": "Attaches omfx to the Chrome tabs you already have open.",
+  "permissions": ["debugger", "tabs", "storage", "alarms"],
+  "host_permissions": [
+    "http://127.0.0.1:9224/*",
+    "ws://127.0.0.1:9224/*",
+    "http://localhost:9224/*",
+    "ws://localhost:9224/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_page": "options.html",
+  "action": {
+    "default_title": "omfx: open Chrome tabs"
+  }
+}

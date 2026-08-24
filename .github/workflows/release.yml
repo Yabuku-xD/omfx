@@ -1,0 +1,30 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      # One Linux host cross-compiles every target: no per-OS runner, no
+      # per-OS toolchain, and the same bytes every time.
+      - name: Build every target
+        run: |
+          set -eu
+          for t in aarch64-macos x86_64-macos aarch64-linux-musl x86_64-linux-musl; do
+            zig build -Dtarget="$t" -Doptimize=ReleaseFast --prefix "out/$t"
+            tar -C "out/$t/bin" -czf "omfx-$t.tar.gz" omfx
+          done
+          sha256sum omfx-*.tar.gz > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            omfx-*.tar.gz
+            SHA256SUMS
