@@ -130,27 +130,6 @@ pub fn resolveToken(tok: []const u8) ?Spec {
     return byId(t);
 }
 
-pub fn parseOrder(text: []const u8, out: *[settings.max_ids][]const u8) usize {
-    var n: usize = 0;
-    var it = std.mem.splitAny(u8, text, ", \t");
-    while (it.next()) |tok| {
-        if (tok.len == 0) continue;
-        const spec = resolveToken(tok) orelse continue;
-        var seen = false;
-        for (out[0..n]) |id| {
-            if (std.mem.eql(u8, id, spec.id)) {
-                seen = true;
-                break;
-            }
-        }
-        if (seen) continue;
-        if (n >= out.len) break;
-        out[n] = spec.id;
-        n += 1;
-    }
-    return n;
-}
-
 pub fn parseHome(line: []const u8) HomeCmd {
     const t = std.mem.trim(u8, line, " \t");
     if (t.len == 0) return .cancel;

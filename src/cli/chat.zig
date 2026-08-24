@@ -668,19 +668,6 @@ test "a long command answer is clipped inside the gutter" {
     try std.testing.expectEqual(@as(usize, 40 - gutter_cells), std.mem.count(u8, out, "x"));
 }
 
-pub fn formatSystem(allocator: std.mem.Allocator, cols: u16, text: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    var it = std.mem.splitScalar(u8, text, '\n');
-    while (it.next()) |line| {
-        try out.appendSlice(allocator, paint.dim);
-        try out.appendSlice(allocator, clipCols(line, cols));
-        try out.appendSlice(allocator, paint.reset);
-        try out.append(allocator, '\n');
-    }
-    return out.toOwnedSlice(allocator);
-}
-
 test "a todo card keeps its own styling and skips the preview cap" {
     const todos = @import("../core/todos.zig");
     const a = std.testing.allocator;

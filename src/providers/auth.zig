@@ -224,14 +224,6 @@ pub fn encodeApiKey(allocator: std.mem.Allocator, provider: []const u8, key: []c
     return std.fmt.allocPrint(allocator, "{{\"{s}\":{{\"type\":\"api_key\",\"key\":\"{s}\"}}}}\n", .{ provider, key });
 }
 
-pub fn encodeOAuth(allocator: std.mem.Allocator, provider: []const u8, access: []const u8, refresh: []const u8) ![]u8 {
-    return std.fmt.allocPrint(
-        allocator,
-        "{{\"{s}\":{{\"type\":\"oauth\",\"access_token\":\"{s}\",\"refresh_token\":\"{s}\"}}}}\n",
-        .{ provider, access, refresh },
-    );
-}
-
 pub fn extractOAuth(json: []const u8, provider: []const u8) ?types.OAuth {
     const cred = extract(json, provider) orelse return null;
     return switch (cred) {

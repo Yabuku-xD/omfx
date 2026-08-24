@@ -27,12 +27,6 @@ pub fn hashOf(s: []const u8) Hash {
     return @enumFromInt(@as(u32, @truncate(std.hash.Wyhash.hash(0, s))));
 }
 
-pub fn hash8(s: []const u8) [8]u8 {
-    var buf: [8]u8 = undefined;
-    _ = std.fmt.bufPrint(&buf, "{x:0>8}", .{@intFromEnum(hashOf(s))}) catch buf;
-    return buf;
-}
-
 fn parseHash(s: []const u8) ?Hash {
     if (s.len != 8) return null;
     const v = std.fmt.parseInt(u32, s, 16) catch return null;

@@ -127,10 +127,6 @@ pub fn jsonString(json: []const u8, key: []const u8) ?[]const u8 {
     return sse.jsonString(json, key);
 }
 
-pub fn jsonError(json: []const u8) ?[]const u8 {
-    return jsonString(json, "error_description") orelse jsonString(json, "error");
-}
-
 pub fn jsonInt(json: []const u8, key: []const u8) ?i64 {
     const n = jsonNumber(json, key) orelse return null;
     return std.math.cast(i64, n);

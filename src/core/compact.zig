@@ -112,10 +112,6 @@ pub const Stitched = union(enum) {
 
 /// Compact the HTTP thread: always keep turns[0] (the original user prompt),
 /// replace the middle with a 2-turn summary so roles still alternate, keep the tail.
-pub fn planKeepOriginal(count: usize) Result {
-    return planKeepOriginalEx(count, 0);
-}
-
 pub fn planKeepOriginalEx(count: usize, chars: usize) Result {
     if (count <= compact_after and chars <= char_budget) return .keep;
     var from: usize = if (count > keep_last) count - keep_last else 2;
