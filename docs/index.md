@@ -55,18 +55,18 @@ In an interactive session, type `/` for commands. See [Slash commands](using/sla
 
 ## What omfx does better
 
-- **Parse gate** — a write that breaks a previously clean file is rewound before the model sees success.
-- **One-shot LSP** — after a clean parse, diagnostics from a language server already on PATH (nothing bundled, no daemon).
-- **Effort `auto`** — reasoning budget follows the prompt, not a fixed default.
-- **ARC compact + recall** — dropped context is cited into inspectable recall files, not rewritten by another model.
-- **Hybrid semantic search** — repo-rank + symbols + tokens fused; no embeddings required.
-- **Memory + playbook** — workspace and user facts, plus verified lessons that can graduate into skills.
-- **Shared board** — structured notes for facts, failures, and paths for peers and coordination.
-- **Ranked repo map** — orientation by symbol references, not directory walk order.
-- **Credential-aware `/models`** — subscription and API windows capped correctly.
-- **Stacked skills + `@files`** — several skills and file anchors in one prompt.
-- **Web fallback chain** — nineteen search backends; pick an order in `/web`, first that works wins.
-- **External IDE** — `/ide open` launches code, cursor, zed, and friends on the workspace.
+- **Parse gate**: omfx rewinds a write that breaks a file that parsed clean before the model sees success.
+- **One-shot LSP**: after a clean parse, omfx runs diagnostics from a language server on PATH. Nothing is bundled; no daemon.
+- **Effort `auto`**: reasoning budget follows the prompt, not a fixed default.
+- **ARC compact + recall**: dropped context lands in inspectable recall files, not a rewrite pass from another model.
+- **Hybrid semantic search**: repo rank, symbols, and tokens fused; no embeddings required.
+- **Memory + playbook**: workspace and user facts, plus verified lessons that can graduate into skills.
+- **Shared board**: structured notes for facts, failures, and paths for peers and coordination.
+- **Ranked repo map**: orientation by symbol references, not directory walk order.
+- **Credential-aware `/models`**: signed-in providers first, then that provider's models.
+- **Stacked skills + `@files`**: several skills and file anchors in one prompt.
+- **Web fallback chain**: nineteen search backends; pick an order in `/web`, first match wins.
+- **External IDE**: `/ide open` launches code, cursor, zed, and friends on the workspace.
 
 ## What omfx asks before it acts
 

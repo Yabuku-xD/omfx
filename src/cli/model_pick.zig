@@ -7,6 +7,7 @@ const cmd_ctx = @import("cmd_ctx.zig");
 const Ctx = cmd_ctx.Ctx;
 const State = cmd_ctx.State;
 const emit = cmd_ctx.emit;
+const settle = cmd_ctx.settle;
 const readAuth = cmd_ctx.readAuth;
 const persistChat = cmd_ctx.persistChat;
 const refreshInto = cmd_ctx.refreshInto;
@@ -33,20 +34,20 @@ pub fn noteUsing(ctx: *Ctx, id: []const u8) !void {
     const provider = if (ctx.state.resolved) |r| r.spec.id else "";
     const label = modelDisplay(id, provider);
     const m = describeModel(ctx, provider, id) orelse {
-        try emit(ctx, try std.fmt.allocPrint(ctx.arena, "Using {s}.\n", .{label}));
+        settle(ctx, try std.fmt.allocPrint(ctx.arena, "Using {s}.", .{label}));
         return;
     };
     // The window and the levels are what change between models, so they are
     // what the confirmation says.
     if (m.context_window == 0 and m.efforts.len == 0) {
-        try emit(ctx, try std.fmt.allocPrint(ctx.arena, "Using {s}.\n", .{label}));
+        settle(ctx, try std.fmt.allocPrint(ctx.arena, "Using {s}.", .{label}));
         return;
     }
     if (m.efforts.len == 0) {
-        try emit(ctx, try std.fmt.allocPrint(ctx.arena, "Using {s}. It holds {d}k of context.\n", .{ label, m.context_window / 1000 }));
+        settle(ctx, try std.fmt.allocPrint(ctx.arena, "Using {s}. It holds {d}k of context.", .{ label, m.context_window / 1000 }));
         return;
     }
-    try emit(ctx, try std.fmt.allocPrint(ctx.arena, "Using {s}. It holds {d}k of context and offers auto, {s}.\n", .{
+    settle(ctx, try std.fmt.allocPrint(ctx.arena, "Using {s}. It holds {d}k of context and offers auto, {s}.", .{
         label,
         m.context_window / 1000,
         effortList(ctx.arena, m.efforts),
@@ -56,6 +57,29 @@ pub fn noteUsing(ctx: *Ctx, id: []const u8) !void {
 fn modelRowWanted(id: []const u8, help: []const u8, rest: []const u8) bool {
     if (rest.len == 0) return true;
     return std.mem.indexOf(u8, id, rest) != null or std.mem.indexOf(u8, help, rest) != null;
+}
+
+fn providerSignedIn(json: []const u8, spec: catalog.Spec) bool {
+    return auth.extractKey(json, catalog.storeId(spec)) != null or auth.extractKey(json, spec.id) != null;
+}
+
+fn providerLabel(arena: std.mem.Allocator, spec: catalog.Spec, current: []const u8, signed_in: bool) []const u8 {
+    const base = if (signed_in)
+        std.fmt.allocPrint(arena, "✓ {s}", .{spec.name}) catch spec.name
+    else
+        spec.name;
+    if (current.len == 0 or !std.mem.eql(u8, spec.id, current)) return base;
+    return std.fmt.allocPrint(arena, "{s}  (current)", .{base}) catch base;
+}
+
+pub fn fillSignedProviders(ctx: *Ctx) void {
+    ctx.state.pick.open(.providers);
+    const json = readAuth(ctx.arena, ctx.io, ctx.home);
+    const current = if (ctx.state.resolved) |r| r.spec.id else "";
+    for (catalog.all) |spec| {
+        if (!providerSignedIn(json, spec)) continue;
+        ctx.state.pick.pushFlipped(spec.id, providerLabel(ctx.arena, spec, current, true));
+    }
 }
 
 pub fn fillProviders(state: *State, rest: []const u8) void {
@@ -188,14 +212,16 @@ pub fn fillEffortsFor(ctx: *Ctx, provider: []const u8, id: []const u8) bool {
 
 pub fn doModels(ctx: *Ctx, rest: []const u8) !void {
     const arg = std.mem.trim(u8, rest, " \t");
+    if (arg.len == 0) {
+        fillSignedProviders(ctx);
+        if (ctx.state.pick.n == 0) {
+            try emit(ctx, "Not signed in yet. Run /login to add a provider, then /models again.\n");
+        }
+        return;
+    }
     const provider = if (ctx.state.resolved) |r| r.spec.id else "";
     if (provider.len == 0) {
         try emit(ctx, "Not signed in yet. Run /login to pick a provider.\n");
-        return;
-    }
-    if (arg.len == 0) {
-        fillModelsFor(ctx, provider);
-        if (ctx.state.pick.n == 0) try emit(ctx, "This provider lists no models.\n");
         return;
     }
     if (std.mem.eql(u8, arg, "refresh")) {
@@ -210,9 +236,9 @@ fn refreshModels(ctx: *Ctx, provider: []const u8) !void {
     ctx.state.registry.n = 0;
     const live = providerModels(ctx, provider);
     if (live.n == 0) {
-        try emit(ctx, try std.fmt.allocPrint(
+        settle(ctx, try std.fmt.allocPrint(
             ctx.arena,
-            "{s} publishes no model list, so the built-in table is in use.\n",
+            "{s} publishes no model list, so the built-in table is in use.",
             .{provider},
         ));
         return;
@@ -221,14 +247,14 @@ fn refreshModels(ctx: *Ctx, provider: []const u8) !void {
     // reported against the login that asked for it.
     const cap = registry.authCap(provider);
     if (cap != 0) {
-        try emit(ctx, try std.fmt.allocPrint(
+        settle(ctx, try std.fmt.allocPrint(
             ctx.arena,
-            "{d} models from {s}. This login caps context at {d}k.\n",
+            "{d} models from {s}. This login caps context at {d}k.",
             .{ live.n, provider, cap / 1000 },
         ));
         return;
     }
-    try emit(ctx, try std.fmt.allocPrint(ctx.arena, "{d} models from {s}.\n", .{ live.n, provider }));
+    settle(ctx, try std.fmt.allocPrint(ctx.arena, "{d} models from {s}.", .{ live.n, provider }));
 }
 
 pub fn bindProvider(ctx: *Ctx, id: []const u8) !void {
@@ -250,14 +276,28 @@ pub fn bindProvider(ctx: *Ctx, id: []const u8) !void {
     persistChat(ctx);
 }
 
-pub fn stepPickBack(state: *State) bool {
-    // Models no longer sit under a provider list, so there is nothing behind
-    // them to step back to: closing is the only way out.
-    if (state.pick.kind != .none) {
-        state.pick.clear();
-        return true;
+pub fn stepPickBack(ctx: *Ctx) bool {
+    switch (ctx.state.pick.kind) {
+        .efforts => {
+            const provider = if (ctx.state.resolved) |r| r.spec.id else "";
+            if (provider.len == 0) {
+                ctx.state.pick.clear();
+                return true;
+            }
+            fillModelsFor(ctx, provider);
+            return true;
+        },
+        .models => {
+            fillSignedProviders(ctx);
+            if (ctx.state.pick.n == 0) ctx.state.pick.clear();
+            return true;
+        },
+        .none => return false,
+        else => {
+            ctx.state.pick.clear();
+            return true;
+        },
     }
-    return false;
 }
 
 pub fn doModel(ctx: *Ctx, rest: []const u8) !void {

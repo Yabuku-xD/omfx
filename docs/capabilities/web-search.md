@@ -1,21 +1,21 @@
 # Web search
 
-Configure search backends with `/web`.
+Run `/web` to configure search backends.
 
 Keys live in `~/.omfx/auth.json`. Fallback order lives in `~/.omfx/settings.json`.
 
-Nineteen backends are available (API key, SearXNG endpoint, and free). Model-native search (Anthropic, xAI, ChatGPT, Gemini) is not listed here — those models already search when you chat with them. Prefer omfx `web_search` / `web_fetch` / `web_scrape` over any built-in vendor search.
+omfx ships nineteen backends: API key, SearXNG endpoint, and free. Free backends need no key and show as configured in the menu. Anthropic, xAI, ChatGPT, and Gemini search inside the model; they do not appear here. Use `web_search`, `web_fetch`, and `web_scrape` instead of vendor-native search.
 
 Inside `/web`:
 
-- Pick a provider to try it first (and paste a key if it needs one)
-- Pick **Set search order**, then pick first, second, third… Empty line saves (replaces the previous list)
-  - Pick the same provider again to remove it
-  - Pick **Start over** to clear the picks and begin again
-  - Pick **Use built-in order** if the custom list went wrong (drops it; the default chain runs)
-- `off id` / `on id` — skip or include again
-- `test zig 0.16` — run the chain now
+- Pick a provider to move it first (paste a key when prompted)
+- Pick **Set search order**, then pick first, second, third. An empty line saves and replaces the old list.
+  - Pick the same provider again to drop it from the list
+  - Pick **Start over** to clear picks and begin again
+  - Pick **Use built-in order** to drop a custom list and run the default chain
+- `off id` / `on id` skip or restore a backend
+- `test zig 0.16` runs the chain now
 
-The first working provider in the order wins; the rest are fallbacks.
+The first backend that works wins; the rest are fallbacks.
 
-Related tools: `web_fetch` (short raw sample for HTML), `web_scrape` (title + main text). Search returns numbered title/URL/snippet hits, deduped, with tracking params stripped. Prefer these omfx tools over any model-native search.
+Related tools: `web_fetch` returns a short HTML sample; `web_scrape` returns title and main text. Search hits are numbered title, URL, and snippet, deduped, with tracking params stripped.

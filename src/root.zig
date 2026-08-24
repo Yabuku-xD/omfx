@@ -89,6 +89,7 @@ test {
     _ = settings;
     _ = menus;
     _ = cmds;
+    _ = @import("cli/ux.zig");
     _ = context;
     _ = board;
     _ = ssvp;

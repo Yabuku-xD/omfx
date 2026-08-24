@@ -23,9 +23,9 @@ Type `/` in the interactive session to search commands. Everything else is sent 
 
 | Command | Purpose |
 | --- | --- |
-| `/login` | Sign in (`/setup`) |
+| `/login` | Sign in (`/setup`); configured providers show `✓` |
 | `/logout` | Remove a stored provider key |
-| `/models` | Models for the signed-in provider (`/model` is an alias) |
+| `/models` | Signed-in providers, then models; Esc goes back |
 | `/fast` | Toggle effort=none |
 | `/permissions` | `ask` \| `auto` \| `yolo` |
 | `/allowlist` | Persistent permission rules |
@@ -33,6 +33,8 @@ Type `/` in the interactive session to search commands. Everything else is sent 
 | `/yolo` | Allow writes this session |
 | `/effort` | Reasoning level; `auto` picks per prompt (ctrl-t cycles) |
 | `/plan` | Read-only plan mode; `/plan go` implements |
+
+Model and provider picks settle in the footer for three seconds; menus and errors stay in the scrollback.
 
 ## Inspect and settings
 
