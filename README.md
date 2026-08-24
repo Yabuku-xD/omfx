@@ -3,7 +3,7 @@
 A coding agent CLI built to keep edits honest, memory inspectable, and context
 under control.
 
-**9** providers · **27** built-in tools · **19** search backends · **~3 MB** binary · **Zig 0.16**
+**9** providers · **27** built-in tools · **19** search backends · **~3 MB** binary · **Zig 0.16** · **MIT**
 
 ## Install
 
@@ -67,8 +67,8 @@ level the model declares. Vision when supported.
 **Permissions** — ask before sensitive tools; plan is read-only until you go; yolo
 is session-only and never persisted. Allowlist, sandbox, Shift-Tab cycling.
 
-**Web fallback chain** — twenty-three search backends in your order; test the chain;
-first working provider wins.
+**Web fallback chain** — nineteen search backends in your order; test the chain;
+first working provider wins. Set order by picking, not by typing ids.
 
 **Skills** — discovered from your other agent CLIs, stackable in one prompt or
 mid-sentence, with file anchors inline. Reload rescans.

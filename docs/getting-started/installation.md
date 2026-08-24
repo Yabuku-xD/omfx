@@ -27,6 +27,11 @@ zig build
 
 Use the binary at `./zig-out/bin/omfx`, not an older copy on your `PATH`. `zig build` produces ReleaseFast; `zig build test` stays Debug.
 
+```sh
+zig fmt --check src build.zig   # CI runs this first
+zig build test                  # units + dispatch e2e cases
+```
+
 ## Verify
 
 ```sh
@@ -48,3 +53,7 @@ omfx update --force    # reinstall even when already current
 If GitHub rate-limits release metadata, set `GITHUB_TOKEN` or `GH_TOKEN`.
 
 You can still re-run the install script directly; it always fetches the latest release unless `OMFX_VERSION` is set.
+
+## License
+
+omfx is [MIT](../../LICENSE).

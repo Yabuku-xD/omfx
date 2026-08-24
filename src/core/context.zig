@@ -136,9 +136,6 @@ pub fn gitSnapshot(allocator: std.mem.Allocator, io: Io, workspace: []const u8) 
     errdefer {
         collected.deinit(allocator);
         child.kill(io);
-        _ = child.wait(io) catch |err| {
-            log.debug("git wait: {s}", .{@errorName(err)});
-        };
     }
     if (child.stdout) |f| {
         var reader = Io.File.Reader.initStreaming(f, io, &out_buf);

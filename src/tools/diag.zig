@@ -90,9 +90,6 @@ pub fn afterDiff(
     errdefer {
         collected.deinit(allocator);
         child.kill(io);
-        _ = child.wait(io) catch |err| {
-            log.debug("wait: {s}", .{@errorName(err)});
-        };
     }
     if (child.stdout) |f| {
         var reader = Io.File.Reader.initStreaming(f, io, &out_buf);
@@ -237,9 +234,6 @@ fn runCheck(
     errdefer {
         collected.deinit(allocator);
         child.kill(io);
-        _ = child.wait(io) catch |err| {
-            log.debug("wait: {s}", .{@errorName(err)});
-        };
     }
     if (child.stderr) |f| {
         var reader = Io.File.Reader.initStreaming(f, io, &out_buf);
@@ -424,9 +418,6 @@ fn zigAstCheck(
     errdefer {
         collected.deinit(allocator);
         child.kill(io);
-        _ = child.wait(io) catch |err| {
-            log.debug("wait: {s}", .{@errorName(err)});
-        };
     }
     if (child.stderr) |f| {
         var reader = Io.File.Reader.initStreaming(f, io, &out_buf);

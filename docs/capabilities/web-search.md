@@ -18,4 +18,4 @@ Inside `/web`:
 
 The first working provider in the order wins; the rest are fallbacks.
 
-Related tools: `web_fetch` (short raw sample for HTML), `web_scrape` (title + main text). Search returns numbered title/URL/snippet hits, deduped, with tracking params stripped.
+Related tools: `web_fetch` (short raw sample for HTML), `web_scrape` (title + main text). Search returns numbered title/URL/snippet hits, deduped, with tracking params stripped. Prefer these omfx tools over any model-native search.

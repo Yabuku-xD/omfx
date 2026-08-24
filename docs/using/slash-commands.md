@@ -53,7 +53,7 @@ Type `/` in the interactive session to search commands. Everything else is sent 
 
 | Command | Purpose |
 | --- | --- |
-| `/web` | Web search keys and fallback order |
+| `/web` | Search backends: keys, pick-to-order, test chain (19 backends) |
 | `/browser` | Install Chrome relay extension |
 | `/reload` | Reload settings, auth, skills, relay |
 | `/background` | Background commands |

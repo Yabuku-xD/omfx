@@ -270,7 +270,6 @@ fn collectInner(
         error.EndOfStream => {},
         else => {
             child.kill(io);
-            _ = child.wait(io) catch |e| log.debug("wait: {s}", .{@errorName(e)});
             return std.fmt.allocPrint(allocator, "(read failed: {s})", .{@errorName(err)});
         },
     }
