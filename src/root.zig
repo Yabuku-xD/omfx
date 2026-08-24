@@ -28,6 +28,7 @@ pub const agent = @import("core/agent.zig");
 pub const skills = @import("core/skills.zig");
 pub const compact = @import("core/compact.zig");
 pub const autoeffort = @import("core/autoeffort.zig");
+pub const peer_router = @import("core/peer_router.zig");
 pub const slash = @import("core/slash.zig");
 pub const settings = @import("core/settings.zig");
 pub const menus = @import("cli/menus.zig");
@@ -85,6 +86,7 @@ test {
     _ = skills;
     _ = compact;
     _ = autoeffort;
+    _ = peer_router;
     _ = slash;
     _ = settings;
     _ = menus;

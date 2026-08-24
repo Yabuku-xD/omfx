@@ -30,6 +30,7 @@ const config = @import("../core/config.zig");
 const env = @import("../core/env.zig");
 const cli = @import("../core/cli.zig");
 const catalog = @import("../providers/catalog.zig");
+const auth = @import("../providers/auth.zig");
 const ide_mod = @import("../core/ide.zig");
 const types = @import("../providers/types.zig");
 const pathing = @import("../tools/pathing.zig");
@@ -862,6 +863,13 @@ fn settingsPanel(sess: *Session) panel_mod.Panel {
         .kind = .toggle,
         .value = if (sess.state.telemetry) "on" else "off",
         .help = "sends attribution headers only; off means nothing identifies the client",
+    });
+    p.add(.{
+        .key = "peer",
+        .label = "Auto peers",
+        .kind = .toggle,
+        .value = if (settings.peerAutoOn(cfg)) "on" else "off",
+        .help = "model may invoke peer; manual /peers always works",
     });
     p.add(.{
         .key = "statusline",
@@ -2604,6 +2612,7 @@ pub fn run(
         var cfg_depth = settings.load(gpa, io, home);
         const peer_depth = cfg_depth.max_peer_depth;
         cfg_depth.deinit(gpa);
+        const auth_json = auth.readJson(arena, io, home);
         // Committed bytes, not display rows: rows include the transient status
         // and streaming tail, which move during the turn for reasons that have
         // nothing to do with whether the reply was already shown.
@@ -2630,6 +2639,8 @@ pub fn run(
                 .max_peer_depth = peer_depth,
                 .prior_user = if (state.interrupted) state.last_prompt else "",
                 .prior_assistant = if (state.interrupted) state.last_reply else "",
+                .lookup = lookup,
+                .auth_json = auth_json,
             },
         ) catch |err| blk: {
             reply_owned = false;

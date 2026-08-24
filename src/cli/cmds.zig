@@ -39,6 +39,8 @@ const pathing = @import("../tools/pathing.zig");
 const bash = @import("../tools/bash.zig");
 const isolate = @import("../tools/isolate.zig");
 const diagram = @import("../core/diagram.zig");
+const peer_router = @import("../core/peer_router.zig");
+const model_signals = @import("../providers/model_signals.zig");
 
 const cmd_ctx = @import("cmd_ctx.zig");
 const model_pick = @import("model_pick.zig");
@@ -160,6 +162,21 @@ fn endpointOf(ctx: *Ctx) ?types.Endpoint {
     var ep = catalog.toEndpoint(resolved);
     ep.base_url = ctx.arena.dupe(u8, resolved.base_url) catch return null;
     if (ctx.state.effort.len > 0) ep.effort = ctx.state.effort;
+    return ep;
+}
+
+fn peerEndpointOf(ctx: *Ctx, goal: []const u8) ?types.Endpoint {
+    const main = endpointOf(ctx) orelse return null;
+    const json = readAuth(ctx.arena, ctx.io, ctx.home);
+    const ep = peer_router.endpoint(
+        ctx.arena,
+        ctx.io,
+        ctx.home,
+        ctx.lookup,
+        json,
+        main,
+        goal,
+    ) catch return null;
     return ep;
 }
 
@@ -294,6 +311,7 @@ fn doReload(ctx: *Ctx) !void {
     for (cfg.workspace_dirs) |d| ctx.state.appendExtra(try ctx.arena.dupe(u8, d)) catch break;
     pathing.setAccess(.{ .workspace = ctx.workspace, .extra = ctx.state.extraSlice() });
     relay.ensure(ctx.gpa, ctx.io, port);
+    model_signals.ensure(ctx.gpa, ctx.io, ctx.home);
     const names = skills.listAllNames(ctx.gpa, ctx.io, Io.Dir.cwd(), ctx.home, ctx.workspace) catch try ctx.gpa.alloc([]const u8, 0);
     defer {
         for (names) |name| ctx.gpa.free(name);
@@ -319,16 +337,11 @@ fn doPeers(ctx: *Ctx, rest: []const u8) !void {
         try emit(ctx, "Give the teammate a goal: /peers <goal>.\n");
         return;
     }
-    var cfg = settings.load(ctx.gpa, ctx.io, ctx.home);
-    defer cfg.deinit(ctx.gpa);
-    if ((permissions.matchLast(cfg.rules, "peer", "{}") orelse .allow) == .deny) {
-        try emit(ctx, "Teammates are turned off in settings.\n");
-        return;
-    }
-    const ep = endpointOf(ctx) orelse {
+    const ep = peerEndpointOf(ctx, rest) orelse {
         try emit(ctx, run.missing_key_text);
         return;
     };
+    const json = readAuth(ctx.arena, ctx.io, ctx.home);
     const nested = try agent.peerTask(ctx.arena, rest);
     try emit(ctx, try std.fmt.allocPrint(ctx.arena, "/peers {s}\n", .{rest}));
     var trace = agent.Trace{};
@@ -341,6 +354,8 @@ fn doPeers(ctx: *Ctx, rest: []const u8) !void {
         .depth = 1,
         .trace = &trace,
         .plan = ctx.state.plan,
+        .lookup = ctx.lookup,
+        .auth_json = json,
     }) catch |err| blk: {
         reply_owned = false;
         break :blk try std.fmt.allocPrint(ctx.arena, "error: {s}\n", .{@errorName(err)});
@@ -651,7 +666,8 @@ pub fn applySetting(ctx: *Ctx, pair: []const u8) !bool {
     } else if (settings.Pref.fromSlice(key)) |pref| {
         // `auto` is omfx's own level: stored as empty, because it is resolved
         // per prompt rather than sent.
-        const stored = if ((pref == .effort or pref == .editor or pref == .ide) and std.mem.eql(u8, value, auto_effort)) "" else value;
+        const stored = if ((pref == .effort or pref == .editor or pref == .ide) and
+            std.mem.eql(u8, value, auto_effort)) "" else value;
         try settings.setPref(ctx.gpa, ctx.io, ctx.home, pref, stored);
     } else return false;
 
@@ -670,7 +686,7 @@ pub fn applySetting(ctx: *Ctx, pair: []const u8) !bool {
     return true;
 }
 
-const settings_usage = "usage: /settings <key>=<value>\n  sound thinking telemetry statusline sandbox mode composer editor ide\n  review cdp_port effort bash_timeout keep_sessions max_peer_depth\n";
+const settings_usage = "usage: /settings <key>=<value>\n  sound thinking telemetry peer statusline sandbox mode composer editor ide\n  review cdp_port effort bash_timeout keep_sessions max_peer_depth\n";
 
 fn doSettings(ctx: *Ctx, rest: []const u8) !void {
     if (rest.len > 0) {

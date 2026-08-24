@@ -23,7 +23,7 @@ pub const text =
     \\bash: set timeout for a slow build. Dev servers and watchers detach by default; poll them with job, do not wait on them.
     \\Dropped tool bodies become cite rN at .omfx/recall/rN.txt; compact never encrypts and never stops the loop.
     \\Call compact when a sub-task is done (verify clean) or you are stuck repeating; do not compact mid-derivation. compact is local ARC: cites, not an LLM rewrite.
-    \\peer: isolated git worktree under .omfx/peers when git exists; else shared workspace. Talks through board, not nested peers. Post FACT/FAIL/PATH. User may type /peers <goal>.
+    \\peer: auto-routed teammates; plain words like "sonnet 5 from anthropic" pin the model. Reasoning stays auto unless the goal names a level for that model. Isolated worktree when git exists. Board FACT/FAIL/PATH. User may /peers <goal>.
     \\Diagrams: mermaid in fenced ```mermaid blocks. The harness saves them under .omfx/diagrams/ (svg if mmdc is on PATH). Markdown tables stay as text.
     \\
 ;

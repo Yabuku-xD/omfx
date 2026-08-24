@@ -7,6 +7,9 @@ const skills = @import("skills.zig");
 const compact = @import("compact.zig");
 const context = @import("context.zig");
 const settings = @import("settings.zig");
+const env = @import("env.zig");
+const peer_router = @import("peer_router.zig");
+const peer_policy = @import("peer_policy.zig");
 const board = @import("board.zig");
 const pathing = @import("../tools/pathing.zig");
 const ssvp = @import("ssvp.zig");
@@ -270,6 +273,8 @@ pub const Run = struct {
     /// Interrupted turn still in play: the next follow-up attaches to this, not a fresh task.
     prior_user: []const u8 = "",
     prior_assistant: []const u8 = "",
+    lookup: env.Lookup = env.emptyLookup(),
+    auth_json: []const u8 = "",
 };
 
 /// HTTP failures collapse here. A peer re-enters `chatOnce` from `chatTurn`, so
@@ -382,18 +387,26 @@ fn chatTurn(
     defer cfg.deinit(allocator);
     const host = run.host;
     const depth_cap: u8 = if (run.max_peer_depth == 0) 1 else @min(run.max_peer_depth, max_peer_depth_cap);
-    const allow_peer = depth == 0 and (permissions.matchLast(cfg.rules, "peer", "{}") orelse .allow) != .deny;
-    const sys = try assembleSystem(allocator, io, dir, workspace, home, allow_peer, plan);
-    if (trace) |t| {
-        t.sys_bytes = @intCast(@min(sys.len, std.math.maxInt(u32)));
-        t.tools_bytes = @intCast(@min(pclient.advertisedBytes(endpoint), std.math.maxInt(u32)));
-    }
+    const peer_denied = (permissions.matchLast(cfg.rules, "peer", "{}") orelse .allow) == .deny;
     var always: [8][]const u8 = undefined;
     var always_n: usize = 0;
     var con = try contract_mod.load(allocator, dir, io, home);
     defer con.deinit(allocator);
     const board_tail0 = board.loadTail(allocator, io, workspace);
     var last_summary = try ssvp.summary(allocator, board_tail0);
+    const base_allow_peer = depth == 0 and settings.peerAutoOn(cfg) and !peer_denied;
+    const allow_peer = base_allow_peer and peer_policy.decide(.{
+        .prompt = user,
+        .prior_user = run.prior_user,
+        .prior_assistant = run.prior_assistant,
+        .board_summary = last_summary,
+        .plan = plan,
+    }).offer;
+    const sys = try assembleSystem(allocator, io, dir, workspace, home, allow_peer, plan, run.lookup, run.auth_json, endpoint);
+    if (trace) |t| {
+        t.sys_bytes = @intCast(@min(sys.len, std.math.maxInt(u32)));
+        t.tools_bytes = @intCast(@min(pclient.advertisedBytes(endpoint), std.math.maxInt(u32)));
+    }
 
     const state_block = try workspaceState(allocator, io, dir, workspace);
     defer allocator.free(state_block);
@@ -566,6 +579,8 @@ fn chatTurn(
                 .trace = trace,
                 .plan = run.plan,
                 .cfg = cfg,
+                .lookup = run.lookup,
+                .auth_json = run.auth_json,
                 .explored = explored,
                 .same = same,
                 .asst_text = asst_text,
@@ -708,6 +723,8 @@ const AdmitArgs = struct {
     trace: ?*Trace,
     plan: Plan,
     cfg: settings.File,
+    lookup: env.Lookup,
+    auth_json: []const u8,
     explored: bool,
     same: usize,
     asst_text: []u8,
@@ -739,8 +756,10 @@ fn executeAdmitted(a: AdmitArgs) !AdmitOutcome {
     const path = a.path;
     var result: []u8 = undefined;
     if (Tool.Name.fromSlice(tool_name) == .peer) {
-        if (!a.allow_peer or a.depth >= a.depth_cap) {
+        if (a.depth >= a.depth_cap) {
             result = try allocator.dupe(u8, "peer: nested peer denied; post to board so other peers can read it\n");
+        } else if (!a.allow_peer) {
+            result = try allocator.dupe(u8, "peer: auto delegation is off for this task; manual /peers still works\n");
         } else {
             const goal = sse.argString(allocator, tool_args, "goal") orelse
                 sse.argString(allocator, tool_args, "query") orelse "";
@@ -751,7 +770,23 @@ fn executeAdmitted(a: AdmitArgs) !AdmitOutcome {
             const opened = isolate.open(place, a.io, a.dir);
             defer opened.deinit(a.io);
             const peer_ws = place.workspace(a.workspace);
-            result = chatOnce(allocator, a.io, opened.dir(), peer_ws, a.endpoint, nested, .{
+            var peer_ep = peer_router.endpoint(
+                allocator,
+                a.io,
+                a.home,
+                a.lookup,
+                a.auth_json,
+                a.endpoint,
+                goal,
+            ) catch |err| blk: {
+                if (err == error.NoCredential) break :blk a.endpoint;
+                return err;
+            };
+            const peer_owned = !std.mem.eql(u8, peer_ep.base_url, a.endpoint.base_url) or
+                !std.mem.eql(u8, peer_ep.api_key, a.endpoint.api_key) or
+                !std.mem.eql(u8, peer_ep.model, a.endpoint.model);
+            defer if (peer_owned) peer_router.deinitEndpoint(allocator, &peer_ep);
+            result = chatOnce(allocator, a.io, opened.dir(), peer_ws, peer_ep, nested, .{
                 .mode = a.mode,
                 .has_tty = a.has_tty,
                 .home = a.home,
@@ -761,6 +796,8 @@ fn executeAdmitted(a: AdmitArgs) !AdmitOutcome {
                 .plan = a.plan,
                 .host = a.host,
                 .max_peer_depth = a.depth_cap,
+                .lookup = a.lookup,
+                .auth_json = a.auth_json,
             }) catch |err|
                 try std.fmt.allocPrint(allocator, "Note (kept):\n(FAIL peer {s})\n", .{@errorName(err)});
         }
@@ -918,6 +955,9 @@ fn assembleSystem(
     home: []const u8,
     allow_peer: bool,
     plan: bool,
+    lookup: env.Lookup,
+    auth_json: []const u8,
+    main: types.Endpoint,
 ) ![]u8 {
     const names = try skills.listAllNames(allocator, io, dir, home, workspace);
     defer {
@@ -930,7 +970,9 @@ fn assembleSystem(
     defer allocator.free(play_cat);
     const mem_block = try memory_mod.promptBlock(allocator, io, home, dir);
     defer allocator.free(mem_block);
-    const skill_block = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ skill_names, play_cat, mem_block });
+    const peer_block = try peer_router.promptBlock(allocator, lookup, auth_json, main);
+    defer allocator.free(peer_block);
+    const skill_block = try std.fmt.allocPrint(allocator, "{s}{s}{s}{s}", .{ skill_names, play_cat, mem_block, peer_block });
     defer allocator.free(skill_block);
 
     var con = try contract_mod.load(allocator, dir, io, home);
@@ -1194,9 +1236,15 @@ test "bench: assembleSystem size in empty workspace" {
         try w.interface.writeAll("no subagents\n");
         try w.interface.flush();
     }
-    const sys = try assembleSystem(a, io, tmp.dir, "/no-such-omfx-git-workspace", "/tmp", true, false);
+    const main = types.Endpoint{
+        .vendor = .openai,
+        .base_url = "",
+        .api_key = "",
+        .model = "test-model",
+    };
+    const sys = try assembleSystem(a, io, tmp.dir, "/no-such-omfx-git-workspace", "/tmp", true, false, env.emptyLookup(), "", main);
     defer a.free(sys);
-    const sys_plan = try assembleSystem(a, io, tmp.dir, "/no-such-omfx-git-workspace", "/tmp", true, true);
+    const sys_plan = try assembleSystem(a, io, tmp.dir, "/no-such-omfx-git-workspace", "/tmp", true, true, env.emptyLookup(), "", main);
     defer a.free(sys_plan);
     std.debug.print(
         "BENCH assemble_sys_bytes={d} assemble_plan_bytes={d} has_postcard={d} has_agents={d}\n",
@@ -1318,7 +1366,13 @@ test "the system prompt does not move when the workspace does" {
     // Prompt caching matches an exact prefix. If a file write changed the
     // system prompt, every turn after the first edit would reprocess the whole
     // request, which is what the git snapshot and the repo map used to do.
-    const before = try assembleSystem(a, io, tmp.dir, "/no-such-omfx-git-workspace", "/tmp", true, false);
+    const main = types.Endpoint{
+        .vendor = .openai,
+        .base_url = "",
+        .api_key = "",
+        .model = "test-model",
+    };
+    const before = try assembleSystem(a, io, tmp.dir, "/no-such-omfx-git-workspace", "/tmp", true, false, env.emptyLookup(), "", main);
     defer a.free(before);
 
     var f = try tmp.dir.createFile(io, "new.zig", .{ .truncate = true });
@@ -1328,7 +1382,7 @@ test "the system prompt does not move when the workspace does" {
     try w.interface.flush();
     f.close(io);
 
-    const after = try assembleSystem(a, io, tmp.dir, "/no-such-omfx-git-workspace", "/tmp", true, false);
+    const after = try assembleSystem(a, io, tmp.dir, "/no-such-omfx-git-workspace", "/tmp", true, false, env.emptyLookup(), "", main);
     defer a.free(after);
     try std.testing.expectEqualStrings(before, after);
 }
