@@ -29,7 +29,7 @@ Use the binary at `./zig-out/bin/omfx`, not an older copy on your `PATH`. `zig b
 
 ```sh
 zig fmt --check src build.zig   # CI runs this first
-zig build test                  # units + dispatch e2e cases
+zig build test                  # units, tool e2e, slash UX in src/cli/ux.zig
 ```
 
 ## Verify

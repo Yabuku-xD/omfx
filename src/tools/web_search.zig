@@ -102,7 +102,7 @@ pub fn isAvailable(spec: Spec, auth_json: []const u8, web: settings.Web, explici
 
 pub fn isConfigured(spec: Spec, auth_json: []const u8, web: settings.Web) bool {
     return switch (spec.kind) {
-        .free => false,
+        .free => true,
         .endpoint => web.searxng_endpoint.len > 0 or processEnv("SEARXNG_ENDPOINT") != null,
         .api_key => credential(auth_json, spec) != null,
     };
@@ -613,7 +613,7 @@ pub fn searchFromHome(allocator: std.mem.Allocator, io: Io, home: []const u8, qu
 pub fn statusLine(spec: Spec, auth_json: []const u8, web: settings.Web) []const u8 {
     if (settings.excluded(web, spec.id)) return "off";
     return switch (spec.kind) {
-        .free => if (spec.explicit_only) "explicit" else "ready",
+        .free => "✓ configured",
         .endpoint => if (isConfigured(spec, auth_json, web)) "✓ configured" else "need url",
         .api_key => if (isConfigured(spec, auth_json, web)) "✓ configured" else "need key",
     };
@@ -657,6 +657,14 @@ test "catalog has nineteen providers" {
     try std.testing.expect(byId("gemini") == null);
     try std.testing.expect(byId("codex") == null);
     try std.testing.expect(byId("xai") == null);
+}
+
+test "free backends count as configured without a key" {
+    try std.testing.expect(isConfigured(byId("duckduckgo").?, "", .{}));
+    try std.testing.expect(isConfigured(byId("startpage").?, "", .{}));
+    try std.testing.expect(isConfigured(byId("public").?, "", .{}));
+    try std.testing.expectEqualStrings("✓ configured", statusLine(byId("duckduckgo").?, "", .{}));
+    // Host env may already export API keys; skip negative asserts here.
 }
 
 pub fn formatMenu(allocator: std.mem.Allocator, auth_json: []const u8, web: settings.Web) ![]u8 {

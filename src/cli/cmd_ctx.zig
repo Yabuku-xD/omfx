@@ -243,6 +243,10 @@ pub fn applySurface(state: *State, label: []const u8) void {
     if (config.PermissionMode.fromSlice(label)) |m| state.mode = m;
 }
 
+pub fn settle(ctx: *Ctx, text: []const u8) void {
+    ctx.state.menu.note = std.mem.trimEnd(u8, text, "\n");
+}
+
 pub fn emit(ctx: *Ctx, text: []const u8) !void {
     if (text.len == 0) return;
     const styled = chat.formatCommand(ctx.arena, ctx.state.cols, text) catch text;

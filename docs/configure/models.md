@@ -10,7 +10,13 @@ Choose and inspect models for the signed-in provider.
 /models <id>
 ```
 
-`/model` is an alias of `/models`. The list comes from the provider catalog when published, otherwise the built-in table. After you pick a model that declares reasoning levels, omfx offers `auto` plus those levels. Vision-capable models are labelled; image paths in the prompt attach when supported.
+`/model` is an alias of `/models`.
+
+Bare `/models` lists providers you signed in to. Pick one to see its models. Esc steps back to the provider list.
+
+The list comes from the provider catalog when published, otherwise the built-in table. After you pick a model that declares reasoning levels, omfx offers `auto` plus those levels. Vision-capable models are labelled; image paths in the prompt attach when supported.
+
+Configured providers and free web backends show a leading `✓` in pick menus so the tick survives half-width clipping.
 
 ## Effort
 

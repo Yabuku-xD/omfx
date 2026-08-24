@@ -1971,7 +1971,8 @@ pub fn run(
                     try sess.draft.replace(gpa, sess.palette_stash.items);
                     sess.palette_stash.clearRetainingCapacity();
                 }
-                if (cmds.stepPickBack(state)) {
+                var pctx = sess.cmdCtx();
+                if (cmds.stepPickBack(&pctx)) {
                     if (state.pick.kind == .none) sess.draft.clear();
                     sess.palette = slash_buf[0..(0)];
                     sess.palette_sel = 0;

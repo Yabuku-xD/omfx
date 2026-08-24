@@ -60,6 +60,7 @@ pub const persistChat = cmd_ctx.persistChat;
 pub const refreshInto = cmd_ctx.refreshInto;
 pub const applySurface = cmd_ctx.applySurface;
 const emit = cmd_ctx.emit;
+const settle = cmd_ctx.settle;
 const readAuth = cmd_ctx.readAuth;
 
 pub const auto_effort = model_pick.auto_effort;
@@ -747,7 +748,9 @@ fn doSkills(ctx: *Ctx) !void {
 
 fn configuredLabel(arena: std.mem.Allocator, name: []const u8, on: bool) []const u8 {
     if (!on) return name;
-    return std.fmt.allocPrint(arena, "{s}  ✓ configured", .{name}) catch name;
+    // Tick leads: the menu clips the title to half width from the start, so a
+    // trailing "✓ configured" was the first thing to disappear.
+    return std.fmt.allocPrint(arena, "✓ {s}", .{name}) catch name;
 }
 
 fn startLoginPick(ctx: *Ctx, rest: []const u8) !void {
@@ -820,7 +823,7 @@ pub fn applyPick(ctx: *Ctx, name: []const u8) !Flow {
             settings.setPref(ctx.gpa, ctx.io, ctx.home, .effort, level) catch |err| {
                 log.warn("effort: {s}", .{@errorName(err)});
             };
-            try emit(ctx, try std.fmt.allocPrint(ctx.arena, "Reasoning set to {s}.\n", .{level}));
+            settle(ctx, try std.fmt.allocPrint(ctx.arena, "Reasoning set to {s}.", .{level}));
         },
         .sessions => {
             ctx.state.pick.clear();
