@@ -44,852 +44,16 @@ const board = @import("../core/board.zig");
 const progress = @import("progress.zig");
 const runlog = @import("../core/runlog.zig");
 const menus = @import("menus.zig");
+const session_mod = @import("repl/session.zig");
+const runs_ui = @import("repl/runs_ui.zig");
+const input_mod = @import("repl/input.zig");
+const turn_mod = @import("repl/turn.zig");
+
+pub const Session = session_mod.Session;
+const nowMs = session_mod.nowMs;
 
 const log = std.log.scoped(.repl);
 
-fn toEndpoint(arena: std.mem.Allocator, resolved_opt: ?catalog.Resolved) ?types.Endpoint {
-    const resolved = resolved_opt orelse return null;
-    return catalog.ownedEndpoint(arena, resolved);
-}
-
-/// `auto` is resolved here, at the last possible moment, because the level it
-/// picks depends on the prompt that is about to be sent and on how the last
-/// turns went. Every other level passes through unchanged.
-fn applyEffort(endpoint: *types.Endpoint, effort: []const u8, ladder: []const u8, prompt: []const u8, failures: usize) void {
-    if (effort.len == 0) return;
-    if (!std.mem.eql(u8, effort, cmds.auto_effort)) {
-        endpoint.effort = effort;
-        return;
-    }
-    const picked = autoeffort.resolve(ladder, prompt, failures);
-    if (picked.len > 0) endpoint.effort = picked;
-}
-
-fn nowMs(io: Io) i64 {
-    return Io.Clock.Timestamp.now(io, .awake).raw.toMilliseconds();
-}
-
-/// Everything the event loop mutates, in one place.
-///
-/// These used to be twenty-odd locals in `run`, which is why building a
-/// `cmds.Ctx` took eleven arguments and appeared fourteen times. With the state
-/// named, the context is built once and the loop can hand out `&self.state`.
-const Session = struct {
-    gpa: std.mem.Allocator,
-    arena: std.mem.Allocator,
-    io: Io,
-    stdout: *Io.Writer,
-    home: []const u8,
-    workspace: []const u8,
-    lookup: env.Lookup,
-    parsed: cli.Parsed,
-
-    state: cmds.State,
-    shown: tui.Transcript,
-    /// Committed tool runs, by the bytes they occupy in `shown`.
-    runs: runs_mod.Store,
-    /// Where the keyboard is. Scrollback focus is how a run is opened without
-    /// a mouse; the composer keeps its draft untouched while it is up.
-    focus: Focus = .prompt,
-    /// Index into `runs.items` while focused there.
-    sel: usize = 0,
-    /// Scratch for the hint row, which is rebuilt from the live bindings on
-    /// every paint rather than kept as a string per width.
-    hint_buf: [256]u8 = undefined,
-    /// Set when a prompt typed during the turn ended with Enter: the loop sends
-    /// it instead of waiting for a key that was already pressed.
-    steer_send: bool = false,
-    layout: tui.Layout,
-    cups: tui.Cups,
-    draft: tui.Draft = .{},
-    hist: tui.History = .{},
-    hold: tui.Utf8Hold = .{},
-    arm: tui.Arm = .{},
-
-    scroll: usize = 0,
-    dirty: bool = true,
-    multiline: bool = false,
-    cancel: std.atomic.Value(bool) = .init(false),
-    mode_note: []const u8 = "",
-    /// When the note went up. It answers the hint row for a few seconds and
-    /// then gets out of the way: a confirmation that never leaves stops being
-    /// a confirmation and becomes a label on the wrong thing.
-    mode_note_at: i64 = 0,
-    /// Toast queue: confirmations sit above the footer so they do not steal
-    /// the hint row from keys / generating status.
-    toasts: toast_mod.Queue = .{},
-    /// Last painted toast line (owned by `gpa`). Empty when nothing is showing.
-    toast_paint: []u8 = &.{},
-    /// Hunk focus inside an opened diff (scrollback n/p).
-    hunk_i: usize = 0,
-    hunk_n: usize = 0,
-
-    /// Palette rows currently offered, and which one is highlighted.
-    palette: []const slash.Spec = &.{},
-    palette_sel: usize = 0,
-    palette_stash: std.ArrayList(u8) = .empty,
-    /// Shown until a provider resolves and supplies the real name.
-    fallback_model: []const u8 = "",
-    /// Current activity phrase, set by the turn in flight so both paint paths
-    /// show the same words.
-    status: []const u8 = "",
-    /// The fixed floor under every turn: the system prompt and the advertised
-    /// tool schemas, in bytes, as the last turn sent them.
-    trace_sys: u32 = 0,
-    trace_tools: u32 = 0,
-    /// What the window is holding after the last turn, and what it holds.
-    /// Read from the provider's own usage, never estimated.
-    ctx_used: u32 = 0,
-    ctx_window: u32 = 0,
-    /// The last turn's prompt as the provider billed it. Kept apart from
-    /// `ctx_used` because the question "how much of the window is full" and
-    /// the question "how much of it did I pay full price for" have different
-    /// answers on a cached turn.
-    ctx_fresh: u32 = 0,
-    ctx_cache_read: u32 = 0,
-    ctx_cache_write: u32 = 0,
-    /// The call inside the open run the keyboard is on.
-    child: usize = 0,
-    /// Skills on this machine, as slash commands. Built once at startup: they
-    /// are files on disk, and rescanning per keystroke would stat a hundred
-    /// directories to answer a prefix.
-    skill_specs: []const slash.Spec = &.{},
-    /// Text the pointer has dragged over, and whether a button is still down.
-    marked: tui.Sel = .{},
-    dragging: bool = false,
-    /// Turns in a row that ended without a clean verdict. `auto` reads this:
-    /// a model that is stuck does not get more thinking, it gets less.
-    stuck: usize = 0,
-
-    /// Open settings panel, if any. A panel owns the keyboard while it is up:
-    /// the composer keeps its draft untouched underneath.
-    panel: ?panel_mod.Panel = null,
-    panel_opened_ms: i64 = 0,
-    /// Set when a pick row was chosen; the loop runs it after the panel closes.
-    panel_pick: []const u8 = "",
-    /// Live buffer for a `.text` row being typed into, and for the search box
-    /// of a panel that filters.
-    panel_edit: std.ArrayList(u8) = .empty,
-    /// Which searchable panel is open, so a keystroke rebuilds the same one.
-    /// Non-search panels leave this null.
-    panel_kind: ?cmds.PanelKind = null,
-
-    pub const Focus = enum { prompt, scrollback };
-
-    fn deinit(self: *Session) void {
-        self.runs.deinit();
-        self.panel_edit.deinit(self.gpa);
-        self.draft.deinit(self.gpa);
-        self.hist.deinit(self.gpa);
-        self.palette_stash.deinit(self.gpa);
-        self.shown.deinit();
-        self.state.deinit(self.gpa);
-    }
-
-    fn toTranscript(self: *const Session) []const u8 {
-        return self.cups.toTranscript();
-    }
-
-    fn cmdCtx(self: *Session) cmds.Ctx {
-        // Width follows the pane, so a command answer wraps where the rest of
-        // the transcript does rather than at a compiled-in guess.
-        self.state.cols = self.layout.cols;
-        return .{
-            .gpa = self.gpa,
-            .arena = self.arena,
-            .io = self.io,
-            .stdout = self.stdout,
-            .home = self.home,
-            .workspace = self.workspace,
-            .lookup = self.lookup,
-            .to_transcript = self.toTranscript(),
-            .flag_provider = self.parsed.provider,
-            .flag_model = self.parsed.model,
-            .shown = &self.shown,
-            .state = &self.state,
-        };
-    }
-
-    fn model(self: *const Session) []const u8 {
-        return if (self.state.resolved) |r| r.model else self.fallback_model;
-    }
-
-    fn footer(self: *Session, turn: tui.Turn) tui.Footer {
-        self.refreshToast();
-        return .{
-            .model = self.model(),
-            .permission = cmds.footerPerm(&self.state),
-            .effort = if (self.state.effort.len == 0) cmds.auto_effort else self.state.effort,
-            .sel = self.marked,
-            .context_used = self.ctx_used,
-            .context_window = self.ctx_window,
-            .composer = self.state.composer,
-            .place = self.workspace,
-            .turn = turn,
-            // The same activity phrase the live pane paints. Without this the
-            // repl's own repaints fall back to the generic "Generating", so
-            // the status flickers between the two on every frame.
-            .status = self.status,
-            // The keys that work in the scrollback are not the keys that work
-            // in the composer, so the bar says which set is live.
-            .hint = if (self.focus == .scrollback and turn == .idle)
-                .{ .text = tui.scrollbackHint(&self.hint_buf, self.layout.cols) }
-            else
-                .auto,
-            .toast = self.toast_paint,
-            .jump = tui.jumpVisible(self.scroll, self.layout.transcript_rows),
-        };
-    }
-
-    fn publishJumpHit(self: *Session) void {
-        if (tui.jumpVisible(self.scroll, self.layout.transcript_rows)) {
-            if (tui.jumpHitBox(self.layout)) |box| {
-                sink.setJumpHit(true, box.row, box.col0, box.col1);
-                return;
-            }
-        }
-        sink.setJumpHit(false, 0, 0, 0);
-    }
-
-    /// Re-pin to the live tail. During a turn that resumes stick-to-stream.
-    fn jumpToBottom(self: *Session) bool {
-        if (self.scroll == 0) return false;
-        self.scroll = 0;
-        self.dirty = true;
-        return true;
-    }
-
-    fn tryJumpClick(self: *Session, row: u16, col: u16) bool {
-        if (!tui.jumpVisible(self.scroll, self.layout.transcript_rows)) return false;
-        if (!tui.jumpHit(self.layout, row, col)) return false;
-        return self.jumpToBottom();
-    }
-
-    fn refreshToast(self: *Session) void {
-        if (self.toast_paint.len != 0) {
-            self.gpa.free(self.toast_paint);
-            self.toast_paint = &.{};
-        }
-        const line = self.toasts.line(self.gpa, self.layout.cols, nowMs(self.io)) catch return;
-        self.toast_paint = line;
-    }
-
-    /// Name the tab for the window it is, now that nothing is running in it.
-    fn writeIdleTitle(self: *const Session) void {
-        var buf: [96]u8 = undefined;
-        self.stdout.writeAll(tui.idleTitleSeq(&buf, self.workspace, self.model())) catch |err| {
-            log.debug("tab title: {s}", .{@errorName(err)});
-        };
-    }
-
-    /// Open or close the tool run a click landed on.
-    ///
-    /// The transcript is append-only everywhere else. A run is the one span
-    /// that is re-rendered in place, because its calls belong where the run is
-    /// and not at the bottom of the pane.
-    /// Re-render one run's bytes where they already sit.
-    fn redrawRun(self: *Session, rec: *runs_mod.Store.Rec) bool {
-        // A cleared transcript leaves records pointing at bytes that are gone.
-        if (rec.off + rec.len > self.shown.bytes().len) return false;
-        const focus: ?usize = if (rec.childOpen(self.child) and self.hunk_n > 0) self.hunk_i else null;
-        const next = runs_mod.renderFocus(self.gpa, self.layout.cols, rec.*, focus) catch return false;
-        defer self.gpa.free(next);
-        const was = rec.len;
-        self.shown.replace(rec.off, was, next) catch return false;
-        rec.len = next.len;
-        self.runs.shift(rec.off, @as(isize, @intCast(next.len)) - @as(isize, @intCast(was)));
-        self.dirty = true;
-        return true;
-    }
-
-    fn syncHunkNav(self: *Session, rec: *const runs_mod.Store.Rec) void {
-        if (!rec.expanded or !rec.childOpen(self.child) or self.child >= rec.bodies.len) {
-            self.hunk_i = 0;
-            self.hunk_n = 0;
-            return;
-        }
-        const body = rec.bodies[self.child];
-        if (!chat.looksLikeDiff(body)) {
-            self.hunk_i = 0;
-            self.hunk_n = 0;
-            return;
-        }
-        self.hunk_n = diffview.hunkCount(body);
-        if (self.hunk_n == 0) {
-            self.hunk_i = 0;
-            return;
-        }
-        if (self.hunk_i >= self.hunk_n) self.hunk_i = self.hunk_n - 1;
-    }
-
-    fn stepHunk(self: *Session, forward: bool) bool {
-        if (self.focus != .scrollback or self.sel >= self.runs.items.items.len) return false;
-        const rec = &self.runs.items.items[self.sel];
-        self.syncHunkNav(rec);
-        if (self.hunk_n == 0) return false;
-        if (forward) {
-            self.hunk_i = (self.hunk_i + 1) % self.hunk_n;
-        } else {
-            self.hunk_i = if (self.hunk_i == 0) self.hunk_n - 1 else self.hunk_i - 1;
-        }
-        return self.redrawRun(rec);
-    }
-
-    fn mark(self: *Session, i: usize, on: bool) void {
-        if (i >= self.runs.items.items.len) return;
-        const rec = &self.runs.items.items[i];
-        if (rec.selected == on) return;
-        rec.selected = on;
-        _ = self.redrawRun(rec);
-    }
-
-    /// Move the keyboard into the scrollback, on the newest run.
-    fn focusScrollback(self: *Session) bool {
-        if (self.focus == .scrollback) return true;
-        if (self.runs.items.items.len == 0) return false;
-        self.focus = .scrollback;
-        self.sel = self.runs.items.items.len - 1;
-        self.mark(self.sel, true);
-        self.showRun(self.sel);
-        self.dirty = true;
-        return true;
-    }
-
-    fn blurScrollback(self: *Session) void {
-        if (self.focus == .prompt) return;
-        self.mark(self.sel, false);
-        self.focus = .prompt;
-        self.dirty = true;
-    }
-
-    fn moveSel(self: *Session, back: bool) void {
-        const n = self.runs.items.items.len;
-        if (n == 0) return;
-        const next = if (back)
-            (if (self.sel == 0) n - 1 else self.sel - 1)
-        else
-            (if (self.sel + 1 >= n) 0 else self.sel + 1);
-        if (next == self.sel) return;
-        self.mark(self.sel, false);
-        self.sel = next;
-        self.mark(self.sel, true);
-        self.showRun(self.sel);
-    }
-
-    /// First or last run, for `g` and `G`.
-    fn selectEnd(self: *Session, last: bool) void {
-        const n = self.runs.items.items.len;
-        if (n == 0) return;
-        const next = if (last) n - 1 else 0;
-        if (next == self.sel) return;
-        self.mark(self.sel, false);
-        self.sel = next;
-        self.mark(self.sel, true);
-        self.showRun(self.sel);
-    }
-
-    /// `want` null toggles; otherwise open or close explicitly.
-    fn setExpanded(self: *Session, want: ?bool) void {
-        if (self.sel >= self.runs.items.items.len) return;
-        const rec = &self.runs.items.items[self.sel];
-        if (!rec.openable()) return;
-        const next = want orelse !rec.expanded;
-        if (next == rec.expanded) return;
-        rec.expanded = next;
-        // Closing a run closes what was open inside it: reopening should not
-        // hand back a body you had already dismissed.
-        if (!next) rec.open_bits = 0;
-        self.child = 0;
-        _ = self.redrawRun(rec);
-        self.showRun(self.sel);
-    }
-
-    /// Move within the open run's calls. Returns false at either end so the
-    /// caller can fall through to moving between runs instead.
-    fn moveChild(self: *Session, back: bool) bool {
-        if (self.sel >= self.runs.items.items.len) return false;
-        const rec = &self.runs.items.items[self.sel];
-        if (!rec.expanded or !rec.openable()) return false;
-        const n = rec.details.len;
-        if (back) {
-            if (self.child == 0) return false;
-            self.child -= 1;
-        } else {
-            if (self.child + 1 >= n) return false;
-            self.child += 1;
-        }
-        self.dirty = true;
-        return true;
-    }
-
-    /// Open the call the keyboard is on, or close it if it is already open.
-    /// Pressing it again on the same call is what closes it: one gesture, and
-    /// it is its own undo.
-    fn toggleChild(self: *Session) bool {
-        if (self.sel >= self.runs.items.items.len) return false;
-        const rec = &self.runs.items.items[self.sel];
-        if (!rec.expanded or !rec.openable()) return false;
-        if (self.child >= rec.details.len) return false;
-        rec.toggleChildBit(self.child);
-        _ = self.redrawRun(rec);
-        self.showRun(self.sel);
-        return true;
-    }
-
-    /// Anchor a selection where the button went down. Chrome -- the header,
-    /// the welcome card, the hint row -- has no region, so a drag there marks
-    /// nothing.
-    fn startSel(self: *Session, row: u16, col: u16) void {
-        self.dragging = true;
-        // Jump pill: press must not start a selection; release performs the jump.
-        if (tui.jumpVisible(self.scroll, self.layout.transcript_rows) and tui.jumpHit(self.layout, row, col)) {
-            self.dragging = false;
-            self.clearSel();
-            return;
-        }
-        // The counter is the only thing in the header, and clicking a number
-        // to ask what it is made of is the gesture people already try.
-        if (self.layout.header_rows != 0 and row == 1 and col + 16 > self.layout.cols) {
-            self.openPanel(buildPanel(self, .context));
-            return;
-        }
-        const at = self.selPoint(row, col) orelse {
-            self.clearSel();
-            // A press on chrome is a press away from what had the keyboard:
-            // the composer is where typing goes, so that is where it lands.
-            self.blurScrollback();
-            return;
-        };
-        // Clicking the composer leaves the scrollback the same way esc does.
-        if (at.where == .composer) self.blurScrollback();
-        self.marked = .{ .where = at.where, .a_row = at.row, .a_col = at.col, .b_row = at.row, .b_col = at.col };
-        self.dirty = true;
-    }
-
-    fn extendSel(self: *Session, row: u16, col: u16) void {
-        if (!self.dragging or self.marked.where == .none) return;
-        const at = self.selPoint(row, col) orelse return;
-        // A drag that leaves the region it started in stops there rather than
-        // jumping: half a selection in each is not a thing you can copy.
-        if (at.where != self.marked.where) return;
-        if (self.marked.b_row == at.row and self.marked.b_col == at.col) return;
-        self.marked.b_row = at.row;
-        self.marked.b_col = at.col;
-        self.dirty = true;
-    }
-
-    fn clearSel(self: *Session) void {
-        if (self.marked.where == .none) return;
-        self.marked = .{};
-        self.dirty = true;
-    }
-
-    const Point = struct { where: tui.Sel.Where, row: usize, col: u16 };
-
-    /// The region and cell a screen position falls in, or null for chrome.
-    fn selPoint(self: *Session, row: u16, col: u16) ?Point {
-        const cell: u16 = if (col == 0) 0 else col - 1;
-        if (tui.transcriptRowAt(self.layout, &self.shown, self.scroll, row)) |idx| {
-            return .{ .where = .transcript, .row = idx, .col = cell };
-        }
-        if (tui.inComposer(self.layout, row)) {
-            return .{ .where = .composer, .row = 0, .col = cell };
-        }
-        return null;
-    }
-
-    /// The marked text, plain, one row per line.
-    fn selText(self: *Session, allocator: std.mem.Allocator) ![]u8 {
-        var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(allocator);
-        switch (self.marked.where) {
-            .none => {},
-            .transcript => {
-                const o = self.marked.ordered();
-                var i = o.a_row;
-                while (i <= o.b_row and i < self.shown.rowCount()) : (i += 1) {
-                    const row = self.shown.row(i);
-                    if (self.marked.span(i, tui.width.cellsTo(row))) |h| {
-                        try tui.plainCells(&out, allocator, row, h.from, h.to);
-                    }
-                    if (i != o.b_row) try out.append(allocator, '\n');
-                }
-            },
-            .composer => {
-                // Cells are counted from the start of the row, prompt
-                // included, so the prompt has to be there when they are read.
-                const text = try std.fmt.allocPrint(allocator, "{s}{s}", .{ self.state.composer, self.draft.items() });
-                defer allocator.free(text);
-                if (self.marked.span(0, tui.width.cellsTo(text))) |h| {
-                    try tui.plainCells(&out, allocator, text, h.from, h.to);
-                }
-            },
-        }
-        return out.toOwnedSlice(allocator);
-    }
-
-    /// Letting go copies. With the terminal's own selection gone there is
-    /// nothing else that would put the text on the clipboard.
-    fn copySel(self: *Session, allocator: std.mem.Allocator) void {
-        if (!self.marked.on()) return;
-        const text = self.selText(allocator) catch return;
-        defer allocator.free(text);
-        if (text.len == 0) return;
-        self.note(if (cmds.copyClipboard(self.io, text))
-            std.fmt.allocPrint(self.arena, "Copied {d} characters.", .{text.len}) catch "Copied."
-        else
-            "No clipboard tool on this machine.", nowMs(self.io));
-    }
-
-    /// A click on a tool run: the summary toggles the run, a call toggles its
-    /// output, and clicking the same thing again puts it back. Every gesture
-    /// is its own undo, so nothing needs a second key to close.
-    fn clickRun(self: *Session, term_row: u16) void {
-        // A click on transcript text that is not a run is a click away from
-        // the run tree, so it hands the keyboard back rather than leaving you
-        // in a mode whose keys the hint row is still advertising.
-        const row = tui.transcriptRowAt(self.layout, &self.shown, self.scroll, term_row) orelse {
-            self.blurScrollback();
-            return;
-        };
-        const off = self.shown.rowOffset(row) orelse {
-            self.blurScrollback();
-            return;
-        };
-        const idx = self.runs.indexAt(off) orelse {
-            self.blurScrollback();
-            return;
-        };
-        const rec = &self.runs.items.items[idx];
-        const part = runs_mod.partAt(self.arena, self.layout.cols, rec.*, off - rec.off) catch return orelse return;
-
-        // Clicking a run also moves the keyboard onto it, so the pointer and
-        // the keys never disagree about which run is current.
-        if (self.focus == .scrollback and self.sel != idx) self.mark(self.sel, false);
-        self.focus = .scrollback;
-        self.sel = idx;
-        self.mark(idx, true);
-
-        switch (part) {
-            .summary => {
-                if (!rec.openable()) {
-                    self.dirty = true;
-                    return;
-                }
-                rec.expanded = !rec.expanded;
-                if (!rec.expanded) rec.open_bits = 0;
-                self.child = 0;
-                self.hunk_i = 0;
-            },
-            .child => |i| {
-                self.child = i;
-                rec.toggleChildBit(i);
-                self.hunk_i = 0;
-            },
-        }
-        self.syncHunkNav(rec);
-        _ = self.redrawRun(rec);
-        self.showRun(idx);
-        self.dirty = true;
-    }
-
-    /// Open every run, or close them all when they are already open.
-    fn expandAll(self: *Session) void {
-        var want = false;
-        for (self.runs.items.items) |r| {
-            if (r.openable() and !r.expanded) want = true;
-        }
-        var i: usize = 0;
-        while (i < self.runs.items.items.len) : (i += 1) {
-            const rec = &self.runs.items.items[i];
-            if (!rec.openable() or rec.expanded == want) continue;
-            rec.expanded = want;
-            _ = self.redrawRun(rec);
-        }
-        self.showRun(self.sel);
-    }
-
-    /// The selected run's calls, one per line, on the clipboard.
-    fn copyRun(self: *Session) void {
-        if (self.sel >= self.runs.items.items.len) return;
-        const rec = self.runs.items.items[self.sel];
-        var out: std.ArrayList(u8) = .empty;
-        defer out.deinit(self.gpa);
-        for (rec.details) |d| {
-            out.appendSlice(self.gpa, d) catch return;
-            out.append(self.gpa, '\n') catch return;
-        }
-        self.note(if (cmds.copyClipboard(self.io, out.items))
-            "Copied the run's commands."
-        else
-            "No clipboard tool on this machine.", nowMs(self.io));
-    }
-
-    /// The run's output rather than the commands that produced it.
-    /// The output of the call the cursor is on, which is the half `y` does
-    /// not take: `y` copies what was run, this copies what came back.
-    fn copyRunOutput(self: *Session) void {
-        if (self.sel >= self.runs.items.items.len) return;
-        const rec = self.runs.items.items[self.sel];
-        if (self.child >= rec.bodies.len) return;
-        const body = rec.bodies[self.child];
-        if (body.len == 0) {
-            self.note("That call returned nothing.", nowMs(self.io));
-            return;
-        }
-        self.note(if (cmds.copyClipboard(self.io, body))
-            std.fmt.allocPrint(self.arena, "Copied {d} characters of output.", .{body.len}) catch "Copied."
-        else
-            "No clipboard tool on this machine.", nowMs(self.io));
-    }
-
-    /// Jump to the previous or next tool run, skipping the ones in between.
-    /// Turn-to-turn is the unit you read a transcript in.
-    fn selectTurn(self: *Session, back: bool) void {
-        const n = self.runs.items.items.len;
-        if (n == 0) return;
-        const next = if (back)
-            (if (self.sel == 0) 0 else self.sel - 1)
-        else
-            (if (self.sel + 1 >= n) n - 1 else self.sel + 1);
-        if (next == self.sel) return;
-        self.mark(self.sel, false);
-        self.sel = next;
-        self.mark(self.sel, true);
-        self.showRun(self.sel);
-    }
-
-    /// Scroll just enough to bring a run's first row into the pane.
-    fn showRun(self: *Session, i: usize) void {
-        if (i >= self.runs.items.items.len) return;
-        const row = self.shown.rowOfOffset(self.runs.items.items[i].off) orelse return;
-        const total = self.shown.rowCount();
-        const rows = self.scrollRows();
-        if (rows == 0 or total <= rows) {
-            self.scroll = 0;
-            return;
-        }
-        const max = tui.maxScroll(total, rows);
-        var s = @min(self.scroll, max);
-        const start = total - rows - s;
-        if (row < start) {
-            s = if (total > rows + row) total - rows - row else max;
-        } else if (row >= start + rows) {
-            s = if (total > row + 1) total - row - 1 else 0;
-        }
-        self.scroll = @min(s, max);
-    }
-
-    /// The task list as sticky chrome rows above the composer, or none when
-    /// every item is done (a finished checklist is just noise).
-    fn pinTodos(self: *Session, rows: [][]const u8) []const []const u8 {
-        const list = todos.get();
-        if (list.n == 0) return &.{};
-        const c = list.counts();
-        if (c.done == c.total) return &.{};
-        var n: usize = 0;
-        for (list.items[0..list.n]) |item| {
-            if (n == rows.len) break;
-            rows[n] = chat.formatTodo(self.arena, self.layout.cols, item.slice(), item.status == .in_progress, item.status == .done) catch continue;
-            n += 1;
-        }
-        return rows[0..n];
-    }
-
-    /// Transcript rows available to scroll after sticky chrome is reserved.
-    fn scrollRows(self: *const Session) u16 {
-        var todo_n: u16 = 0;
-        const list = todos.get();
-        if (list.n != 0) {
-            const c = list.counts();
-            if (c.done != c.total) todo_n = @intCast(@min(list.n, std.math.maxInt(u16)));
-        }
-        const overlay = todo_n + @as(u16, if (tui.jumpVisible(self.scroll, self.layout.transcript_rows)) 1 else 0);
-        const full = self.layout.transcript_rows;
-        return if (full > overlay) full - overlay else full;
-    }
-
-    /// Repaint the transcript alone. The footer is painted by the dirty pass.
-    /// Shrink the scroll region by sticky chrome so wheel/page paints cannot
-    /// overwrite the todo list sitting above the composer.
-    fn paintTranscript(self: *Session) void {
-        self.shown.resize(self.layout.cols) catch |err| {
-            log.debug("transcript resize: {s}", .{@errorName(err)});
-        };
-        const overlay: u16 = self.layout.transcript_rows -| self.scrollRows();
-        tui.writeTranscriptOverlay(self.stdout, self.layout, &self.shown, self.scroll, self.marked, overlay) catch |err| {
-            log.debug("writeTranscript: {s}", .{@errorName(err)});
-        };
-        self.stdout.flush() catch |err| {
-            log.debug("flush: {s}", .{@errorName(err)});
-        };
-    }
-
-    /// Wheel and page keys must not paint the transcript alone: that CUP-parks
-    /// the caret in the pane. A no-op step (content already fits) must not
-    /// mark dirty either, or the pane flickers as if it scrolled.
-    fn bumpScroll(self: *Session, up: bool, step: u16) bool {
-        const next = tui.stepScroll(
-            self.scroll,
-            self.shown.rowCount(),
-            self.scrollRows(),
-            up,
-            step,
-        );
-        if (next == self.scroll) return false;
-        self.scroll = next;
-        return true;
-    }
-
-    fn paintAll(self: *Session, turn: tui.Turn) void {
-        self.shown.resize(self.layout.cols) catch |err| {
-            log.debug("transcript resize: {s}", .{@errorName(err)});
-        };
-        var todo_rows: [todos.max_items][]const u8 = undefined;
-        var foot = self.footer(turn);
-        foot.tasks = self.pinTodos(&todo_rows);
-        tui.writePane(self.gpa, self.stdout, self.layout, foot, &self.shown, self.scroll) catch |err| {
-            log.debug("writePane: {s}", .{@errorName(err)});
-        };
-        self.publishJumpHit();
-        self.stdout.flush() catch |err| {
-            log.debug("flush: {s}", .{@errorName(err)});
-        };
-    }
-
-    /// Replace the token under the caret with the highlighted palette row.
-    /// Returns true when it filled an `@mention`, which is an argument the user
-    /// is still writing rather than a whole line ready to send.
-    ///
-    /// Tab, click, and Enter each did this by hand in three copies that had
-    /// already drifted: two closed the menu, one only moved the selection.
-    fn completePalette(self: *Session) !bool {
-        if (self.palette.len == 0) return false;
-        const picked = self.palette[self.palette_sel].name;
-        const at = tui.atPrefix(self.draft.items());
-        if (at) |pre| {
-            const items = self.draft.items();
-            try self.draft.replace(self.gpa, items[0 .. items.len - (pre.len + 1)]);
-        } else {
-            self.draft.clear();
-        }
-        try self.draft.insertSlice(self.gpa, picked);
-        self.clearPalette();
-        return at != null;
-    }
-
-    /// Paint the panel over the pane. Returns whether another frame is due, so
-    /// the loop only polls fast while something is actually moving.
-    fn paintPanel(self: *Session) bool {
-        const p = &(self.panel orelse return false);
-        p.elapsed_ms = nowMs(self.io) - self.panel_opened_ms;
-        p.edit = self.panel_edit.items;
-        const g = panel_mod.geometry(self.layout.rows, self.layout.cols, p.n);
-        const body = panel_mod.render(self.arena, p, g) catch return false;
-        self.stdout.writeAll(tui.sync_begin) catch return false;
-        // The pane is repainted underneath first. A panel only erases its own
-        // footprint, so whatever the pane drew around it -- the welcome card in
-        // particular -- stayed on screen framing the panel with orphaned rows.
-        self.shown.resize(self.layout.cols) catch |err| {
-            log.debug("transcript resize: {s}", .{@errorName(err)});
-        };
-        tui.writePane(self.gpa, self.stdout, self.layout, self.footer(.idle), &self.shown, self.scroll) catch |err| {
-            log.debug("writePane: {s}", .{@errorName(err)});
-        };
-        self.stdout.writeAll(tui.hide_cursor) catch |err| {
-            log.debug("hide cursor: {s}", .{@errorName(err)});
-        };
-        self.stdout.writeAll(body) catch |err| {
-            log.debug("panel: {s}", .{@errorName(err)});
-        };
-        self.stdout.writeAll(tui.sync_end) catch |err| {
-            log.debug("sync: {s}", .{@errorName(err)});
-        };
-        self.stdout.flush() catch |err| {
-            log.debug("flush: {s}", .{@errorName(err)});
-        };
-        return panel_mod.animating(p.elapsed_ms);
-    }
-
-    fn openPanel(self: *Session, p: panel_mod.Panel) void {
-        self.panel = p;
-        self.panel_opened_ms = nowMs(self.io);
-        self.panel_edit.clearRetainingCapacity();
-        self.panel_kind = null;
-    }
-
-    /// A panel whose list is rebuilt as you type.
-    fn openSearchPanel(self: *Session, kind: cmds.PanelKind) void {
-        self.openPanel(buildPanel(self, kind));
-        self.panel_kind = kind;
-        if (self.panel) |*p| {
-            p.search = true;
-            p.query = self.panel_edit.items;
-            p.selectFirst();
-        }
-    }
-
-    /// Re-runs the builder against what has been typed. The reveal is not
-    /// restarted: the panel is already open, only its rows changed.
-    fn refilterPanel(self: *Session) void {
-        const kind = self.panel_kind orelse return;
-        var next = buildPanel(self, kind);
-        next.search = true;
-        next.query = self.panel_edit.items;
-        next.selectFirst();
-        self.panel = next;
-        self.dirty = true;
-    }
-
-    /// How long a one-line confirmation holds the hint row.
-    ///
-    /// Long enough to read a short sentence at a glance, short enough that the
-    /// keys you actually need are back before you look for them.
-    const note_ms: i64 = 3000;
-
-    fn note(self: *Session, text: []const u8, now_ms: i64) void {
-        self.mode_note = text;
-        self.mode_note_at = now_ms;
-        self.toasts.push(text, now_ms);
-        self.dirty = true;
-    }
-
-    /// A finished menu step leaves its confirmation here rather than in the
-    /// transcript, so it clears itself the way every other one-line answer
-    /// does.
-    fn takeMenuNote(self: *Session, out: *menus.Out, now_ms: i64) void {
-        if (out.note.len == 0) return;
-        self.note(out.note, now_ms);
-        out.note = "";
-    }
-
-    fn noteClear(self: *Session) void {
-        self.mode_note = "";
-        self.mode_note_at = 0;
-        self.toasts = .{};
-        if (self.toast_paint.len != 0) {
-            self.gpa.free(self.toast_paint);
-            self.toast_paint = &.{};
-        }
-    }
-
-    fn noteExpired(self: *const Session, now_ms: i64) bool {
-        if (self.mode_note.len == 0) return false;
-        return now_ms - self.mode_note_at >= note_ms;
-    }
-
-    fn closePanel(self: *Session) void {
-        self.panel = null;
-        self.panel_kind = null;
-        self.panel_edit.clearRetainingCapacity();
-        self.dirty = true;
-    }
-
-    fn clearPalette(self: *Session) void {
-        self.palette = &.{};
-        self.palette_sel = 0;
-    }
-};
 
 /// Editors omfx knows how to look for, in the order a picker should offer
 /// them: the graphical ones people configure deliberately first, then the
@@ -934,6 +98,48 @@ fn onPath(sess: *Session, path: []const u8, name: []const u8) bool {
 
 /// Rows are the same keys `/settings key=value` accepts, so the panel and the
 /// one-shot form can never drift: this is the same setter, with a cursor.
+
+fn startSel(sess: *Session, row: u16, col: u16) void {
+    sess.dragging = true;
+    if (tui.jumpVisible(sess.scroll, sess.layout.transcript_rows) and tui.jumpHit(sess.layout, row, col)) {
+        sess.dragging = false;
+        sess.clearSel();
+        return;
+    }
+    if (sess.layout.header_rows != 0 and row == 1 and col + 16 > sess.layout.cols) {
+        sess.openPanel(buildPanel(sess, .context));
+        return;
+    }
+    const at = sess.selPoint(row, col) orelse {
+        sess.clearSel();
+        runs_ui.blurScrollback(sess);
+        return;
+    };
+    if (at.where == .composer) runs_ui.blurScrollback(sess);
+    sess.marked = .{ .where = at.where, .a_row = at.row, .a_col = at.col, .b_row = at.row, .b_col = at.col };
+    sess.dirty = true;
+}
+
+fn openSearchPanel(sess: *Session, kind: cmds.PanelKind) void {
+    sess.openPanel(buildPanel(sess, kind));
+    sess.panel_kind = kind;
+    if (sess.panel) |*p| {
+        p.search = true;
+        p.query = sess.panel_edit.items;
+        p.selectFirst();
+    }
+}
+
+fn refilterPanel(sess: *Session) void {
+    const kind = sess.panel_kind orelse return;
+    var next = buildPanel(sess, kind);
+    next.search = true;
+    next.query = sess.panel_edit.items;
+    next.selectFirst();
+    sess.panel = next;
+    sess.dirty = true;
+}
+
 fn buildPanel(sess: *Session, kind: cmds.PanelKind) panel_mod.Panel {
     return switch (kind) {
         .settings => settingsPanel(sess),
@@ -1726,151 +932,6 @@ fn sessionPanel(sess: *Session) panel_mod.Panel {
 /// The watcher owns stdin while the model is answering, so a sentence written
 /// mid-turn used to be read and thrown away. Keeping it is the difference
 /// between a pane that swallows your typing and one you can steer.
-fn takeSteering(sess: *Session) void {
-    var buf: [sink.max_steer]u8 = undefined;
-    const got = sink.takeSteer(&buf);
-    if (got.text.len == 0) return;
-    // A word joined onto whatever was already in the composer needs a gap,
-    // unless the typing already carried one.
-    if (sess.draft.items().len != 0 and got.text[0] != ' ') sess.draft.insert(sess.gpa, ' ') catch {};
-    for (got.text) |c| sess.draft.insert(sess.gpa, c) catch return;
-    sess.steer_send = got.ready;
-    sess.dirty = true;
-}
-
-/// Handles one event while the keyboard is in the scrollback. Returns true when
-/// it consumed the event.
-///
-/// The bindings are the ones a reader expects from a pager -- j/k to move, e to
-/// fold, g/G for the ends -- so the run tree can be worked without a mouse. Any
-/// other printable key hands the keyboard back to the composer and is typed
-/// there, because a mode that silently swallows what you type is a trap.
-fn scrollbackKey(sess: *Session, ev: tui.Event) bool {
-    switch (ev) {
-        .esc => {
-            sess.blurScrollback();
-            return true;
-        },
-        .tab, .shift_tab => {
-            sess.blurScrollback();
-            return true;
-        },
-        .down => {
-            if (!sess.moveChild(false)) sess.moveSel(false);
-            return true;
-        },
-        .up => {
-            if (!sess.moveChild(true)) sess.moveSel(true);
-            return true;
-        },
-        .right => {
-            sess.setExpanded(true);
-            return true;
-        },
-        .left => {
-            sess.setExpanded(false);
-            return true;
-        },
-        .enter => {
-            // Inside an open run, Enter belongs to the call the cursor is on.
-            if (sess.toggleChild()) return true;
-            sess.setExpanded(null);
-            return true;
-        },
-        // Scroll without moving the selection: reading around a run should not
-        // cost you your place in it.
-        .ctrl_j => {
-            if (sess.bumpScroll(false, 1)) sess.dirty = true;
-            return true;
-        },
-        .kill_line => {
-            if (sess.bumpScroll(true, 1)) sess.dirty = true;
-            return true;
-        },
-        .ctrl_d => {
-            if (sess.bumpScroll(false, @max(1, sess.layout.transcript_rows / 2))) sess.dirty = true;
-            return true;
-        },
-        .kill_to_start => {
-            if (sess.bumpScroll(true, @max(1, sess.layout.transcript_rows / 2))) sess.dirty = true;
-            return true;
-        },
-        .shift_right => {
-            sess.selectTurn(false);
-            return true;
-        },
-        .shift_left => {
-            sess.selectTurn(true);
-            return true;
-        },
-        .byte => |b| switch (b) {
-            'j' => {
-                if (!sess.moveChild(false)) sess.moveSel(false);
-                return true;
-            },
-            'k' => {
-                if (!sess.moveChild(true)) sess.moveSel(true);
-                return true;
-            },
-            'e' => {
-                sess.setExpanded(null);
-                return true;
-            },
-            'l' => {
-                sess.setExpanded(true);
-                return true;
-            },
-            'h' => {
-                sess.setExpanded(false);
-                return true;
-            },
-            'g' => {
-                sess.selectEnd(false);
-                return true;
-            },
-            'G' => {
-                sess.selectEnd(true);
-                return true;
-            },
-            'E' => {
-                sess.expandAll();
-                return true;
-            },
-            'n' => {
-                if (sess.stepHunk(true)) return true;
-                return false;
-            },
-            'p' => {
-                if (sess.stepHunk(false)) return true;
-                return false;
-            },
-            'y' => {
-                sess.copyRun();
-                return true;
-            },
-            'q' => {
-                sess.blurScrollback();
-                return true;
-            },
-            // Space hands the keyboard back without typing a space, the way
-            // it does in grok-build: reading is a mode you leave, not a key
-            // you have to remember.
-            ' ' => {
-                sess.blurScrollback();
-                return true;
-            },
-            'Y' => {
-                sess.copyRunOutput();
-                return true;
-            },
-            else => {
-                sess.blurScrollback();
-                return false;
-            },
-        },
-        else => return false,
-    }
-}
 
 /// Handles one event for an open panel. Returns true when the panel consumed
 /// it, which is every key except the ones that close the panel.
@@ -1917,13 +978,13 @@ fn panelKey(sess: *Session, ev: tui.Event) bool {
             .backspace => {
                 if (sess.panel_edit.items.len > 0) {
                     _ = sess.panel_edit.pop();
-                    sess.refilterPanel();
+                    refilterPanel(sess);
                 }
                 return true;
             },
             .byte => |b| if (b >= 0x20 and b < 0x7f) {
                 sess.panel_edit.append(gpa, b) catch {};
-                sess.refilterPanel();
+                refilterPanel(sess);
                 return true;
             },
             else => {},
@@ -2023,6 +1084,7 @@ pub fn run(
     };
     sess.cups = tui.Cups.compute(sess.layout);
     defer sess.deinit();
+    session_mod.buildPanel = buildPanel;
     const state = &sess.state;
     {
         var cfg = settings.load(gpa, io, home);
@@ -2225,7 +1287,7 @@ pub fn run(
         }
         // Scrollback focus owns the keyboard the way a panel does, so it has to
         // answer before the composer sees a key it would insert.
-        if (sess.focus == .scrollback and scrollbackKey(&sess, ev)) continue;
+        if (sess.focus == .scrollback and input_mod.scrollbackKey(&sess, ev)) continue;
         switch (ev) {
             .skip => continue,
             // Turn jumps belong to the scrollback; in the composer a shifted
@@ -2233,7 +1295,7 @@ pub fn run(
             // guessing.
             .shift_left, .shift_right => continue,
             .click => |c| {
-                sess.startSel(c.row, c.col);
+                startSel(&sess, c.row, c.col);
                 continue;
             },
             .drag => |c| {
@@ -2249,7 +1311,7 @@ pub fn run(
                 // A press that never moved is a click, and a click on a tool
                 // run opens it. Deciding here rather than on press is what
                 // lets one gesture be both.
-                if (!sess.marked.on()) sess.clickRun(c.row) else sess.copySel(gpa);
+                if (!sess.marked.on()) runs_ui.clickRun(&sess, c.row) else sess.copySel(gpa);
                 sess.dragging = false;
                 continue;
             },
@@ -2409,7 +1471,7 @@ pub fn run(
                 // Nothing to complete: hand the keyboard to the scrollback, the
                 // way Tab does in every other pane-and-prompt TUI.
                 if (sess.palette.len == 0 and sess.draft.items().len == 0) {
-                    if (sess.focusScrollback()) continue;
+                    if (runs_ui.focusScrollback(&sess)) continue;
                 }
                 _ = try sess.completePalette();
                 sess.dirty = true;
@@ -2420,7 +1482,7 @@ pub fn run(
                 if (tui.keysDraft(sess.draft.items())) sess.draft.clear();
                 // ctrl-x on an empty prompt opens the cheatsheet; `?` typed
                 // into the composer keeps the inline list it always had.
-                sess.openSearchPanel(.shortcuts);
+                openSearchPanel(&sess, .shortcuts);
                 sess.palette_sel = 0;
                 sess.dirty = true;
                 continue;
@@ -2839,7 +1901,7 @@ pub fn run(
                 .quit => break,
                 .panel => |kind| {
                     switch (kind) {
-                        .help, .shortcuts => sess.openSearchPanel(kind),
+                        .help, .shortcuts => openSearchPanel(&sess, kind),
                         else => {
                             sess.openPanel(buildPanel(&sess, kind));
                             // Keep the kind so list panels can act on keys
@@ -2869,319 +1931,25 @@ pub fn run(
             continue;
         }
 
-        {
-            var cred_ctx = sess.cmdCtx();
-            cmds.refreshInto(&cred_ctx, false);
-        }
-        const model_prompt = try mention.expand(arena, Io.Dir.cwd(), io, workspace, prompt_text);
-        const shown = try vision.display(arena, Io.Dir.cwd(), io, workspace, prompt_text);
-        const composer = try std.fmt.allocPrint(arena, "{s}{s}", .{ state.composer, shown });
-        if (state.statusline) {
-            try tui.writeFooter(arena, stdout, sess.layout, .{
-                .model = model,
-                .permission = cmds.footerPerm(state),
-                .effort = state.effort,
-                .composer = composer,
-                .place = workspace,
-            });
-        } else {
-            try stdout.writeAll(tui.sync_begin);
-            try stdout.writeAll(sess.cups.toFooter());
-            try stdout.writeAll("\x1b[2K");
-            try stdout.writeAll(composer);
-            try stdout.writeAll(tui.sync_end);
-        }
-        try stdout.flush();
-
-        const user_line = try chat.formatUser(arena, sess.layout.cols, shown);
-        try sess.shown.append(user_line);
-        sess.scroll = 0;
-        // Activity for this turn, started before the first paint so the status
-        // says what is happening instead of a generic word.
-        var act = live_mod.Live.Act{};
-        // The status row borrows act.buf, which is this iteration's stack. Left
-        // set, the next idle paint reads a dead frame and draws whatever bytes
-        // happen to be there.
-        defer sess.status = "";
-        act.begin();
-        sess.status = act.renderNow();
-        sess.paintAll(.generating);
-        stdout.writeAll(tui.tab_busy) catch |err| {
-            log.debug("tab busy: {s}", .{@errorName(err)});
-        };
-        {
-            var head: [activity.max_phrase]u8 = undefined;
-            tui.writeTabTitle(stdout, activity.frameOf(0), activity.headline(&head, act.state));
-        }
-        try stdout.flush();
-
-        var endpoint = toEndpoint(arena, state.resolved);
-        if (endpoint == null) {
-            // Through the same formatter as every other command answer: this
-            // is the harness talking, and it should not be the one raw block.
-            try sess.shown.append(try chat.formatCommand(arena, sess.layout.cols, ask_run.missing_key_text));
-            sess.status = "";
-            sess.paintAll(.idle);
-            tty.flushInput();
-            stdout.writeAll(tui.tab_idle) catch |err| {
-                log.debug("tab idle: {s}", .{@errorName(err)});
-            };
-            sess.writeIdleTitle();
-            try stdout.flush();
-            sess.dirty = true;
-            continue;
-        }
-        {
-            const provider = if (state.resolved) |r| r.spec.id else "";
-            var ec = sess.cmdCtx();
-            const described = cmds.describeModel(&ec, provider, endpoint.?.model);
-            const ladder = if (described) |m| m.efforts else "";
-            applyEffort(&endpoint.?, state.effort, ladder, prompt_text, sess.stuck);
-            // The provider's own number, held to this login's ceiling. The
-            // catalog value predates both.
-            if (described) |m| {
-                if (m.context_window != 0) endpoint.?.context_window = m.context_window;
-            }
-        }
-        cmds.markTurn(&ctx, prompt_text);
-        var trace = agent.Trace{};
-        const turn_began_ms = nowMs(io);
-        sess.cancel.store(false, .release);
-        // One renderer per turn: fences opened while streaming close on replay.
-        var md = chat.Markdown{ .cols = sess.layout.cols };
-        defer md.deinit(gpa);
-        var tool_run = live_mod.Live.Run{};
-        var asst_hold: std.ArrayList(u8) = .empty;
-        defer asst_hold.deinit(gpa);
-        var live = live_mod.tty(.{
-            .stdout = stdout,
-            .stdin = stdin,
-            .allocator = gpa,
-            .layout = &sess.layout,
-            .footer = sess.footer(.generating),
-            .cancel = &sess.cancel,
-            .shown = &sess.shown,
-            .think_view = tui.ThinkView.init(state.thinking),
-            .asst_hold = &asst_hold,
-            .md = &md,
-            .act = &act,
-            .group = &tool_run,
-            .runs = &sess.runs,
-            .arena = arena,
-            .scroll = &sess.scroll,
-        });
-        live.startSpin();
-        defer live.stopSpin();
-        {
-            const host = live.host();
-            var wait_watch = sink.Watch{
-                .cancel = &sess.cancel,
-                .tick = host.on_tick,
-                .tick_ctx = host.ctx,
-                .page_rows = sess.layout.transcript_rows,
-            };
-            wait_watch.start();
-            defer wait_watch.finish();
-            if (state.had_turn and !sess.cancel.load(.acquire)) {
-                if (agent.reflectFollowup(gpa, io, endpoint.?, state.last_goal, state.last_tool, prompt_text) catch null) |lesson| {
-                    defer gpa.free(lesson);
-                    playbook.noteHarmful(gpa, io, workspace, lesson);
-                }
-            }
-        }
-        var cfg_depth = settings.load(gpa, io, home);
-        const peer_depth = cfg_depth.max_peer_depth;
-        cfg_depth.deinit(gpa);
-        const auth_json = auth.readJson(arena, io, home);
-        // Committed bytes, not display rows: rows include the transient status
-        // and streaming tail, which move during the turn for reasons that have
-        // nothing to do with whether the reply was already shown.
-        const kept = sess.shown.bytes().len;
-        var reply_owned = true;
-        var turn_host = live.host();
-        turn_host.mode_live = &state.mode;
-        const reply = if (sess.cancel.load(.acquire)) blk: {
-            reply_owned = false;
-            break :blk @as([]const u8, "");
-        } else agent.chatOnce(
+        switch (try turn_mod.runTurn(
+            &sess,
             gpa,
+            arena,
             io,
-            Io.Dir.cwd(),
+            home,
             workspace,
-            endpoint.?,
-            model_prompt,
-            .{
-                .mode = state.mode,
-                .mode_live = &state.mode,
-                .has_tty = true,
-                .home = home,
-                .reads = &state.reads,
-                .trace = &trace,
-                .plan = state.plan,
-                .host = turn_host,
-                .max_peer_depth = peer_depth,
-                .prior_user = if (state.interrupted) state.last_prompt else "",
-                .prior_assistant = if (state.interrupted) state.last_reply else "",
-                .lookup = lookup,
-                .auth_json = auth_json,
-                .session_rules = state.sessionRuleSlice(),
-                .failures = sess.stuck,
-            },
-        ) catch |err| blk: {
-            reply_owned = false;
-            break :blk try std.fmt.allocPrint(arena, "Unable to complete the turn ({s}). Try again.\n", .{@errorName(err)});
-        };
-        defer if (reply_owned) gpa.free(reply);
-        const cancelled = sess.cancel.load(.acquire);
-        // Words aimed at a turn the user just stopped are not the next prompt.
-        if (cancelled) sink.dropSteer();
-        const partial = if (cancelled) try arena.dupe(u8, asst_hold.items) else "";
-        // Final prose that never streamed (common after tool rounds) must still
-        // land in the transcript even though tool cards already grew `shown`.
-        const streamed_asst = asst_hold.items.len != 0;
-        live.flushAsst();
-        live.flushGroups();
-        live.flushTable();
-        live.closeThink();
-        live.stopSpin();
-        if (!reply_owned) {
-            try sess.shown.append(try arena.dupe(u8, reply));
-        } else if (reply.len > 0 and (!streamed_asst or sess.shown.bytes().len == kept)) {
-            try sess.shown.append(try chat.formatAssistant(arena, sess.layout.cols, reply));
+            lookup,
+            model,
+            stdin,
+            stdout,
+            prompt_text,
+        )) {
+            .ok => {},
+            .quit_loop => break,
         }
-        if (diagram.save(gpa, Io.Dir.cwd(), io, reply)) |saved| {
-            defer saved.deinit(gpa);
-            switch (saved) {
-                .none => {},
-                .report => |msg| try sess.shown.append(
-                    try chat.formatCommand(arena, sess.layout.cols, msg),
-                ),
-            }
-        } else |err| {
-            log.warn("diagram: {s}", .{@errorName(err)});
-        }
-        // The turn is over, so there is no activity to report; the row has to
-        // go before the paint, not when the frame unwinds.
-        sess.status = "";
-        sess.paintAll(.idle);
-        tty.flushInput();
-        stdout.writeAll(tui.tab_idle) catch |err| {
-            log.debug("tab idle: {s}", .{@errorName(err)});
-        };
-        sess.writeIdleTitle();
-        try stdout.flush();
-        if (cancelled) {
-            // Keep the interrupted ask and whatever streamed, so "continue"
-            // attaches to that turn instead of a new repo task.
-            try sess.shown.append(try chat.formatNotice(arena, sess.layout.cols, "Interrupted"));
-            const asst = if (partial.len > 0) partial else agent.interrupted_text;
-            persistSession(gpa, io, home, model_prompt, asst, trace, "interrupted") catch |err| {
-                log.warn("persist session: {s}", .{@errorName(err)});
-            };
-            if (!state.interrupted) {
-                const goal_keep = if (prompt_text.len > 80) prompt_text[0..80] else prompt_text;
-                state.last_goal = try arena.dupe(u8, goal_keep);
-                state.last_prompt = try arena.dupe(u8, prompt_text);
-            }
-            state.last_tool = try arena.dupe(u8, if (trace.tool_len > 0) trace.toolName() else "");
-            state.last_reply = try arena.dupe(u8, asst);
-            state.had_turn = true;
-            state.interrupted = true;
-            cmds.persistChat(&ctx);
-            sess.paintAll(.idle);
-            try stdout.flush();
-            sess.dirty = true;
-            continue;
-        }
-        takeSteering(&sess);
-        {
-            var cmd_buf: [64]u8 = undefined;
-            const pending = sink.takePendingCmd(&cmd_buf);
-            if (pending.len != 0) {
-                // Mid-turn Enter on `/settings` (etc.): run after the turn, do
-                // not send as a user message.
-                switch (try cmds.dispatch(&ctx, pending)) {
-                    .handled => {
-                        sess.takeMenuNote(&state.menu, nowMs(io));
-                        sess.dirty = true;
-                    },
-                    .quit => {},
-                    .panel => |kind| {
-                        switch (kind) {
-                            .help, .shortcuts => sess.openSearchPanel(kind),
-                            else => {
-                                sess.openPanel(buildPanel(&sess, kind));
-                                sess.panel_kind = kind;
-                            },
-                        }
-                        sess.dirty = true;
-                    },
-                    .fallthrough, .retry => {
-                        try sess.draft.replace(sess.gpa, pending);
-                        sess.steer_send = true;
-                        sess.dirty = true;
-                    },
-                }
-            }
-        }
-        if (state.sound) sound_mod.play(io, lookup, .success);
-        const outcome: []const u8 = if (trace.denied) "denied" else "continued";
-        // The window is the thread resent each turn, so what it holds is the
-        // last turn's count, not a running sum.
-        if (act.state.tokens != 0) {
-            sess.ctx_used = act.state.tokens;
-            sess.ctx_fresh = act.state.fresh_input;
-            sess.ctx_cache_read = act.state.cache_read;
-            sess.ctx_cache_write = act.state.cache_write;
-        }
-        if (trace.sys_bytes != 0) sess.trace_sys = trace.sys_bytes;
-        if (trace.tools_bytes != 0) sess.trace_tools = trace.tools_bytes;
-        if (endpoint) |ep| sess.ctx_window = ep.context_window;
-        // What `auto` reads next turn. A clean turn clears it: being stuck is
-        // a run of failures, not a memory of one.
-        sess.stuck = if (trace.denied or cancelled) sess.stuck + 1 else 0;
-        runlog.append(gpa, io, home, .{
-            .at_ms = turn_began_ms,
-            .model = sess.model(),
-            .ms = nowMs(io) - turn_began_ms,
-            .tokens = act.state.tokens,
-            .tools = trace.tools,
-            .verdict = outcome,
-            .chars = reply.len,
-        });
-        persistSession(gpa, io, home, model_prompt, reply, trace, outcome) catch |err| {
-            log.warn("persist session: {s}", .{@errorName(err)});
-        };
-        const goal_keep = if (prompt_text.len > 80) prompt_text[0..80] else prompt_text;
-        state.last_goal = try arena.dupe(u8, goal_keep);
-        state.last_prompt = try arena.dupe(u8, prompt_text);
-        state.last_tool = try arena.dupe(u8, if (trace.tool_len > 0) trace.toolName() else "");
-        state.last_reply = try arena.dupe(u8, reply);
-        if (state.plan == .on) state.last_plan = try arena.dupe(u8, reply);
-        state.had_turn = true;
-        state.interrupted = false;
-        cmds.persistChat(&ctx);
-        sess.dirty = true;
     }
 }
 
-fn persistSession(
-    gpa: std.mem.Allocator,
-    io: Io,
-    home: []const u8,
-    user: []const u8,
-    assistant: []const u8,
-    trace: agent.Trace,
-    outcome: []const u8,
-) !void {
-    var tool_buf: [40]u8 = undefined;
-    const tool_body = if (trace.tool_len > 0)
-        std.fmt.bufPrint(&tool_buf, "{s}:{x:0>8}", .{ trace.toolName(), trace.args_tag }) catch trace.toolName()
-    else
-        "";
-    const verify = if (trace.verify != .none) @tagName(trace.verify) else "";
-    try session.appendTurn(gpa, io, home, user, assistant, tool_body, verify, outcome);
-}
 
 /// A Session with no terminal attached, for exercising the state the event loop
 /// mutates. `run` needs a tty; the decisions it makes do not.
@@ -3451,37 +2219,6 @@ test "a query that matches nothing says so instead of showing everything" {
     try std.testing.expectEqual(panel_mod.Kind.info, p.items()[0].kind);
 }
 
-test "auto resolves to a level of the model's own, and only auto does" {
-    var ep = types.Endpoint{
-        .vendor = .xai,
-        .base_url = "https://api.x.ai/v1",
-        .api_key = "k",
-        .model = "grok-4.6",
-    };
-    const ladder = "low,medium,high,xhigh";
-
-    applyEffort(&ep, "high", ladder, "anything", 0);
-    try std.testing.expectEqualStrings("high", ep.effort);
-
-    ep.effort = "";
-    applyEffort(&ep, cmds.auto_effort, ladder, "why does this deadlock?", 0);
-    try std.testing.expectEqualStrings("xhigh", ep.effort);
-
-    ep.effort = "";
-    applyEffort(&ep, cmds.auto_effort, ladder, "rename x to y", 0);
-    try std.testing.expectEqualStrings("low", ep.effort);
-
-    // Two failed turns: down, not up.
-    ep.effort = "";
-    applyEffort(&ep, cmds.auto_effort, ladder, "why does this deadlock?", 2);
-    try std.testing.expectEqualStrings("low", ep.effort);
-
-    // A model with no levels is left alone rather than sent "auto".
-    ep.effort = "";
-    applyEffort(&ep, cmds.auto_effort, "", "why does this deadlock?", 0);
-    try std.testing.expectEqualStrings("", ep.effort);
-}
-
 test "a note holds the hint row briefly, then gives it back" {
     var sess = testSession(std.testing.allocator);
     defer sess.shown.deinit();
@@ -3512,20 +2249,20 @@ test "enter opens a run, then opens a call inside it, then closes each" {
     try sess.shown.append(row);
     try sess.runs.add(off, sess.shown.bytes().len - off, false, "bash", &.{ "zig build", "zig test" }, &.{ "built\n", "ok\n" });
 
-    try std.testing.expect(sess.focusScrollback());
+    try std.testing.expect(runs_ui.focusScrollback(&sess));
     try std.testing.expect(sess.runs.items.items[0].openable());
 
     // Enter on a closed run opens it.
-    _ = scrollbackKey(&sess, .enter);
+    _ = input_mod.scrollbackKey(&sess, .enter);
     try std.testing.expect(sess.runs.items.items[0].expanded);
 
     // Enter again opens the call the cursor is on, rather than closing the run.
-    _ = scrollbackKey(&sess, .enter);
+    _ = input_mod.scrollbackKey(&sess, .enter);
     try std.testing.expect(sess.runs.items.items[0].childOpen(0));
     try std.testing.expect(std.mem.indexOf(u8, sess.shown.bytes(), "built") != null);
 
     // And once more on the same call closes just that call.
-    _ = scrollbackKey(&sess, .enter);
+    _ = input_mod.scrollbackKey(&sess, .enter);
     try std.testing.expect(!sess.runs.items.items[0].childOpen(0));
     try std.testing.expect(sess.runs.items.items[0].expanded);
 }
@@ -3538,7 +2275,7 @@ test "a drag marks text and letting go copies it" {
     try sess.shown.append("hello world\n");
 
     const row = termRow(&sess, 0);
-    sess.startSel(row, 1);
+    startSel(&sess, row, 1);
     try std.testing.expect(!sess.marked.on());
     sess.extendSel(row, 6);
     try std.testing.expect(sess.marked.on());
@@ -3640,16 +2377,16 @@ test "clicking away from the scrollback hands the keyboard back" {
     try sess.shown.append("\u{25b8} Read a file  a.zig\n");
     try sess.runs.add(0, sess.shown.bytes().len, false, "read", &.{"a.zig"}, &.{});
 
-    try std.testing.expect(sess.focusScrollback());
+    try std.testing.expect(runs_ui.focusScrollback(&sess));
     try std.testing.expect(sess.focus == .scrollback);
 
     // The composer is where typing goes, so a press there takes the keyboard.
-    sess.startSel(sess.layout.footer_start_row + 1, 3);
+    startSel(&sess, sess.layout.footer_start_row + 1, 3);
     try std.testing.expect(sess.focus == .prompt);
 
-    try std.testing.expect(sess.focusScrollback());
+    try std.testing.expect(runs_ui.focusScrollback(&sess));
     // And so does a press on chrome, which belongs to neither region.
-    sess.startSel(sess.layout.rows, 3);
+    startSel(&sess, sess.layout.rows, 3);
     try std.testing.expect(sess.focus == .prompt);
 }
 
@@ -3660,7 +2397,7 @@ test "a drag never leaves the region it started in" {
     defer sess.runs.deinit();
     try sess.shown.append("hello world\n");
 
-    sess.startSel(termRow(&sess, 0), 1);
+    startSel(&sess, termRow(&sess, 0), 1);
     // Chrome has no region, so the mark stays where the drag began: half a
     // selection in the transcript and half in the footer cannot be copied.
     sess.extendSel(sess.layout.rows, 4);
@@ -3685,23 +2422,23 @@ test "a click opens the run, then the call, then puts each back" {
     try sess.runs.add(off, sess.shown.bytes().len - off, false, "bash", &.{ "zig build", "zig test" }, &.{ "built\n", "ok\n" });
 
     const summary = termRow(&sess, 0);
-    sess.clickRun(summary);
+    runs_ui.clickRun(&sess, summary);
     try std.testing.expect(sess.runs.items.items[0].expanded);
     // The keyboard follows the pointer, so the two never disagree.
     try std.testing.expect(sess.focus == .scrollback);
 
     // The first call is the row under the summary.
-    sess.clickRun(termRow(&sess, 1));
+    runs_ui.clickRun(&sess, termRow(&sess, 1));
     try std.testing.expect(sess.runs.items.items[0].childOpen(0));
     try std.testing.expect(std.mem.indexOf(u8, sess.shown.bytes(), "built") != null);
 
     // Clicking the same call again closes it; the run stays open.
-    sess.clickRun(termRow(&sess, 1));
+    runs_ui.clickRun(&sess, termRow(&sess, 1));
     try std.testing.expect(!sess.runs.items.items[0].childOpen(0));
     try std.testing.expect(sess.runs.items.items[0].expanded);
 
     // And clicking the summary again closes the run.
-    sess.clickRun(termRow(&sess, 0));
+    runs_ui.clickRun(&sess, termRow(&sess, 0));
     try std.testing.expect(!sess.runs.items.items[0].expanded);
 }
 
@@ -3739,12 +2476,12 @@ test "a click opens the run it landed on, and closes it again" {
     try sess.runs.add(off, sess.shown.bytes().len - off, false, "bash", &.{ "zig build", "zig test" }, &.{});
 
     const rows0 = sess.shown.rowCount();
-    sess.clickRun(termRow(&sess, 1));
+    runs_ui.clickRun(&sess, termRow(&sess, 1));
     try std.testing.expectEqual(rows0 + 2, sess.shown.rowCount());
     try std.testing.expect(std.mem.indexOf(u8, sess.shown.bytes(), "zig build") != null);
 
     // Clicking the summary again closes it.
-    sess.clickRun(termRow(&sess, 1));
+    runs_ui.clickRun(&sess, termRow(&sess, 1));
     try std.testing.expectEqual(rows0, sess.shown.rowCount());
     try std.testing.expect(std.mem.indexOf(u8, sess.shown.bytes(), "zig build") == null);
     try std.testing.expectEqualStrings("before", sess.shown.row(0));
@@ -3755,7 +2492,7 @@ test "a run with one call has nothing to open" {
     defer sess.deinit();
     try sess.shown.append("\u{25b8} Read a file  a.zig\n");
     try sess.runs.add(0, sess.shown.bytes().len, false, "read", &.{"a.zig"}, &.{});
-    sess.clickRun(termRow(&sess, 0));
+    runs_ui.clickRun(&sess, termRow(&sess, 0));
     try std.testing.expect(!sess.runs.items.items[0].expanded);
 }
 
@@ -3777,22 +2514,22 @@ test "the scrollback keyboard walks runs and folds the selected one" {
     }
 
     // Focus lands on the newest run, not the oldest.
-    try std.testing.expect(sess.focusScrollback());
+    try std.testing.expect(runs_ui.focusScrollback(&sess));
     try std.testing.expectEqual(@as(usize, 1), sess.sel);
     try std.testing.expect(sess.runs.items.items[1].selected);
 
-    _ = scrollbackKey(&sess, .{ .byte = 'k' });
+    _ = input_mod.scrollbackKey(&sess, .{ .byte = 'k' });
     try std.testing.expectEqual(@as(usize, 0), sess.sel);
     try std.testing.expect(!sess.runs.items.items[1].selected);
 
-    _ = scrollbackKey(&sess, .{ .byte = 'e' });
+    _ = input_mod.scrollbackKey(&sess, .{ .byte = 'e' });
     try std.testing.expect(sess.runs.items.items[0].expanded);
     try std.testing.expect(std.mem.indexOf(u8, sess.shown.bytes(), "zig build") != null);
-    _ = scrollbackKey(&sess, .{ .byte = 'h' });
+    _ = input_mod.scrollbackKey(&sess, .{ .byte = 'h' });
     try std.testing.expect(!sess.runs.items.items[0].expanded);
 
     // Typing anything else goes back to the composer and is not swallowed.
-    try std.testing.expect(!scrollbackKey(&sess, .{ .byte = 'z' }));
+    try std.testing.expect(!input_mod.scrollbackKey(&sess, .{ .byte = 'z' }));
     try std.testing.expectEqual(Session.Focus.prompt, sess.focus);
     try std.testing.expect(!sess.runs.items.items[0].selected);
 }
@@ -3801,7 +2538,7 @@ test "there is nothing to focus without a run" {
     var sess = testSession(std.testing.allocator);
     defer sess.deinit();
     try sess.shown.append("just text\n");
-    try std.testing.expect(!sess.focusScrollback());
+    try std.testing.expect(!runs_ui.focusScrollback(&sess));
     try std.testing.expectEqual(Session.Focus.prompt, sess.focus);
 }
 
@@ -3817,11 +2554,11 @@ test "E opens every run at once, and closes them the same way" {
         try sess.shown.append(row);
         try sess.runs.add(off, sess.shown.bytes().len - off, false, "bash", &.{ "one", "two" }, &.{});
     }
-    try std.testing.expect(sess.focusScrollback());
-    _ = scrollbackKey(&sess, .{ .byte = 'E' });
+    try std.testing.expect(runs_ui.focusScrollback(&sess));
+    _ = input_mod.scrollbackKey(&sess, .{ .byte = 'E' });
     for (sess.runs.items.items) |r| try std.testing.expect(r.expanded);
     try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, sess.shown.bytes(), "one"));
-    _ = scrollbackKey(&sess, .{ .byte = 'E' });
+    _ = input_mod.scrollbackKey(&sess, .{ .byte = 'E' });
     for (sess.runs.items.items) |r| try std.testing.expect(!r.expanded);
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, sess.shown.bytes(), "one"));
 }
@@ -3829,7 +2566,7 @@ test "E opens every run at once, and closes them the same way" {
 test "the keys panel filters as you type and opens a page" {
     var sess = testSession(std.testing.allocator);
     defer sess.deinit();
-    sess.openSearchPanel(.shortcuts);
+    openSearchPanel(&sess, .shortcuts);
     const all = sess.panel.?.n;
     try std.testing.expect(all > 10);
 
@@ -3846,7 +2583,7 @@ test "the keys panel filters as you type and opens a page" {
 
     // Enter reads the binding rather than running it.
     sess.panel_edit.clearRetainingCapacity();
-    sess.refilterPanel();
+    refilterPanel(&sess);
     sess.panel.?.selectFirst();
     _ = panelKey(&sess, .enter);
     try std.testing.expect(sess.panel.?.detail_of != null);
@@ -3869,18 +2606,18 @@ test "a prompt typed during a turn lands in the composer" {
     sink.dropSteer();
 
     // Nothing typed: the composer is left alone.
-    takeSteering(&sess);
+    turn_mod.takeSteering(&sess);
     try std.testing.expectEqual(@as(usize, 0), sess.draft.items().len);
     try std.testing.expect(!sess.steer_send);
 
     sink.pushSteerForTest("and run the tests");
-    takeSteering(&sess);
+    turn_mod.takeSteering(&sess);
     try std.testing.expectEqualStrings("and run the tests", sess.draft.items());
     try std.testing.expect(!sess.steer_send);
 
     // Enter while the turn ran means send it, appended to what was there.
     sink.pushSteerForTest(" now\r");
-    takeSteering(&sess);
+    turn_mod.takeSteering(&sess);
     try std.testing.expectEqualStrings("and run the tests now", sess.draft.items());
     try std.testing.expect(sess.steer_send);
     sink.dropSteer();

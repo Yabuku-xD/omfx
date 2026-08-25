@@ -3,8 +3,11 @@ const builtin = @import("builtin");
 const types = @import("../providers/types.zig");
 const config = @import("config.zig");
 const permissions = @import("permissions.zig");
+const input_session = @import("input_session.zig");
 
 const log = std.log.scoped(.sink);
+
+var input: input_session.InputSession = .{};
 
 /// Harness callbacks. Null fields mean silent/default (stderr Y/N, no stream).
 pub const Ask = enum { allow, deny, always };
@@ -65,8 +68,8 @@ pub const Host = struct {
     /// the part it had to process and store. Both occupy the context window
     /// exactly as fresh input does, so both are reported alongside rather than
     /// folded into `input`, which the wire sets to 1 on a fully cached turn.
-    pub fn usage(self: Host, input: u32, output: u32, read: u32, write: u32) void {
-        if (self.on_usage) |f| f(self.ctx, input, output, read, write);
+    pub fn usage(self: Host, in_tok: u32, output: u32, read: u32, write: u32) void {
+        if (self.on_usage) |f| f(self.ctx, in_tok, output, read, write);
     }
 
     pub fn decide(self: Host, name: []const u8, detail: []const u8, args: []const u8) ?Ask {
@@ -107,7 +110,7 @@ pub const Host = struct {
 
 /// Bytes read in one non-blocking drain. A terminal delivers a whole escape
 /// sequence in a single read, so this only has to hold the largest of those.
-pub const cancel_drain_bytes: usize = 512;
+pub const cancel_drain_bytes = input_session.cancel_drain_bytes;
 
 /// Words both surfaces show when a stop is requested. The TUI paints this
 /// through the activity line; stream/ask wraps it in CSI.
@@ -119,270 +122,41 @@ pub const stopping_phrase = "Stopping...";
 ///
 /// Enter commits the line being typed as one queued message and leaves the
 /// composer empty for the next, so a turn can be steered more than once.
-///
-/// Receipt: a typed line is well under 200 bytes; 4 KB is a tripwire for a
-/// paste, which is the only way one line fills.
-pub const max_steer: usize = 4096;
-/// Past this the user is not steering, they are writing the next session. The
-/// oldest queued message is kept and further Enters are ignored.
-pub const max_queued: usize = 8;
+pub const max_steer = input_session.max_steer;
+pub const max_queued = input_session.max_queued;
 
-/// Stdin is one resource and the watcher thread and the SSE loop both drain it,
-/// so what they find has to land somewhere both can reach.
-var steer_buf: [max_steer]u8 = undefined;
-var steer_len: usize = 0;
-var queued: [max_queued][max_steer]u8 = undefined;
-var queued_len: [max_queued]usize = @splat(0);
-var queued_n: usize = 0;
-/// Spin lock, matching how the paint path guards its own two threads: the
-/// critical section is a memcpy of a few hundred bytes.
-var steer_lock: std.atomic.Value(u32) = .init(0);
-
-fn steerLock() void {
-    while (steer_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
-        std.atomic.spinLoopHint();
-    }
-}
-
-fn steerUnlock() void {
-    steer_lock.store(0, .release);
-}
-
-/// Caller holds the lock.
-fn commitLine() void {
-    if (steer_len == 0) return;
-    if (queued_n == max_queued) {
-        steer_len = 0;
-        return;
-    }
-    @memcpy(queued[queued_n][0..steer_len], steer_buf[0..steer_len]);
-    queued_len[queued_n] = steer_len;
-    queued_n += 1;
-    steer_len = 0;
-}
-
-/// Typed bytes that are not a stop request. Control bytes are dropped: only
-/// what a composer would have accepted is worth keeping.
-/// Escape sequences arrive split across reads, so where one ended is state.
-///
-/// `x10` counts out the three bytes that follow an `ESC [ M` mouse report.
-/// They are raw coordinates offset by 32, not part of the CSI, so ending the
-/// sequence at the `M` left them to land in the message as text -- and past
-/// column 95 they are not even valid UTF-8, which is what put replacement
-/// glyphs in the transcript.
-var esc_state: enum { none, esc, seq, x10 } = .none;
-var x10_left: u8 = 0;
-/// True once a `<` has been seen in this CSI: an SGR mouse report carries its
-/// coordinates as parameters, so nothing follows the final byte.
-var esc_sgr: bool = false;
-
-fn steerPush(bytes: []const u8) void {
-    steerLock();
-    defer steerUnlock();
-    for (bytes) |c| {
-        // An arrow key is ESC [ B. Dropping only the ESC leaves "[B" in the
-        // message, which is how a keypress became text nobody typed.
-        switch (esc_state) {
-            .none => {},
-            .esc => {
-                esc_state = if (c == '[' or c == 'O') .seq else .none;
-                continue;
-            },
-            .seq => {
-                if (c == '<') esc_sgr = true;
-                if (c >= 0x40 and c <= 0x7e) {
-                    if ((c == 'M' or c == 'm') and !esc_sgr) {
-                        esc_state = .x10;
-                        x10_left = 3;
-                    } else {
-                        esc_state = .none;
-                    }
-                }
-                continue;
-            },
-            .x10 => {
-                x10_left -= 1;
-                if (x10_left == 0) esc_state = .none;
-                continue;
-            },
-        }
-        if (c == 0x1b) {
-            esc_state = .esc;
-            esc_sgr = false;
-            continue;
-        }
-        if (c == '\r' or c == '\n') {
-            // Bare `/cmd` mid-turn: defer as a slash command, do not queue as
-            // a user message (Claude keeps slash UX live while generating).
-            if (slashTypingLocked() and steer_len > 1) {
-                setPendingCmdLocked(steer_buf[0..steer_len]);
-                steer_len = 0;
-                continue;
-            }
-            commitLine();
-            continue;
-        }
-        if (c == 0x09) {
-            // Tab: live paint path completes via slash_sel; mark request.
-            if (slashTypingLocked()) {
-                // Selection stays; live.paintTty applies completeSlashName.
-                slash_tab.store(true, .release);
-            }
-            continue;
-        }
-        if (c == 0x7f or c == 0x08) {
-            if (steer_len != 0) steer_len -= 1;
-            continue;
-        }
-        if (c < 0x20) continue;
-        if (steer_len == steer_buf.len) continue;
-        if (!acceptRuneByte(c)) continue;
-        steer_buf[steer_len] = c;
-        steer_len += 1;
-    }
-}
-
-/// One queued message. Borrowed from the queue, so it is read before the next
-/// `takeSteer`; the caller copies what it keeps.
-/// Bytes still expected to finish the rune being read, and where it started.
-var utf8_need: usize = 0;
-var utf8_start: usize = 0;
-
-/// Whether `c` can be appended as text.
-///
-/// The escape filters above catch the sequences omfx knows about, but a
-/// terminal can report the mouse in a shape nobody anticipated, and its
-/// coordinates are raw bytes: past column 95 they are not valid UTF-8, and
-/// they reached the transcript as replacement glyphs. A composer cannot hold
-/// invalid UTF-8 either way, so it is rejected at the door rather than
-/// guarded against one report shape at a time.
-///
-/// Multi-byte text still goes through, including split across reads, because
-/// what is tracked is the rune in progress rather than one byte at a time.
-fn acceptRuneByte(c: u8) bool {
-    const continuation = c & 0xc0 == 0x80;
-    if (utf8_need != 0) {
-        if (continuation) {
-            utf8_need -= 1;
-            return true;
-        }
-        // The rune never finished, so what was written is not text. Drop it
-        // and judge this byte on its own.
-        steer_len = utf8_start;
-        utf8_need = 0;
-    }
-    if (c < 0x80) return true;
-    if (continuation) return false;
-    const want: usize = if (c & 0xe0 == 0xc0)
-        1
-    else if (c & 0xf0 == 0xe0)
-        2
-    else if (c & 0xf8 == 0xf0)
-        3
-    else
-        return false;
-    utf8_need = want;
-    utf8_start = steer_len;
-    return true;
-}
-
-pub const Queued = struct {
-    rows: [max_queued][]const u8,
-    n: usize,
-    /// The line still being typed, which the composer draws.
-    typing: []const u8,
-
-    pub fn slice(self: *const Queued) []const []const u8 {
-        return self.rows[0..self.n];
-    }
-};
+pub const Queued = input_session.InputSession.Queued;
+pub const Steer = input_session.InputSession.Steer;
 
 /// What is queued right now, without clearing it. The pane draws this while the
 /// turn runs, so typing mid-turn is visible instead of silent.
 pub fn peekSteer() Queued {
-    steerLock();
-    defer steerUnlock();
-    var out = Queued{ .rows = undefined, .n = queued_n, .typing = steer_buf[0..steer_len] };
-    for (0..queued_n) |i| out.rows[i] = queued[i][0..queued_len[i]];
-    return out;
+    return input.peekSteer();
 }
 
 /// Same as `peekSteer`, but `typing` is copied so a paint frame does not read
 /// the live buffer while the watcher appends to it.
 pub fn peekSteerCopy(typing_buf: []u8) Queued {
-    steerLock();
-    defer steerUnlock();
-    const n = @min(steer_len, typing_buf.len);
-    @memcpy(typing_buf[0..n], steer_buf[0..n]);
-    var out = Queued{ .rows = undefined, .n = queued_n, .typing = typing_buf[0..n] };
-    for (0..queued_n) |i| out.rows[i] = queued[i][0..queued_len[i]];
-    return out;
+    return input.peekSteerCopy(typing_buf);
 }
 
 /// Everything typed during the turn, copied out and cleared. A line that was
 /// never committed with Enter comes back as the last message: it is what the
 /// user was writing, and dropping it would cost them the words.
 pub fn takeSteer(out: []u8) Steer {
-    steerLock();
-    defer steerUnlock();
-    var w: usize = 0;
-    var msgs: usize = 0;
-    for (0..queued_n) |i| {
-        const n = @min(queued_len[i], out.len - w);
-        if (n == 0) break;
-        if (w != 0) {
-            if (w == out.len) break;
-            out[w] = '\n';
-            w += 1;
-        }
-        @memcpy(out[w..][0..n], queued[i][0..n]);
-        w += n;
-        msgs += 1;
-    }
-    const tail = @min(steer_len, out.len - w);
-    if (tail != 0) {
-        if (w != 0 and w < out.len) {
-            out[w] = '\n';
-            w += 1;
-        }
-        @memcpy(out[w..][0..@min(tail, out.len - w)], steer_buf[0..@min(tail, out.len - w)]);
-        w += @min(tail, out.len - w);
-    }
-    steer_len = 0;
-    queued_n = 0;
-    // Only a committed line asks to be sent; an unfinished one parks in the
-    // composer for the user to finish.
-    return .{ .text = out[0..w], .ready = msgs != 0 and tail == 0 };
+    return input.takeSteer(out);
 }
-
-pub const Steer = struct {
-    text: []const u8,
-    /// Enter was pressed: the caller sends rather than parks it in the composer.
-    ready: bool,
-};
 
 /// Feeds the queue as if it had been typed. Tests only: the real path reads
 /// stdin, which a test has no way to write to.
 pub fn pushSteerForTest(bytes: []const u8) void {
-    steerPush(bytes);
+    input.pushSteerForTest(bytes);
 }
 
 /// Drops whatever was typed. Used when the turn was interrupted: the words
 /// were aimed at a turn that no longer exists.
 pub fn dropSteer() void {
-    steerLock();
-    defer steerUnlock();
-    steer_len = 0;
-    queued_n = 0;
-    esc_state = .none;
-    esc_sgr = false;
-    x10_left = 0;
-    utf8_need = 0;
-    utf8_start = 0;
-    key_hold_len = 0;
-    ctx_peek.store(false, .release);
-    pending_cmd_len.store(0, .release);
-    slash_tab.store(false, .release);
+    input.dropSteer();
 }
 
 /// True if the user asked to stop: ctrl-c, a bare Esc, or kitty CSI-u Esc (27).
@@ -403,19 +177,13 @@ var mode_cycle_pending: std.atomic.Value(bool) = .init(false);
 /// while this is non-zero: two readers split CSI and the tail is steered.
 var watchers: std.atomic.Value(u32) = .init(0);
 
-/// Incomplete SGR/CSI from the previous stdin read, prepended to the next.
-/// Mouse reports often arrive as `\x1b[<` then `64;col;rowM`; dropping the
-/// prefix left `64;col;rowM` to land in the composer as text nobody typed.
-var key_hold: [64]u8 = undefined;
-var key_hold_len: usize = 0;
-
 /// Wheel / PageUp deltas queued by the cancel watcher while a turn owns stdin.
 /// Positive = older transcript (scroll up); negative = toward the live tail.
 var scroll_delta: std.atomic.Value(i32) = .init(0);
 
 /// Rows one mouse-wheel notch moves. Kept here (not in the TUI module) so the
 /// watcher thread can apply the same step without importing the CLI layer.
-pub const wheel_step: i32 = 3;
+pub const wheel_step = input_session.wheel_step;
 
 pub fn takeScrollDelta() i32 {
     return scroll_delta.swap(0, .acq_rel);
@@ -426,226 +194,52 @@ fn noteScroll(delta: i32) void {
     _ = scroll_delta.fetchAdd(delta, .monotonic);
 }
 
-/// Hit box for the jump-to-bottom pill while a turn owns stdin (1-based cells).
-var jump_active: std.atomic.Value(bool) = .init(false);
-var jump_row: std.atomic.Value(u32) = .init(0);
-var jump_col0: std.atomic.Value(u32) = .init(0);
-var jump_col1: std.atomic.Value(u32) = .init(0);
-var jump_pending: std.atomic.Value(bool) = .init(false);
-
-/// Left click in the transcript while a turn owns stdin. The live painter
-/// resolves it to a tool run and toggles expand, same as idle clickRun.
-var run_click_row: std.atomic.Value(u32) = .init(0);
-var run_click_col: std.atomic.Value(u32) = .init(0);
-
-/// Header context meter hit box (1-based cells) while a turn owns stdin.
-var ctx_active: std.atomic.Value(bool) = .init(false);
-var ctx_row: std.atomic.Value(u32) = .init(0);
-var ctx_col0: std.atomic.Value(u32) = .init(0);
-var ctx_col1: std.atomic.Value(u32) = .init(0);
-var ctx_peek: std.atomic.Value(bool) = .init(false);
-
-/// Slash palette selection while typing `/…` mid-turn.
-var slash_sel: std.atomic.Value(u32) = .init(0);
-var slash_count: std.atomic.Value(u32) = .init(0);
-var slash_tab: std.atomic.Value(bool) = .init(false);
-
-/// Deferred slash command to run when the turn ends (e.g. `/settings`).
-var pending_cmd: [64]u8 = undefined;
-var pending_cmd_len: std.atomic.Value(u32) = .init(0);
-
 pub fn setJumpHit(active: bool, row: u16, col0: u16, col1: u16) void {
-    jump_active.store(active, .release);
-    jump_row.store(row, .release);
-    jump_col0.store(col0, .release);
-    jump_col1.store(col1, .release);
-    if (!active) jump_pending.store(false, .release);
+    input.setJumpHit(active, row, col0, col1);
 }
 
 pub fn takeJumpToBottom() bool {
-    return jump_pending.swap(false, .acq_rel);
+    return input.takeJumpToBottom();
 }
 
 pub fn takeRunClick() ?struct { row: u16, col: u16 } {
-    const row = run_click_row.swap(0, .acq_rel);
-    if (row == 0) return null;
-    const col: u16 = @truncate(run_click_col.swap(0, .acq_rel));
-    return .{ .row = @truncate(row), .col = col };
+    const got = input.takeRunClick() orelse return null;
+    return .{ .row = got.row, .col = got.col };
 }
 
 pub fn setContextHit(active: bool, row: u16, col0: u16, col1: u16) void {
-    ctx_active.store(active, .release);
-    ctx_row.store(row, .release);
-    ctx_col0.store(col0, .release);
-    ctx_col1.store(col1, .release);
+    input.setContextHit(active, row, col0, col1);
 }
 
 pub fn contextPeekOn() bool {
-    return ctx_peek.load(.acquire);
+    return input.contextPeekOn();
 }
 
 pub fn setSlashPalette(sel: usize, count: usize) void {
-    slash_sel.store(@intCast(@min(sel, std.math.maxInt(u32))), .release);
-    slash_count.store(@intCast(@min(count, std.math.maxInt(u32))), .release);
+    input.setSlashPalette(sel, count);
 }
 
 pub fn slashSel() usize {
-    return slash_sel.load(.acquire);
+    return input.slashSel();
 }
 
 pub fn takeSlashTab() bool {
-    return slash_tab.swap(false, .acq_rel);
-}
-
-fn noteJumpIfHit(row: u16, col: u16) void {
-    if (!jump_active.load(.acquire)) return;
-    if (row != @as(u16, @truncate(jump_row.load(.acquire)))) return;
-    const c0: u16 = @truncate(jump_col0.load(.acquire));
-    const c1: u16 = @truncate(jump_col1.load(.acquire));
-    if (col >= c0 and col <= c1) jump_pending.store(true, .release);
-}
-
-fn jumpWouldHit(row: u16, col: u16) bool {
-    if (!jump_active.load(.acquire)) return false;
-    if (row != @as(u16, @truncate(jump_row.load(.acquire)))) return false;
-    const c0: u16 = @truncate(jump_col0.load(.acquire));
-    const c1: u16 = @truncate(jump_col1.load(.acquire));
-    return col >= c0 and col <= c1;
-}
-
-fn ctxWouldHit(row: u16, col: u16) bool {
-    if (!ctx_active.load(.acquire)) return false;
-    if (row != @as(u16, @truncate(ctx_row.load(.acquire)))) return false;
-    const c0: u16 = @truncate(ctx_col0.load(.acquire));
-    const c1: u16 = @truncate(ctx_col1.load(.acquire));
-    return col >= c0 and col <= c1;
-}
-
-fn noteRunClick(row: u16, col: u16) void {
-    run_click_row.store(row, .release);
-    run_click_col.store(col, .release);
-}
-
-fn noteContextIfHit(row: u16, col: u16) void {
-    if (!ctx_active.load(.acquire)) return;
-    if (row != @as(u16, @truncate(ctx_row.load(.acquire)))) return;
-    const c0: u16 = @truncate(ctx_col0.load(.acquire));
-    const c1: u16 = @truncate(ctx_col1.load(.acquire));
-    if (col >= c0 and col <= c1) {
-        const on = ctx_peek.load(.acquire);
-        ctx_peek.store(!on, .release);
-    }
+    return input.takeSlashTab();
 }
 
 /// Copy a deferred slash command out and clear it.
 pub fn takePendingCmd(out: []u8) []const u8 {
-    steerLock();
-    defer steerUnlock();
-    const n: usize = pending_cmd_len.swap(0, .acq_rel);
-    if (n == 0) return "";
-    const take = @min(n, out.len);
-    @memcpy(out[0..take], pending_cmd[0..take]);
-    return out[0..take];
-}
-
-fn setPendingCmdLocked(cmd: []const u8) void {
-    const n = @min(cmd.len, pending_cmd.len);
-    @memcpy(pending_cmd[0..n], cmd[0..n]);
-    pending_cmd_len.store(@intCast(n), .release);
-}
-
-fn slashTypingLocked() bool {
-    if (steer_len == 0 or steer_buf[0] != '/') return false;
-    return std.mem.indexOfScalar(u8, steer_buf[0..steer_len], ' ') == null;
-}
-
-fn replaceSteerLocked(text: []const u8) void {
-    const n = @min(text.len, steer_buf.len);
-    @memcpy(steer_buf[0..n], text[0..n]);
-    steer_len = n;
-    utf8_need = 0;
+    return input.takePendingCmd(out);
 }
 
 /// Complete the highlighted slash into the steer buffer. `name` includes `/`.
 pub fn completeSlashName(name: []const u8) void {
-    steerLock();
-    defer steerUnlock();
-    if (!slashTypingLocked()) return;
-    var buf: [max_steer]u8 = undefined;
-    const filled = std.fmt.bufPrint(&buf, "{s} ", .{name}) catch return;
-    replaceSteerLocked(filled);
-}
-
-fn bumpSlashSel(delta: i32) void {
-    const count = slash_count.load(.acquire);
-    if (count == 0) return;
-    var sel: i64 = @intCast(slash_sel.load(.acquire));
-    sel += delta;
-    if (sel < 0) sel = @intCast(count - 1);
-    if (sel >= count) sel = 0;
-    slash_sel.store(@intCast(sel), .release);
+    input.completeSlashName(name);
 }
 
 fn wantsModeCycle(bytes: []const u8) bool {
     // Shift+Tab is CSI Z (`\x1b[Z`).
     return std.mem.indexOf(u8, bytes, "\x1b[Z") != null;
-}
-
-/// End of an SGR mouse report (`…M` or `…m`), or null if the CSI is incomplete.
-fn sgrMouseEnd(bytes: []const u8) ?usize {
-    if (!std.mem.startsWith(u8, bytes, "\x1b[<")) return null;
-    var j: usize = 3;
-    while (j < bytes.len) : (j += 1) {
-        if (bytes[j] == 'M' or bytes[j] == 'm') return j + 1;
-    }
-    return null;
-}
-
-/// Consume one mouse / page-scroll sequence. Returns how many bytes to skip and
-/// a scroll delta (0 for clicks that should not enter the steer queue).
-fn takeScrollSeq(bytes: []const u8, page_rows: u16) ?struct { n: usize, delta: i32 } {
-    if (bytes.len == 0) return null;
-    if (std.mem.startsWith(u8, bytes, "\x1b[5~")) {
-        return .{ .n = 4, .delta = @as(i32, @intCast(@max(page_rows, 1))) };
-    }
-    if (std.mem.startsWith(u8, bytes, "\x1b[6~")) {
-        return .{ .n = 4, .delta = -@as(i32, @intCast(@max(page_rows, 1))) };
-    }
-    // Ctrl-Up / Ctrl-Down (CSI 1;5A / 1;5B) — same as page in the idle loop.
-    if (std.mem.startsWith(u8, bytes, "\x1b[1;5A")) {
-        return .{ .n = 6, .delta = @as(i32, @intCast(@max(page_rows, 1))) };
-    }
-    if (std.mem.startsWith(u8, bytes, "\x1b[1;5B")) {
-        return .{ .n = 6, .delta = -@as(i32, @intCast(@max(page_rows, 1))) };
-    }
-    const end = sgrMouseEnd(bytes) orelse return null;
-    const params = bytes[3 .. end - 1];
-    const semi = std.mem.indexOfScalar(u8, params, ';') orelse return .{ .n = end, .delta = 0 };
-    const btn = std.fmt.parseInt(u32, params[0..semi], 10) catch return .{ .n = end, .delta = 0 };
-    if (btn & 64 != 0) {
-        // Release reports and tilt wheels do nothing.
-        if (bytes[end - 1] == 'm') return .{ .n = end, .delta = 0 };
-        if ((btn & 3) == 2 or (btn & 3) == 3) return .{ .n = end, .delta = 0 };
-        return .{ .n = end, .delta = if ((btn & 1) == 0) wheel_step else -wheel_step };
-    }
-    // Left release on the jump pill re-pins to the live tail; header context
-    // toggles the live peek overlay.
-    if ((btn & 3) == 0 and (btn & 32) == 0 and bytes[end - 1] == 'm') {
-        const rest = params[semi + 1 ..];
-        if (std.mem.indexOfScalar(u8, rest, ';')) |semi2| {
-            const col = std.fmt.parseInt(u16, rest[0..semi2], 10) catch 0;
-            const row = std.fmt.parseInt(u16, rest[semi2 + 1 ..], 10) catch 0;
-            if (row != 0 and col != 0) {
-                const on_jump = jumpWouldHit(row, col);
-                const on_ctx = ctxWouldHit(row, col);
-                noteJumpIfHit(row, col);
-                noteContextIfHit(row, col);
-                if (!on_jump and !on_ctx) noteRunClick(row, col);
-            }
-        }
-    }
-    // Clicks / drags must not become steer text.
-    return .{ .n = end, .delta = 0 };
 }
 
 /// Drain stdin: stop keys cancel, Shift+Tab queues a permission cycle, wheel
@@ -676,77 +270,10 @@ fn drainKeysTimeout(wait_ms: i32, page_rows: u16) bool {
     }
 }
 
-fn stashKeys(bytes: []const u8) void {
-    steerLock();
-    defer steerUnlock();
-    const n = @min(bytes.len, key_hold.len);
-    @memcpy(key_hold[0..n], bytes[0..n]);
-    key_hold_len = n;
-}
-
-fn joinHeld(bytes: []const u8, buf: *[cancel_drain_bytes + 64]u8) []const u8 {
-    steerLock();
-    defer steerUnlock();
-    if (key_hold_len == 0) return bytes;
-    const held = key_hold_len;
-    key_hold_len = 0;
-    const n = @min(bytes.len, buf.len - held);
-    @memcpy(buf[0..held], key_hold[0..held]);
-    @memcpy(buf[held..][0..n], bytes[0..n]);
-    return buf[0 .. held + n];
-}
-
 /// Split a stdin chunk into scroll deltas vs steer/stop. Returns true when a
 /// stop key was present.
-fn routeTurnKeys(bytes: []const u8, page_rows: u16) bool {
-    var join_buf: [cancel_drain_bytes + 64]u8 = undefined;
-    const src = joinHeld(bytes, &join_buf);
-    var stop = false;
-    var i: usize = 0;
-    while (i < src.len) {
-        if (takeScrollSeq(src[i..], page_rows)) |s| {
-            noteScroll(s.delta);
-            i += s.n;
-            continue;
-        }
-        // Slash picker: Up/Down move the highlight while typing `/…`.
-        if (src.len >= i + 3 and src[i] == 0x1b and src[i + 1] == '[') {
-            const key = src[i + 2];
-            if (key == 'A' or key == 'B') {
-                steerLock();
-                const in_slash = slashTypingLocked();
-                steerUnlock();
-                if (in_slash) {
-                    bumpSlashSel(if (key == 'A') -1 else 1);
-                    i += 3;
-                    continue;
-                }
-            }
-        }
-        if (std.mem.startsWith(u8, src[i..], "\x1b[<") and sgrMouseEnd(src[i..]) == null) {
-            stashKeys(src[i..]);
-            break;
-        }
-        // Next mouse/page CSI, or the end of the buffer.
-        const next = findScrollAt(src, i + 1) orelse src.len;
-        const chunk = src[i..next];
-        if (chunk.len != 0) {
-            if (wantsStop(chunk)) stop = true else steerPush(chunk);
-        }
-        i = next;
-    }
-    return stop;
-}
-
-fn findScrollAt(bytes: []const u8, from: usize) ?usize {
-    var i = from;
-    while (i < bytes.len) : (i += 1) {
-        if (bytes[i] != 0x1b) continue;
-        if (takeScrollSeq(bytes[i..], 1) != null) return i;
-        if (std.mem.startsWith(u8, bytes[i..], "\x1b[<")) return i;
-        if (std.mem.startsWith(u8, bytes[i..], "\x1b[5~") or std.mem.startsWith(u8, bytes[i..], "\x1b[6~")) return i;
-    }
-    return null;
+pub fn routeTurnKeys(bytes: []const u8, page_rows: u16) bool {
+    return input.routeTurnKeys(bytes, page_rows, noteScroll, wantsStop);
 }
 
 /// `wait_ms` 0 polls and returns; a positive value blocks that long, which is

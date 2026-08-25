@@ -1,63 +1,14 @@
 const std = @import("std");
 const Io = std.Io;
 const fs = @import("fs.zig");
-const undo = @import("undo.zig");
-const git_work = @import("git_work.zig");
-const bash = @import("bash.zig");
-const search = @import("search.zig");
-const web = @import("web.zig");
-const sse = @import("../providers/sse.zig");
 const pathing = @import("pathing.zig");
-const settings = @import("../core/settings.zig");
-const cdp = @import("cdp.zig");
 const tool = @import("../core/tool.zig");
-const deadline = @import("deadline.zig");
-const jobs = @import("jobs.zig");
-const recall = @import("../core/recall.zig");
-const hooks = @import("../core/hooks.zig");
+const fs_dispatch = @import("dispatch/fs.zig");
+const shell_dispatch = @import("dispatch/shell.zig");
+const web_dispatch = @import("dispatch/web.zig");
+const misc_dispatch = @import("dispatch/misc.zig");
 
-/// Tool arguments arrive as JSON *string values*: after the provider layer
-/// decodes the arguments-as-a-string envelope, `\n` inside a value is still two
-/// characters. Decoding it is this type's whole job, and it happens once per
-/// argument read so no call site can forget.
-///
-/// Backed by a scratch arena that dies with the call, so reads stay `?[]const u8`
-/// and nothing here has to be freed by hand.
-const Args = struct {
-    arena: std.mem.Allocator,
-    json: []const u8,
-
-    fn str(self: Args, key: []const u8) ?[]const u8 {
-        return sse.argString(self.arena, self.json, key);
-    }
-
-    fn usize_(self: Args, key: []const u8) ?usize {
-        return sse.jsonUsize(self.json, key);
-    }
-
-    /// Models send booleans as `true`, `"true"`, or `1`; take all three.
-    ///
-    /// Scanned here rather than via `jsonAtom`, which only understands quoted
-    /// strings and numbers -- a bare `false` came back null, so an explicit
-    /// `background: false` silently fell through to the default and detached
-    /// the command the model was waiting on.
-    fn flag(self: Args, key: []const u8) ?bool {
-        if (self.str(key)) |quoted| return wordFlag(quoted);
-        var needle_buf: [80]u8 = undefined;
-        const needle = std.fmt.bufPrint(&needle_buf, "\"{s}\":", .{key}) catch return null;
-        const at = std.mem.indexOf(u8, self.json, needle) orelse return null;
-        var i = at + needle.len;
-        while (i < self.json.len and self.json[i] == ' ') i += 1;
-        const rest = self.json[i..];
-        return wordFlag(rest);
-    }
-
-    fn wordFlag(v: []const u8) ?bool {
-        if (std.mem.startsWith(u8, v, "true") or std.mem.startsWith(u8, v, "1")) return true;
-        if (std.mem.startsWith(u8, v, "false") or std.mem.startsWith(u8, v, "0")) return false;
-        return null;
-    }
-};
+pub const Args = @import("dispatch/args.zig").Args;
 
 pub fn run(
     dir: Io.Dir,
@@ -89,286 +40,15 @@ pub fn run(
     }
     const kind = tool.Name.fromSlice(name) orelse return error.UnknownTool;
     return switch (kind) {
-        .read => blk: {
-            const path = args.str("path") orelse return error.MissingPath;
-            const offset = args.usize_("offset") orelse 0;
-            const limit = args.usize_("limit") orelse 0;
-            // Models often `read` a directory (`.` / `src`). Opaque NotAFile
-            // makes them retry the same call; mirror list→file with a soft hint
-            // and a one-level listing so the turn can advance (Kilo/Claude EISDIR).
-            const raw = fs.read(dir, io, allocator, workspace, path) catch |err| switch (err) {
-                error.NotAFile => break :blk try fs.readDirHint(dir, io, allocator, workspace, path),
-                else => return err,
-            };
-            defer allocator.free(raw);
-            const body = try fs.numberLines(allocator, path, raw, offset, limit);
-            errdefer allocator.free(body);
-            const symbols = @import("symbols.zig");
-            // Outline the file itself, not the numbered view of it.
-            const prefix = try symbols.outlinePrefix(allocator, path, raw);
-            if (prefix.len == 0) break :blk body;
-            defer allocator.free(prefix);
-            const joined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, body });
-            allocator.free(body);
-            break :blk joined;
-        },
-        .write => blk: {
-            const path = args.str("path") orelse return error.MissingPath;
-            const contents = args.str("contents") orelse "";
-            git_work.beforeMutate(allocator, io, workspace, home);
-            undo.recordWrite(allocator, dir, io, workspace, path);
-            try fs.write(dir, io, allocator, workspace, path, contents);
-            git_work.afterMutate(allocator, io, workspace, home, path);
-            break :blk try std.fmt.allocPrint(allocator, "wrote {s}", .{path});
-        },
-        .edit => blk: {
-            const path = args.str("path") orelse return error.MissingPath;
-            git_work.beforeMutate(allocator, io, workspace, home);
-            if (std.mem.indexOf(u8, args_json, "\"edits\"") != null) {
-                const out = try editsFromJson(allocator, dir, io, workspace, path, args_json);
-                git_work.afterMutate(allocator, io, workspace, home, path);
-                break :blk out;
-            }
-            undo.recordWrite(allocator, dir, io, workspace, path);
-            if (args.str("symbol")) |symbol| {
-                const symbols = @import("symbols.zig");
-                const action = symbols.parseAction(args.str("action") orelse "replace") orelse return error.MissingOld;
-                const text = args.str("text") orelse args.str("new_string") orelse "";
-                try symbols.splice(dir, io, allocator, workspace, path, symbol, action, text);
-                git_work.afterMutate(allocator, io, workspace, home, path);
-                break :blk try std.fmt.allocPrint(allocator, "edited {s} ({s} {s})", .{ path, @tagName(action), symbol });
-            }
-            const old = args.str("old_string") orelse return error.MissingOld;
-            const new = args.str("new_string") orelse "";
-            try fs.edit(dir, io, allocator, workspace, path, old, new);
-            git_work.afterMutate(allocator, io, workspace, home, path);
-            break :blk try std.fmt.allocPrint(allocator, "edited {s}", .{path});
-        },
-        .bash => blk: {
-            const command = args.str("command") orelse return error.EmptyCommand;
-            // Detached by default for anything that does not end: a dev server
-            // or a watcher would otherwise burn the whole budget and return
-            // nothing. The model can force either mode.
-            if (args.flag("background") orelse bash.looksUnbounded(command)) {
-                break :blk try bash.runBackground(allocator, io, workspace, command);
-            }
-            var cfg = settings.load(allocator, io, home);
-            defer cfg.deinit(allocator);
-            const secs: u32 = if (args.usize_("timeout")) |t| @intCast(@min(t, 100_000)) else deadline.default_secs;
-            break :blk try bash.runFor(allocator, io, workspace, command, !settings.sandboxOff(cfg), secs);
-        },
-        .job => blk: {
-            const id = args.usize_("id") orelse return error.MissingPath;
-            if (args.flag("kill") orelse false) {
-                break :blk try std.fmt.allocPrint(allocator, "{s}\n", .{
-                    if (jobs.kill(id)) "killed" else "no such job",
-                });
-            }
-            break :blk try jobs.poll(allocator, io, workspace, id);
-        },
-        .read_result => blk: {
-            // id forms: "r3" / "3" (recall), "job:5" (background log).
-            const id_s = args.str("id") orelse return error.MissingPath;
-            if (std.mem.startsWith(u8, id_s, "job:")) {
-                const n = std.fmt.parseInt(usize, id_s["job:".len..], 10) catch
-                    break :blk try allocator.dupe(u8, "read_result: bad job id\n");
-                const path = try jobs.logRel(allocator, n);
-                defer allocator.free(path);
-                const raw = fs.read(dir, io, allocator, workspace, path) catch
-                    break :blk try std.fmt.allocPrint(allocator, "read_result: no job log for {d}\n", .{n});
-                defer allocator.free(raw);
-                if (hooks.hasSecret(raw)) {
-                    break :blk try allocator.dupe(u8, "read_result: sensitive; not shown\n");
-                }
-                break :blk try hooks.mask(allocator, raw);
-            }
-            var digits = id_s;
-            if (digits.len > 0 and (digits[0] == 'r' or digits[0] == 'R')) digits = digits[1..];
-            const n = std.fmt.parseInt(u16, digits, 10) catch
-                break :blk try allocator.dupe(u8, "read_result: id is rN or job:N\n");
-            const body = recall.load(allocator, dir, io, @enumFromInt(n)) catch
-                break :blk try std.fmt.allocPrint(allocator, "read_result: no archive r{d}\n", .{n});
-            defer allocator.free(body);
-            // Hand-edited archives can still hold secrets; never replay them.
-            if (hooks.hasSecret(body)) {
-                break :blk try allocator.dupe(u8, "read_result: sensitive; not shown\n");
-            }
-            break :blk try hooks.mask(allocator, body);
-        },
-        .glob => search.glob(
-            dir,
-            io,
-            allocator,
-            workspace,
-            args.str("pattern") orelse "*",
-            args.str("path") orelse "",
-        ),
-        .grep => blk: {
-            const needle = args.str("pattern") orelse args.str("needle") orelse return error.EmptyNeedle;
-            const g = args.str("glob") orelse "*";
-            const root = args.str("path") orelse "";
-            break :blk try search.grep(dir, io, allocator, workspace, needle, g, root);
-        },
-        .delete => blk: {
-            const path = args.str("path") orelse return error.MissingPath;
-            if (path.len == 0) return error.MissingPath;
-            try pathing.assertInside(workspace, path);
-            git_work.beforeMutate(allocator, io, workspace, home);
-            undo.recordDelete(allocator, dir, io, workspace, path);
-            dir.deleteFile(io, path) catch try dir.deleteDir(io, path);
-            git_work.afterMutate(allocator, io, workspace, home, path);
-            break :blk try std.fmt.allocPrint(allocator, "deleted {s}", .{path});
-        },
-        .rename => blk: {
-            const from = args.str("from") orelse args.str("path") orelse return error.MissingPath;
-            const to = args.str("to") orelse return error.MissingPath;
-            if (from.len == 0 or to.len == 0) return error.MissingPath;
-            git_work.beforeMutate(allocator, io, workspace, home);
-            undo.recordRename(allocator, dir, io, workspace, from, to);
-            try search.rename(dir, io, workspace, from, to);
-            git_work.afterMutate(allocator, io, workspace, home, to);
-            break :blk try std.fmt.allocPrint(allocator, "renamed {s} -> {s}", .{ from, to });
-        },
-        .list => fs.list(dir, io, allocator, workspace, args.str("path") orelse "."),
-        .copy => blk: {
-            const from = args.str("from") orelse args.str("path") orelse return error.MissingPath;
-            const to = args.str("to") orelse return error.MissingPath;
-            if (from.len == 0 or to.len == 0) return error.MissingPath;
-            git_work.beforeMutate(allocator, io, workspace, home);
-            undo.recordWrite(allocator, dir, io, workspace, to);
-            try fs.copy(dir, io, workspace, from, to);
-            git_work.afterMutate(allocator, io, workspace, home, to);
-            break :blk try std.fmt.allocPrint(allocator, "copied {s} -> {s}", .{ from, to });
-        },
-        .mkdir => blk: {
-            const path = args.str("path") orelse return error.MissingPath;
-            if (path.len == 0) return error.MissingPath;
-            try fs.mkdir(dir, io, workspace, path);
-            break :blk try std.fmt.allocPrint(allocator, "mkdir {s}", .{path});
-        },
-        .file_info => blk: {
-            const path = args.str("path") orelse return error.MissingPath;
-            if (path.len == 0) return error.MissingPath;
-            break :blk try fs.info(dir, io, allocator, workspace, path);
-        },
-        .semantic_search => blk: {
-            const q = args.str("query") orelse args.str("q") orelse return error.EmptyNeedle;
-            if (q.len == 0) return error.EmptyNeedle;
-            break :blk try search.semanticSearch(dir, io, allocator, workspace, q);
-        },
-        .open_file => blk: {
-            const path = args.str("path") orelse return error.MissingPath;
-            if (path.len == 0) return error.MissingPath;
-            try pathing.assertInside(workspace, path);
-            const abs = try pathing.joinWorkspace(allocator, workspace, path);
-            defer allocator.free(abs);
-            fs.openPath(io, abs);
-            break :blk try std.fmt.allocPrint(allocator, "opened {s}", .{path});
-        },
-        .memory => blk: {
-            const action = args.str("action") orelse "list";
-            const fact = args.str("fact") orelse args.str("text") orelse "";
-            const memory = @import("memory.zig");
-            break :blk try memory.run(allocator, io, home, action, fact);
-        },
-        .web_fetch => blk: {
-            const url = args.str("url") orelse return error.InvalidUrl;
-            if (url.len == 0) return error.InvalidUrl;
-            break :blk try web.fetch(allocator, io, url);
-        },
-        .web_scrape => blk: {
-            const url = args.str("url") orelse return error.InvalidUrl;
-            if (url.len == 0) return error.InvalidUrl;
-            break :blk try web.scrape(allocator, io, url);
-        },
-        .web_search => blk: {
-            const q = args.str("query") orelse args.str("q") orelse return error.EmptyQuery;
-            if (q.len == 0) return error.EmptyQuery;
-            const web_search = @import("web_search.zig");
-            break :blk try web_search.searchFromHome(allocator, io, home, q);
-        },
-        .browser => blk: {
-            var cfg = settings.load(allocator, io, home);
-            defer cfg.deinit(allocator);
-            break :blk try cdp.run(allocator, io, args_json, settings.cdpPort(cfg));
-        },
-        .ask_user => allocator.dupe(u8, "ask_user: harness waits on the TTY; not available via dispatch\n"),
-        .peer => allocator.dupe(u8, "peer: harness spawns the teammate; not available via dispatch\n"),
-        .board => blk: {
-            const action = args.str("action") orelse "read";
-            const line = args.str("line") orelse args.str("text") orelse "";
-            const b = @import("../core/board.zig");
-            break :blk try b.run(allocator, io, workspace, action, line);
-        },
-        .todo => blk: {
-            const todos = @import("../core/todos.zig");
-            break :blk try todos.set(allocator, args_json);
-        },
-        .patch => blk: {
-            const spec = args.str("patch") orelse args.str("spec") orelse return error.EmptyPatch;
-            const patch = @import("patch.zig");
-            git_work.beforeMutate(allocator, io, workspace, home);
-            const out = try patch.apply(allocator, dir, io, workspace, spec);
-            git_work.afterMutate(allocator, io, workspace, home, "patch");
-            break :blk out;
-        },
-        .mcp => blk: {
-            const action = args.str("action") orelse "list";
-            const n = args.str("name") orelse "";
-            const arguments = args.str("arguments") orelse "{}";
-            const mcp = @import("mcp.zig");
-            break :blk try mcp.run(allocator, io, home, action, n, arguments);
-        },
-        .compact => allocator.dupe(u8, "compact: harness ARC; cites at .omfx/recall; never encrypted\n"),
+        .read, .write, .edit, .glob, .grep, .delete, .rename, .list, .copy, .mkdir, .file_info =>
+            fs_dispatch.run(kind, dir, io, allocator, workspace, home, args, args_json),
+        .bash, .job, .read_result =>
+            shell_dispatch.run(kind, dir, io, allocator, workspace, home, args),
+        .web_fetch, .web_scrape, .web_search, .browser =>
+            web_dispatch.run(kind, io, allocator, home, args, args_json),
+        .semantic_search, .open_file, .memory, .ask_user, .peer, .board, .todo, .patch, .mcp, .compact =>
+            misc_dispatch.run(kind, dir, io, allocator, workspace, home, args, args_json),
     };
-}
-
-/// `edits: [{old_string, new_string}, ...]`. The scanner elsewhere in this file
-/// finds one key at a time and cannot walk an array, so this is the one place
-/// that needs a real parser.
-///
-/// Parsing and applying share a scope on purpose: the edit strings are owned by
-/// the parse tree, so the apply has to finish before it is torn down.
-fn editsFromJson(
-    allocator: std.mem.Allocator,
-    dir: Io.Dir,
-    io: Io,
-    workspace: []const u8,
-    path: []const u8,
-    args_json: []const u8,
-) ![]u8 {
-    const patch = @import("patch.zig");
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, args_json, .{}) catch
-        return error.BadEdits;
-    defer parsed.deinit();
-    const root = switch (parsed.value) {
-        .object => |o| o,
-        else => return error.BadEdits,
-    };
-    const arr = switch (root.get("edits") orelse return error.BadEdits) {
-        .array => |a| a,
-        else => return error.BadEdits,
-    };
-    if (arr.items.len == 0) return error.BadEdits;
-    if (arr.items.len > patch.max_ops) return error.TooManyEdits;
-
-    var list: [patch.max_ops]patch.Edit = undefined;
-    for (arr.items, 0..) |item, i| {
-        const obj = switch (item) {
-            .object => |o| o,
-            else => return error.BadEdits,
-        };
-        const old = switch (obj.get("old_string") orelse obj.get("old") orelse return error.BadEdits) {
-            .string => |v| v,
-            else => return error.BadEdits,
-        };
-        const new = switch (obj.get("new_string") orelse obj.get("new") orelse std.json.Value{ .string = "" }) {
-            .string => |v| v,
-            else => return error.BadEdits,
-        };
-        list[i] = .{ .old = old, .new = new };
-    }
-    return patch.applyEdits(allocator, dir, io, workspace, path, list[0..arr.items.len]);
 }
 
 test "dispatch read" {
@@ -721,6 +401,7 @@ test "a dev server detaches instead of burning the budget" {
     const a = std.testing.allocator;
     const ws = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path });
     defer a.free(ws);
+    const jobs = @import("jobs.zig");
     _ = jobs.killAll();
     defer _ = jobs.killAll();
 
@@ -749,6 +430,7 @@ test "background can be forced and refused explicitly" {
     const a = std.testing.allocator;
     const ws = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path });
     defer a.free(ws);
+    const jobs = @import("jobs.zig");
     _ = jobs.killAll();
     defer _ = jobs.killAll();
 
@@ -768,21 +450,6 @@ test "background can be forced and refused explicitly" {
     try std.testing.expect(std.mem.indexOf(u8, held, "started job") == null);
 }
 
-test "flag reads bare, quoted, and numeric booleans" {
-    // Args.str decodes into the scratch arena, so the test needs a real one.
-    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer scratch.deinit();
-    const a = Args{ .arena = scratch.allocator(), .json =
-        \\{"a":true,"b":false,"c":"true","d":0,"e":1}
-    };
-    try std.testing.expectEqual(@as(?bool, true), a.flag("a"));
-    try std.testing.expectEqual(@as(?bool, false), a.flag("b"));
-    try std.testing.expectEqual(@as(?bool, true), a.flag("c"));
-    try std.testing.expectEqual(@as(?bool, false), a.flag("d"));
-    try std.testing.expectEqual(@as(?bool, true), a.flag("e"));
-    try std.testing.expectEqual(@as(?bool, null), a.flag("missing"));
-}
-
 test "a model-set timeout bounds a runaway command" {
     const a = std.testing.allocator;
     // Without the cap this blocks for 400 seconds.
@@ -799,6 +466,7 @@ test "job polls and kills a running command" {
     const a = std.testing.allocator;
     const ws = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path });
     defer a.free(ws);
+    const jobs = @import("jobs.zig");
     _ = jobs.killAll();
     defer _ = jobs.killAll();
 
@@ -832,31 +500,33 @@ test "e2e catalog coverage for fs search board memory mcp compact" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const a = std.testing.allocator;
+    const ws = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    defer a.free(ws);
 
     // --- write / mkdir / copy / rename / delete / file_info / list ---
     {
-        const out = try run(tmp.dir, io, a, "ws", "mkdir",
+        const out = try run(tmp.dir, io, a, ws, "mkdir",
             \\{"path":"src"}
         , "");
         defer a.free(out);
         try std.testing.expect(std.mem.indexOf(u8, out, "mkdir") != null);
     }
     {
-        const out = try run(tmp.dir, io, a, "ws", "write",
+        const out = try run(tmp.dir, io, a, ws, "write",
             \\{"path":"src/lib.zig","contents":"pub fn MarkerSymbol() void {}\n"}
         , "");
         defer a.free(out);
         try std.testing.expect(std.mem.indexOf(u8, out, "wrote") != null);
     }
     {
-        const out = try run(tmp.dir, io, a, "ws", "mkdir",
+        const out = try run(tmp.dir, io, a, ws, "mkdir",
             \\{"path":"src/nested"}
         , "");
         defer a.free(out);
         try std.testing.expect(std.mem.indexOf(u8, out, "mkdir") != null);
     }
     {
-        const out = try run(tmp.dir, io, a, "ws", "copy",
+        const out = try run(tmp.dir, io, a, ws, "copy",
             \\{"from":"src/lib.zig","to":"src/nested/lib2.zig"}
         , "");
         defer a.free(out);
@@ -866,14 +536,14 @@ test "e2e catalog coverage for fs search board memory mcp compact" {
         try std.testing.expect(std.mem.indexOf(u8, got, "MarkerSymbol") != null);
     }
     {
-        const out = try run(tmp.dir, io, a, "ws", "rename",
+        const out = try run(tmp.dir, io, a, ws, "rename",
             \\{"from":"src/nested/lib2.zig","to":"src/nested/lib_renamed.zig"}
         , "");
         defer a.free(out);
         try std.testing.expect(std.mem.indexOf(u8, out, "renamed") != null);
     }
     {
-        const out = try run(tmp.dir, io, a, "ws", "file_info",
+        const out = try run(tmp.dir, io, a, ws, "file_info",
             \\{"path":"src/lib.zig"}
         , "");
         defer a.free(out);
@@ -881,35 +551,35 @@ test "e2e catalog coverage for fs search board memory mcp compact" {
         try std.testing.expect(std.mem.indexOf(u8, out, "size=") != null);
     }
     {
-        const out = try run(tmp.dir, io, a, "ws", "list",
+        const out = try run(tmp.dir, io, a, ws, "list",
             \\{"path":"src"}
         , "");
         defer a.free(out);
         try std.testing.expect(std.mem.indexOf(u8, out, "lib.zig") != null);
     }
     {
-        const out = try run(tmp.dir, io, a, "ws", "grep",
+        const out = try run(tmp.dir, io, a, ws, "grep",
             \\{"pattern":"MarkerSymbol","path":"src"}
         , "");
         defer a.free(out);
         try std.testing.expect(std.mem.indexOf(u8, out, "lib.zig") != null);
     }
     {
-        const out = try run(tmp.dir, io, a, "ws", "glob",
+        const out = try run(tmp.dir, io, a, ws, "glob",
             \\{"pattern":"**/*renamed.zig"}
         , "");
         defer a.free(out);
         try std.testing.expect(std.mem.indexOf(u8, out, "lib_renamed.zig") != null);
     }
     {
-        const out = try run(tmp.dir, io, a, "ws", "semantic_search",
+        const out = try run(tmp.dir, io, a, ws, "semantic_search",
             \\{"query":"MarkerSymbol"}
         , "");
         defer a.free(out);
         try std.testing.expect(out.len > 0);
     }
     {
-        const out = try run(tmp.dir, io, a, "ws", "delete",
+        const out = try run(tmp.dir, io, a, ws, "delete",
             \\{"path":"src/nested/lib_renamed.zig"}
         , "");
         defer a.free(out);
@@ -917,26 +587,26 @@ test "e2e catalog coverage for fs search board memory mcp compact" {
     }
 
     // --- empty path fail-closed ---
-    try std.testing.expectError(error.MissingPath, run(tmp.dir, io, a, "ws", "copy",
+    try std.testing.expectError(error.MissingPath, run(tmp.dir, io, a, ws, "copy",
         \\{"from":"","to":"x"}
     , ""));
-    try std.testing.expectError(error.MissingPath, run(tmp.dir, io, a, "ws", "rename",
+    try std.testing.expectError(error.MissingPath, run(tmp.dir, io, a, ws, "rename",
         \\{"from":"src/lib.zig","to":""}
     , ""));
 
     // --- board FACT requires path= (docs) ---
     {
-        const bad = try run(tmp.dir, io, a, "ws", "board",
+        const bad = try run(tmp.dir, io, a, ws, "board",
             \\{"action":"post","line":"FACT orphan claim without path"}
         , "");
         defer a.free(bad);
         try std.testing.expect(std.mem.indexOf(u8, bad, "rejected") != null);
-        const good = try run(tmp.dir, io, a, "ws", "board",
+        const good = try run(tmp.dir, io, a, ws, "board",
             \\{"action":"post","line":"FACT path=src/lib.zig MarkerSymbol exists"}
         , "");
         defer a.free(good);
         try std.testing.expect(std.mem.indexOf(u8, good, "FACT") != null);
-        const read = try run(tmp.dir, io, a, "ws", "board",
+        const read = try run(tmp.dir, io, a, ws, "board",
             \\{"action":"read"}
         , "");
         defer a.free(read);
@@ -954,11 +624,11 @@ test "e2e catalog coverage for fs search board memory mcp compact" {
         defer a.free(omfx_dir);
         Io.Dir.cwd().createDirPath(io, omfx_dir) catch {};
 
-        const saved = try run(tmp.dir, io, a, "ws", "memory",
+        const saved = try run(tmp.dir, io, a, ws, "memory",
             \\{"action":"save","fact":"e2e-catalog-marker=1"}
         , home_abs);
         defer a.free(saved);
-        const listed = try run(tmp.dir, io, a, "ws", "memory",
+        const listed = try run(tmp.dir, io, a, ws, "memory",
             \\{"action":"list"}
         , home_abs);
         defer a.free(listed);
@@ -967,26 +637,26 @@ test "e2e catalog coverage for fs search board memory mcp compact" {
 
     // --- mcp list / compact / peer / ask_user stubs ---
     {
-        const mcp_out = try run(tmp.dir, io, a, "ws", "mcp",
+        const mcp_out = try run(tmp.dir, io, a, ws, "mcp",
             \\{"action":"list"}
         , "");
         defer a.free(mcp_out);
         try std.testing.expect(mcp_out.len > 0);
     }
     {
-        const c = try run(tmp.dir, io, a, "ws", "compact", "{}", "");
+        const c = try run(tmp.dir, io, a, ws, "compact", "{}", "");
         defer a.free(c);
         try std.testing.expect(std.mem.indexOf(u8, c, "ARC") != null);
     }
     {
-        const p = try run(tmp.dir, io, a, "ws", "peer",
+        const p = try run(tmp.dir, io, a, ws, "peer",
             \\{"goal":"noop"}
         , "");
         defer a.free(p);
         try std.testing.expect(std.mem.indexOf(u8, p, "harness") != null);
     }
     {
-        const u = try run(tmp.dir, io, a, "ws", "ask_user",
+        const u = try run(tmp.dir, io, a, ws, "ask_user",
             \\{"question":"ok?"}
         , "");
         defer a.free(u);
@@ -995,7 +665,7 @@ test "e2e catalog coverage for fs search board memory mcp compact" {
 
     // --- open_file receipt ---
     {
-        const o = try run(tmp.dir, io, a, "ws", "open_file",
+        const o = try run(tmp.dir, io, a, ws, "open_file",
             \\{"path":"src/lib.zig"}
         , "");
         defer a.free(o);
@@ -1009,10 +679,10 @@ test "e2e catalog coverage for fs search board memory mcp compact" {
         const home_abs = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &home_tmp.sub_path });
         defer a.free(home_abs);
         Io.Dir.cwd().createDirPath(io, home_abs) catch {};
-        const ws = try run(tmp.dir, io, a, "ws", "web_search",
+        const search_out = try run(tmp.dir, io, a, ws, "web_search",
             \\{"query":"bread coding agent"}
         , home_abs);
-        defer a.free(ws);
-        try std.testing.expect(ws.len > 0);
+        defer a.free(search_out);
+        try std.testing.expect(search_out.len > 0);
     }
 }

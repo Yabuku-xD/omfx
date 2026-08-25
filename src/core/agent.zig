@@ -31,6 +31,7 @@ const trim = @import("trim.zig");
 const memory_mod = @import("../tools/memory.zig");
 const isolate = @import("../tools/isolate.zig");
 const sink = @import("sink.zig");
+const turn_loop = @import("agent/turn_loop.zig");
 const repomap = @import("repomap.zig");
 
 pub const max_read_paths: usize = 64;
@@ -485,26 +486,14 @@ fn chatTurn(
     var orient_streak: usize = 0;
     var tool_rounds: usize = 0;
     while (true) {
-        // A tool boundary is the other place a turn can pause; the SSE reader
-        // covers the streaming half.
-        host.pollCancel();
-        host.pollModeCycle();
+        turn_loop.pollBoundary(host);
         if (host.cancelled()) {
             last.deinit(allocator);
             return allocator.dupe(u8, interrupted_text);
         }
+        if (try turn_loop.finishIfText(allocator, &last, tool_rounds, ensureNl)) |text| return text;
         const call = switch (last.outcome) {
-            .text => |body| {
-                // Tool rounds can end with empty prose; that used to paint as a
-                // silent finish after a wall of tool cards.
-                const raw = if (body.len == 0 and tool_rounds != 0)
-                    "Turn finished after tools with no further reply. Say if you want the next step.\n"
-                else
-                    body;
-                const out = try ensureNl(allocator, raw);
-                last.deinit(allocator);
-                return out;
-            },
+            .text => unreachable,
             .tool => |t| t,
         };
         tool_rounds += 1;

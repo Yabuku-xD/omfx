@@ -326,34 +326,20 @@ pub const Live = union(enum) {
         }
     }
 
-    fn redrawRunInPlace(t: *Tty, rec: *runs_mod.Store.Rec) bool {
-        if (rec.off + rec.len > t.shown.bytes().len) return false;
-        const next = runs_mod.render(t.allocator, t.layout.cols, rec.*) catch return false;
-        defer t.allocator.free(next);
-        const was = rec.len;
-        t.shown.replace(rec.off, was, next) catch return false;
-        rec.len = next.len;
-        t.runs.shift(rec.off, @as(isize, @intCast(next.len)) - @as(isize, @intCast(was)));
-        return true;
-    }
-
     /// Toggle a tool run while the main loop is blocked in chatOnce.
     fn toggleRunClick(t: *Tty, term_row: u16) bool {
-        const row = tui.transcriptRowAt(t.layout.*, t.shown, t.scroll.*, term_row) orelse return false;
-        const off = t.shown.rowOffset(row) orelse return false;
-        const idx = t.runs.indexAt(off) orelse return false;
-        const rec = &t.runs.items.items[idx];
-        const part_opt = runs_mod.partAt(t.allocator, t.layout.cols, rec.*, off - rec.off) catch return false;
-        const part = part_opt orelse return false;
-        switch (part) {
-            .summary => {
-                if (!rec.openable()) return false;
-                rec.expanded = !rec.expanded;
-                if (!rec.expanded) rec.open_bits = 0;
-            },
-            .child => |i| rec.toggleChildBit(i),
-        }
-        return redrawRunInPlace(t, rec);
+        const click = runs_mod.clickAtTermRow(
+            t.allocator,
+            t.layout.*,
+            t.runs,
+            t.shown,
+            t.scroll.*,
+            term_row,
+        ) catch return false;
+        const c = click orelse return false;
+        const rec = &t.runs.items.items[c.run_index];
+        if (!runs_mod.applyPartToggle(rec, c.part)) return false;
+        return runs_mod.redrawInPlace(t.allocator, t.layout.cols, t.runs, t.shown, rec, null);
     }
 
     fn paintTty(self: *Tty, extra: Extra) void {

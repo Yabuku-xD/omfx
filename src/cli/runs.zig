@@ -12,6 +12,9 @@ const std = @import("std");
 
 const chat = @import("chat.zig");
 const diffview = @import("diffview.zig");
+const tui = @import("tui.zig");
+
+const Transcript = tui.Transcript;
 
 /// Whether a single call's body has more to show than the summary card.
 pub fn bodyOpenable(body: []const u8) bool {
@@ -221,6 +224,70 @@ pub fn renderFocus(allocator: std.mem.Allocator, cols: u16, r: Store.Rec, focus_
         }
     }
     return out.toOwnedSlice(allocator);
+}
+
+/// Re-render one run's bytes where they already sit in the transcript.
+pub fn redrawInPlace(
+    allocator: std.mem.Allocator,
+    cols: u16,
+    store: *Store,
+    shown: *Transcript,
+    rec: *Store.Rec,
+    focus_hunk: ?usize,
+) bool {
+    if (rec.off + rec.len > shown.bytes().len) return false;
+    const next = renderFocus(allocator, cols, rec.*, focus_hunk) catch return false;
+    defer allocator.free(next);
+    const was = rec.len;
+    shown.replace(rec.off, was, next) catch return false;
+    rec.len = next.len;
+    store.shift(rec.off, @as(isize, @intCast(next.len)) - @as(isize, @intCast(was)));
+    return true;
+}
+
+pub const Click = struct {
+    run_index: usize,
+    part: Part,
+};
+
+/// Which run and part a transcript byte offset belongs to.
+pub fn clickAtOffset(
+    allocator: std.mem.Allocator,
+    cols: u16,
+    store: *const Store,
+    off: usize,
+) chat.FormatError!?Click {
+    const idx = store.indexAt(off) orelse return null;
+    const rec = store.items.items[idx];
+    const part = try partAt(allocator, cols, rec, off - rec.off);
+    return if (part) |p| .{ .run_index = idx, .part = p } else null;
+}
+
+/// Resolve a terminal row to a run click, if it lands on drawn run bytes.
+pub fn clickAtTermRow(
+    allocator: std.mem.Allocator,
+    layout: tui.Layout,
+    store: *const Store,
+    shown: *const Transcript,
+    scroll: usize,
+    term_row: u16,
+) chat.FormatError!?Click {
+    const row = tui.transcriptRowAt(layout, shown, scroll, term_row) orelse return null;
+    const off = shown.rowOffset(row) orelse return null;
+    return clickAtOffset(allocator, layout.cols, store, off);
+}
+
+/// Toggle expand/collapse for the clicked part. Returns false when nothing changed.
+pub fn applyPartToggle(rec: *Store.Rec, part: Part) bool {
+    switch (part) {
+        .summary => {
+            if (!rec.openable()) return false;
+            rec.expanded = !rec.expanded;
+            if (!rec.expanded) rec.open_bits = 0;
+        },
+        .child => |i| rec.toggleChildBit(i),
+    }
+    return true;
 }
 
 test "an opened call shows its output, truncated, and closes on the same key" {
