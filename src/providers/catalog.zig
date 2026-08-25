@@ -176,13 +176,24 @@ pub fn storeId(spec: Spec) []const u8 {
     if (std.mem.eql(u8, spec.id, "openai-codex-device")) return "openai-codex";
     if (std.mem.eql(u8, spec.id, "anthropic-api")) return "anthropic";
     if (std.mem.eql(u8, spec.id, "xai-api")) return "xai-api";
+    // Same Command Code key unlocks both wire shapes.
+    if (std.mem.eql(u8, spec.id, "commandcode-anthropic")) return "commandcode";
     return spec.id;
 }
 
 pub fn vendorOf(spec: Spec) types.Vendor {
     if (std.mem.startsWith(u8, spec.id, "anthropic")) return .anthropic;
+    if (std.mem.eql(u8, spec.id, "commandcode-anthropic")) return .anthropic;
     if (std.mem.startsWith(u8, spec.id, "xai")) return .xai;
     return .openai;
+}
+
+/// Claude on Command Code must use /messages; everything else uses /chat/completions.
+pub fn protocolForModel(provider: []const u8, model_id: []const u8, fallback: types.Protocol) types.Protocol {
+    if (std.mem.startsWith(u8, model_id, "claude") and
+        (std.mem.eql(u8, provider, "commandcode") or std.mem.eql(u8, provider, "commandcode-anthropic")))
+        return .anthropic;
+    return fallback;
 }
 
 pub const Resolved = struct {
@@ -245,6 +256,7 @@ pub fn toEndpoint(resolved: Resolved) types.Endpoint {
         ep.context_window = m.context_window;
         ep.max_output_tokens = m.max_tokens;
     }
+    ep.protocol = protocolForModel(storeId(spec), resolved.model, ep.protocol);
     return ep;
 }
 

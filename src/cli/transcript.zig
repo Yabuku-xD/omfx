@@ -36,10 +36,9 @@ pub const Transcript = struct {
     /// Activity row pinned below the tail while a turn runs. Transient for the
     /// same reason the tail is: it must never enter the saved scrollback.
     status: []const u8 = "",
-    /// The task list, pinned above everything transient. Unlike the tool
-    /// result that produced it, this stays put as the work moves through it:
-    /// a checklist you have to scroll back to find is a checklist you stop
-    /// looking at.
+    /// The task list, kept for the todo tool; sticky display is footer chrome
+    /// (`Footer.tasks`), not these rows. Left on the struct so older callers
+    /// that setPinned remain compile-clean until removed.
     pinned: []const []const u8 = &.{},
     /// Messages queued during the turn, pinned just above the status row.
     /// Transient like the other two: a queued message belongs to the turn it
@@ -212,7 +211,8 @@ pub const Transcript = struct {
     }
 
     pub fn rowCount(self: *const Transcript) usize {
-        return self.lines.items.len + self.tailRows() + self.pinned.len + self.queued.len + self.statusRows();
+        // Pinned todos are footer chrome now; they must not inflate scroll height.
+        return self.lines.items.len + self.tailRows() + self.queued.len + self.statusRows();
     }
 
     /// Display row `i`, committed lines first and the streaming tail last.
@@ -233,8 +233,6 @@ pub const Transcript = struct {
                 n += 1;
             }
         }
-        if (i >= n and i < n + self.pinned.len) return self.pinned[i - n];
-        n += self.pinned.len;
         if (i >= n and i < n + self.queued.len) return self.queued[i - n];
         n += self.queued.len;
         if (self.status.len != 0 and n == i) return self.status;

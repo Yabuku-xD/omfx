@@ -30,13 +30,19 @@ fn headingBody(t: []const u8) ?[]const u8 {
 /// is one. Without it a long paragraph wrapped back to column zero and left the
 /// transcript ragged.
 fn wrapTake(t: []const u8, room: u16) []const u8 {
-    if (measure.cellsTo(t) <= room) return t;
-    const cut = measure.indexAtCell(t, room);
-    if (cut == 0) return t[0..measure.utf8LenAt(t, 0)];
-    if (std.mem.lastIndexOfScalar(u8, t[0..cut], ' ')) |sp| {
-        if (sp != 0) return t[0..sp];
+    // Streaming holds may end mid-rune; never hand those bytes to paint.
+    const clean = measure.utf8CompletePrefix(t);
+    if (clean.len == 0) return clean;
+    if (measure.cellsTo(clean) <= room) return clean;
+    const cut = measure.indexAtCell(clean, room);
+    if (cut == 0) {
+        const n = measure.utf8LenAt(clean, 0);
+        return if (n == 0) clean[0..0] else clean[0..n];
     }
-    return t[0..cut];
+    if (std.mem.lastIndexOfScalar(u8, clean[0..cut], ' ')) |sp| {
+        if (sp != 0) return clean[0..sp];
+    }
+    return clean[0..cut];
 }
 
 /// Cells `paintInline` will actually draw for `t`.
@@ -64,6 +70,7 @@ pub fn inlineCells(t: []const u8) u16 {
             continue;
         }
         const len = measure.utf8LenAt(t, i);
+        if (len == 0) break;
         n += measure.runeWidth(measure.runeAt(t, i));
         i += len;
     }
@@ -91,6 +98,7 @@ pub fn clipInline(t: []const u8, room: u16) []const u8 {
             next = if (end < t.len) end + 1 else t.len;
         } else {
             const len = measure.utf8LenAt(t, i);
+            if (len == 0) break;
             add = measure.runeWidth(measure.runeAt(t, i));
             next = i + len;
         }
@@ -530,6 +538,8 @@ pub const Markdown = struct {
         var first = true;
         while (true) {
             const take = wrapTake(rest, room);
+            // Incomplete/illegal UTF-8 at the tip: stop rather than spin.
+            if (take.len == 0) break;
             try out.appendSlice(allocator, lead);
             if (first and marker.len != 0) {
                 try out.appendSlice(allocator, paint.accent_dim);
@@ -575,12 +585,11 @@ fn codeEdge(allocator: std.mem.Allocator, cols: u16, lang: []const u8, open: boo
     return out.toOwnedSlice(allocator);
 }
 
-/// Longest prefix of `s` that fits `n` bytes without splitting a UTF-8 rune.
+/// Longest prefix of `s` that fits `n` cells without splitting a UTF-8 rune.
 fn takeRunes(s: []const u8, n: u16) []const u8 {
-    if (s.len <= n) return s;
-    var end: usize = n;
-    while (end > 0 and (s[end] & 0xC0) == 0x80) end -= 1;
-    return s[0..end];
+    const clean = measure.utf8CompletePrefix(s);
+    if (measure.cellsTo(clean) <= n) return clean;
+    return clean[0..measure.indexAtCell(clean, n)];
 }
 
 /// One line inside a fence: gutter, then the code on its own plate. Long lines
@@ -593,6 +602,7 @@ fn codeRow(allocator: std.mem.Allocator, cols: u16, lang: []const u8, text: []co
     var rest = text;
     while (true) {
         const take = takeRunes(rest, inner);
+        if (take.len == 0) break;
         rest = rest[take.len..];
         try out.appendSlice(allocator, paint.border);
         try out.appendSlice(allocator, "\u{2502}");

@@ -32,13 +32,36 @@ pub fn runeWidth(cp: u21) u16 {
 
 pub fn utf8LenAt(s: []const u8, i: usize) usize {
     if (i >= s.len) return 0;
-    return std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+    const want = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+    // Never claim bytes past `s`: an incomplete trailing rune used to make
+    // Fold report a piece longer than the line, and ReleaseFast then painted
+    // neighbouring memory as replacement glyphs in the transcript.
+    if (i + want > s.len) return 0;
+    return want;
 }
 
 pub fn runeAt(s: []const u8, i: usize) u21 {
     const n = utf8LenAt(s, i);
-    if (n == 0 or i + n > s.len) return s[i];
+    if (n == 0) return if (i < s.len) s[i] else 0;
     return std.unicode.utf8Decode(s[i..][0..n]) catch s[i];
+}
+
+/// Longest prefix of `s` that is well-formed UTF-8. Streaming holds may end
+/// mid-rune; painting that prefix alone keeps the pane free of replacement glyphs.
+pub fn utf8CompletePrefix(s: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i < s.len) {
+        const want = std.unicode.utf8ByteSequenceLength(s[i]) catch {
+            // Lone continuation / illegal lead: skip one byte rather than stall.
+            i += 1;
+            continue;
+        };
+        if (i + want > s.len) return s[0..i];
+        // Enough bytes but not a real rune: hold back from here (same as incomplete).
+        _ = std.unicode.utf8Decode(s[i..][0..want]) catch return s[0..i];
+        i += want;
+    }
+    return s;
 }
 
 /// Byte index just past the escape sequence at `i`, so measurement can
@@ -76,6 +99,7 @@ pub fn cellsTo(s: []const u8) u16 {
             continue;
         }
         const n = utf8LenAt(s, i);
+        if (n == 0) break;
         col += runeWidth(runeAt(s, i));
         i += n;
     }
@@ -91,6 +115,7 @@ pub fn indexAtCell(s: []const u8, cell: u16) usize {
             continue;
         }
         const n = utf8LenAt(s, i);
+        if (n == 0) break;
         const w = if (s[i] == '\n' or s[i] == '\r') @as(u16, 1) else runeWidth(runeAt(s, i));
         if (w != 0 and col + w > cell) break;
         i += n;
@@ -154,6 +179,13 @@ pub const Fold = struct {
                 continue;
             }
             const n = utf8LenAt(self.line, i);
+            // Incomplete trailing rune: stop before it and end the fold so we
+            // never claim past `line` or spin on a stuck orphan byte.
+            if (n == 0) {
+                self.done = true;
+                if (i == start) return null;
+                break;
+            }
             const w = runeWidth(runeAt(self.line, i));
             if (w != 0 and col + w > self.cols and col > 0) break;
             i += n;
@@ -195,4 +227,24 @@ test "Fold pieces tile the line exactly" {
         at += p.len;
     }
     try std.testing.expectEqual(line.len, at);
+}
+
+test "incomplete trailing UTF-8 never overreads the line" {
+    // Lead of an em dash without its continuations — Fold must not claim past `line.len`.
+    const line = "The \xe2";
+    var it = Fold.init(line, 80);
+    const p = it.next().?;
+    try std.testing.expect(p.off + p.len <= line.len);
+    try std.testing.expectEqualStrings("The ", line[p.off..][0..p.len]);
+    try std.testing.expect(it.next() == null);
+}
+
+test "utf8CompletePrefix holds back a partial rune" {
+    try std.testing.expectEqualStrings("The ", utf8CompletePrefix("The \xe2\x80"));
+    try std.testing.expectEqualStrings("The —", utf8CompletePrefix("The \xe2\x80\x94"));
+}
+
+test "utf8CompletePrefix rejects an invalid 3-byte sequence" {
+    // e2 20 68 looks long enough but is not a valid rune; do not swallow the space.
+    try std.testing.expectEqualStrings("The ", utf8CompletePrefix("The \xe2 hello"));
 }

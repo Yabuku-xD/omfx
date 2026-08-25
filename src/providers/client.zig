@@ -97,7 +97,13 @@ pub fn jsonEscape(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
 }
 
 pub fn requestMaxOutputTokens(max_output_tokens: u32, context_window: u32) ?u32 {
-    if (max_output_tokens == 0) return null;
+    // Catalog 0 means "provider published no cap". Omitting the field lets some
+    // gateways default tiny; thinking models then spend that budget on
+    // reasoning and truncate the visible answer to a word ("The ").
+    if (max_output_tokens == 0) {
+        if (context_window == 0) return 32_768;
+        return @min(32_768, @max(context_window / 8, 8_192));
+    }
     if (context_window > 0 and max_output_tokens >= context_window) return null;
     return max_output_tokens;
 }
@@ -567,6 +573,38 @@ pub fn collectCalls(body: []const u8, out: *[max_calls]CallHit) usize {
     return n;
 }
 
+/// Stitch OpenAI chat.completions `tool_calls` deltas. `out[i].args` is owned by
+/// `allocator` (empty slots are "").
+fn collectChatToolCalls(allocator: std.mem.Allocator, body: []const u8, out: *[max_calls]CallHit) !usize {
+    var names: [max_calls][]const u8 = .{""} ** max_calls;
+    var args: [max_calls]std.ArrayList(u8) = .{std.ArrayList(u8).empty} ** max_calls;
+    errdefer for (&args) |*a| a.deinit(allocator);
+
+    var it = std.mem.splitScalar(u8, body, '\n');
+    while (it.next()) |line| {
+        const data = sse.dataLine(line);
+        if (std.mem.indexOf(u8, data, "tool_calls") == null) continue;
+        const idx = sse.jsonUsize(data, "index") orelse 0;
+        if (idx >= max_calls) continue;
+        if (sse.jsonString(data, "name")) |name| names[idx] = name;
+        if (sse.jsonString(data, "arguments")) |piece| {
+            if (piece.len > 0) try args[idx].appendSlice(allocator, piece);
+        }
+    }
+
+    var n: usize = 0;
+    for (names, 0..) |name, idx| {
+        if (n >= out.len) break;
+        if (name.len == 0 or args[idx].items.len == 0) continue;
+        const parsed = tool.Name.fromSlice(name) orelse continue;
+        out[n] = .{ .name = parsed, .args = try args[idx].toOwnedSlice(allocator) };
+        n += 1;
+        args[idx] = .empty;
+    }
+    for (&args) |*a| a.deinit(allocator);
+    return n;
+}
+
 const Extra = struct {
     buf: [12]std.http.Header = undefined,
     len: usize = 0,
@@ -874,7 +912,7 @@ pub fn postChatFiltered(
         tee.answer.items
     else if (extracted_text.len > 0)
         extracted_text
-    else if (!tee.seen.text)
+    else if (!tee.seen.text and !tee.seen.think and std.mem.indexOf(u8, raw, "data:") == null)
         raw[0..@min(raw.len, 2000)]
     else
         "";
@@ -882,7 +920,19 @@ pub fn postChatFiltered(
     if (!tee.seen.think and extracted_think.len > 0) flags.host.think(extracted_think);
     if (!tee.seen.text and extracted_text.len > 0) flags.host.text(extracted_text);
     var calls: [max_calls]CallHit = undefined;
-    const n_calls = collectCalls(raw, &calls);
+    var owned_args: [max_calls]?[]u8 = .{null} ** max_calls;
+    defer for (owned_args) |a| if (a) |p| allocator.free(p);
+    var n_calls = collectCalls(raw, &calls);
+    if (n_calls == 0) {
+        var chat_calls: [max_calls]CallHit = undefined;
+        const n_chat = collectChatToolCalls(allocator, raw, &chat_calls) catch 0;
+        var i: usize = 0;
+        while (i < n_chat) : (i += 1) {
+            owned_args[i] = @constCast(chat_calls[i].args);
+            calls[i] = chat_calls[i];
+        }
+        n_calls = n_chat;
+    }
     if (n_calls > 0) {
         errdefer allocator.free(text);
         var more: []ExtraCall = &.{};
@@ -989,6 +1039,12 @@ test "omit full-window output limits" {
     try std.testing.expectEqual(@as(?u32, 1024), requestMaxOutputTokens(1024, 0));
 }
 
+test "unpublished output cap still sends a thinking budget" {
+    try std.testing.expectEqual(@as(?u32, 32_768), requestMaxOutputTokens(0, 1_000_000));
+    try std.testing.expectEqual(@as(?u32, 8_192), requestMaxOutputTokens(0, 16_000));
+    try std.testing.expectEqual(@as(?u32, 32_768), requestMaxOutputTokens(0, 0));
+}
+
 test "bench: tools json and grok-4.5 request body sizes" {
     const a = std.testing.allocator;
     const tools = try toolsJson(a, true, .chat);
@@ -1042,6 +1098,29 @@ test "collectCalls ignores tool schema echo" {
     ;
     var buf: [max_calls]CallHit = undefined;
     try std.testing.expectEqual(@as(usize, 0), collectCalls(body, &buf));
+}
+
+test "collectChatToolCalls stitches streamed openai tool_calls" {
+    const a = std.testing.allocator;
+    const body =
+        \\data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"glob","arguments":""}}]}}]}
+        \\
+        \\data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"pattern\""}}]}}]}
+        \\
+        \\data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"**/*\"}"}}]}}]}
+        \\
+        \\data: [DONE]
+        \\
+    ;
+    var buf: [max_calls]CallHit = undefined;
+    const n = try collectChatToolCalls(a, body, &buf);
+    defer for (buf[0..n]) |c| a.free(c.args);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expectEqual(tool.Name.glob, buf[0].name);
+    try std.testing.expectEqualStrings("{\\\"pattern\\\":\\\"**/*\\\"}", buf[0].args);
+    const plain = try sse.unescapeAlloc(a, buf[0].args);
+    defer a.free(plain);
+    try std.testing.expectEqualStrings("{\"pattern\":\"**/*\"}", plain);
 }
 
 test "every tool asks the model for an activity phrase" {

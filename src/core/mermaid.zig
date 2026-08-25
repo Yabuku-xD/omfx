@@ -271,6 +271,7 @@ const Canvas = struct {
         var c = col;
         while (i < s.len) {
             const n = measure.utf8LenAt(s, i);
+            if (n == 0) break;
             self.put(row, c, measure.runeAt(s, i));
             c +|= measure.runeWidth(measure.runeAt(s, i));
             i += n;

@@ -613,23 +613,16 @@ pub const all = [_]Model{
     },
     // -- Command Code ---------------------------------------------------------
     //
-    // A router in front of every vendor, so the catalog is whatever it is
-    // serving today: `registry.zig` fetches it from /provider/v1/models and
-    // these two are only the fallback that lets a session start offline.
-    // Its /models route publishes only id, name and context_length -- no
-    // modality, no effort levels, no prices -- so `registry.merge` can refresh
-    // the window and the display name but has no vision bit to carry. That is
-    // why every model it serves is listed here rather than a token sample:
-    // this table is the only place the picker can learn that 40 of the 58 take
-    // images. Capabilities are transcribed from Command Code's own published
-    // model table, which is generated from the registry behind `--list-models`.
-    // `max_tokens` stays 0 because they publish no output cap, and omitting the
-    // field lets the provider apply its own rather than omfx inventing one.
+    // A router in front of every vendor. `registry.load` fetches /models and
+    // enriches vision/reasoning/protocol from their docs into
+    // `cache/caps-commandcode.json`. These rows are the offline seed only:
+    // live + cache win when present. Claude ids use `.anthropic` (must hit
+    // /messages); everything else uses chat.completions.
     .{
         .id = "claude-sonnet-5",
         .name = "Claude Sonnet 5",
         .provider = "commandcode",
-        .protocol = .openai_compat,
+        .protocol = .anthropic,
         .base_url = "https://api.commandcode.ai/provider/v1",
         .reasoning = true,
         .context_window = 1000000,
@@ -641,7 +634,7 @@ pub const all = [_]Model{
         .id = "claude-sonnet-4-6",
         .name = "Claude Sonnet 4.6",
         .provider = "commandcode",
-        .protocol = .openai_compat,
+        .protocol = .anthropic,
         .base_url = "https://api.commandcode.ai/provider/v1",
         .reasoning = false,
         .context_window = 1000000,
@@ -653,7 +646,7 @@ pub const all = [_]Model{
         .id = "claude-fable-5",
         .name = "Claude Fable 5",
         .provider = "commandcode",
-        .protocol = .openai_compat,
+        .protocol = .anthropic,
         .base_url = "https://api.commandcode.ai/provider/v1",
         .reasoning = true,
         .context_window = 1000000,
@@ -665,7 +658,7 @@ pub const all = [_]Model{
         .id = "claude-opus-5",
         .name = "Claude Opus 5",
         .provider = "commandcode",
-        .protocol = .openai_compat,
+        .protocol = .anthropic,
         .base_url = "https://api.commandcode.ai/provider/v1",
         .reasoning = true,
         .context_window = 1000000,
@@ -677,7 +670,7 @@ pub const all = [_]Model{
         .id = "claude-opus-4-8",
         .name = "Claude Opus 4.8",
         .provider = "commandcode",
-        .protocol = .openai_compat,
+        .protocol = .anthropic,
         .base_url = "https://api.commandcode.ai/provider/v1",
         .reasoning = true,
         .context_window = 1000000,
@@ -689,7 +682,7 @@ pub const all = [_]Model{
         .id = "claude-opus-4-7",
         .name = "Claude Opus 4.7",
         .provider = "commandcode",
-        .protocol = .openai_compat,
+        .protocol = .anthropic,
         .base_url = "https://api.commandcode.ai/provider/v1",
         .reasoning = true,
         .context_window = 1000000,
@@ -701,7 +694,7 @@ pub const all = [_]Model{
         .id = "claude-haiku-4-5-20251001",
         .name = "Claude Haiku 4.5",
         .provider = "commandcode",
-        .protocol = .openai_compat,
+        .protocol = .anthropic,
         .base_url = "https://api.commandcode.ai/provider/v1",
         .reasoning = false,
         .context_window = 200000,

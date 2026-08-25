@@ -40,7 +40,7 @@ The settings panel and the one-shot form share one setter.
 | `peer` | `on` \| `off` — model may auto-invoke the `peer` tool (default off; `/peers` always works) |
 | `git_auto` | `on` \| `off` — auto-commit after writes (default off) |
 | `git_dirty` | `on` \| `off` — when `git_auto` is on, snapshot a dirty tree before the first AI edit (default on) |
-| `sandbox` | `on` \| `off` for OS sandbox on bash |
+| `sandbox` | `on` \| `off` for OS sandbox on bash (default off) |
 | `review` | `llm` enables billed review after writes |
 | `cdp_port` | Chrome relay port |
 | `plugin_marketplaces` | Array of `owner/repo` marketplace ids |

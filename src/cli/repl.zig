@@ -31,7 +31,6 @@ const env = @import("../core/env.zig");
 const cli = @import("../core/cli.zig");
 const catalog = @import("../providers/catalog.zig");
 const auth = @import("../providers/auth.zig");
-const ide_mod = @import("../core/ide.zig");
 const types = @import("../providers/types.zig");
 const pathing = @import("../tools/pathing.zig");
 const relay = @import("../tools/relay.zig");
@@ -237,7 +236,32 @@ const Session = struct {
             else
                 .auto,
             .toast = self.toast_paint,
+            .jump = tui.jumpVisible(self.scroll, self.layout.transcript_rows),
         };
+    }
+
+    fn publishJumpHit(self: *Session) void {
+        if (tui.jumpVisible(self.scroll, self.layout.transcript_rows)) {
+            if (tui.jumpHitBox(self.layout)) |box| {
+                sink.setJumpHit(true, box.row, box.col0, box.col1);
+                return;
+            }
+        }
+        sink.setJumpHit(false, 0, 0, 0);
+    }
+
+    /// Re-pin to the live tail. During a turn that resumes stick-to-stream.
+    fn jumpToBottom(self: *Session) bool {
+        if (self.scroll == 0) return false;
+        self.scroll = 0;
+        self.dirty = true;
+        return true;
+    }
+
+    fn tryJumpClick(self: *Session, row: u16, col: u16) bool {
+        if (!tui.jumpVisible(self.scroll, self.layout.transcript_rows)) return false;
+        if (!tui.jumpHit(self.layout, row, col)) return false;
+        return self.jumpToBottom();
     }
 
     fn refreshToast(self: *Session) void {
@@ -416,6 +440,12 @@ const Session = struct {
     /// nothing.
     fn startSel(self: *Session, row: u16, col: u16) void {
         self.dragging = true;
+        // Jump pill: press must not start a selection; release performs the jump.
+        if (tui.jumpVisible(self.scroll, self.layout.transcript_rows) and tui.jumpHit(self.layout, row, col)) {
+            self.dragging = false;
+            self.clearSel();
+            return;
+        }
         // The counter is the only thing in the header, and clicking a number
         // to ask what it is made of is the gesture people already try.
         if (self.layout.header_rows != 0 and row == 1 and col + 16 > self.layout.cols) {
@@ -633,7 +663,7 @@ const Session = struct {
         if (i >= self.runs.items.items.len) return;
         const row = self.shown.rowOfOffset(self.runs.items.items[i].off) orelse return;
         const total = self.shown.rowCount();
-        const rows = self.layout.transcript_rows;
+        const rows = self.scrollRows();
         if (rows == 0 or total <= rows) {
             self.scroll = 0;
             return;
@@ -649,11 +679,8 @@ const Session = struct {
         self.scroll = @min(s, max);
     }
 
-    /// The task list as pinned rows, or none when there is nothing to show.
-    ///
-    /// Cleared as soon as every task is done: a finished checklist is a wall
-    /// of ticks taking up the pane, and the transcript already holds the
-    /// record of what was done.
+    /// The task list as sticky chrome rows above the composer, or none when
+    /// every item is done (a finished checklist is just noise).
     fn pinTodos(self: *Session, rows: [][]const u8) []const []const u8 {
         const list = todos.get();
         if (list.n == 0) return &.{};
@@ -668,12 +695,28 @@ const Session = struct {
         return rows[0..n];
     }
 
+    /// Transcript rows available to scroll after sticky chrome is reserved.
+    fn scrollRows(self: *const Session) u16 {
+        var todo_n: u16 = 0;
+        const list = todos.get();
+        if (list.n != 0) {
+            const c = list.counts();
+            if (c.done != c.total) todo_n = @intCast(@min(list.n, std.math.maxInt(u16)));
+        }
+        const overlay = todo_n + @as(u16, if (tui.jumpVisible(self.scroll, self.layout.transcript_rows)) 1 else 0);
+        const full = self.layout.transcript_rows;
+        return if (full > overlay) full - overlay else full;
+    }
+
     /// Repaint the transcript alone. The footer is painted by the dirty pass.
+    /// Shrink the scroll region by sticky chrome so wheel/page paints cannot
+    /// overwrite the todo list sitting above the composer.
     fn paintTranscript(self: *Session) void {
         self.shown.resize(self.layout.cols) catch |err| {
             log.debug("transcript resize: {s}", .{@errorName(err)});
         };
-        tui.writeTranscript(self.stdout, self.layout, &self.shown, self.scroll, self.marked) catch |err| {
+        const overlay: u16 = self.layout.transcript_rows -| self.scrollRows();
+        tui.writeTranscriptOverlay(self.stdout, self.layout, &self.shown, self.scroll, self.marked, overlay) catch |err| {
             log.debug("writeTranscript: {s}", .{@errorName(err)});
         };
         self.stdout.flush() catch |err| {
@@ -688,7 +731,7 @@ const Session = struct {
         const next = tui.stepScroll(
             self.scroll,
             self.shown.rowCount(),
-            self.layout.transcript_rows,
+            self.scrollRows(),
             up,
             step,
         );
@@ -702,12 +745,12 @@ const Session = struct {
             log.debug("transcript resize: {s}", .{@errorName(err)});
         };
         var todo_rows: [todos.max_items][]const u8 = undefined;
-        // Borrowed from this frame, so it is unset before the frame goes.
-        self.shown.setPinned(self.pinTodos(&todo_rows));
-        defer self.shown.setPinned(&.{});
-        tui.writePane(self.gpa, self.stdout, self.layout, self.footer(turn), &self.shown, self.scroll) catch |err| {
+        var foot = self.footer(turn);
+        foot.tasks = self.pinTodos(&todo_rows);
+        tui.writePane(self.gpa, self.stdout, self.layout, foot, &self.shown, self.scroll) catch |err| {
             log.debug("writePane: {s}", .{@errorName(err)});
         };
+        self.publishJumpHit();
         self.stdout.flush() catch |err| {
             log.debug("flush: {s}", .{@errorName(err)});
         };
@@ -928,7 +971,7 @@ fn settingsPanel(sess: *Session) panel_mod.Panel {
     });
     p.add(.{
         .key = "telemetry",
-        .label = "Name omfx to providers",
+        .label = "Telemetry",
         .kind = .toggle,
         .value = if (sess.state.telemetry) "on" else "off",
         .help = "only says which app is talking; off keeps you anonymous",
@@ -973,16 +1016,6 @@ fn settingsPanel(sess: *Session) panel_mod.Panel {
         .kind = .{ .choice = editors[0..found] },
         .value = if (cfg.editor.len == 0) editors[0] else sess.arena.dupe(u8, cfg.editor) catch editors[0],
         .help = "ctrl-g opens this; auto follows $VISUAL then $EDITOR",
-    });
-    var ides: [ide_mod.max_ides + 1][]const u8 = undefined;
-    ides[0] = "auto";
-    const ide_n = ide_mod.detect(sess.io, sess.lookup.get("PATH") orelse "", ides[1..]);
-    p.add(.{
-        .key = "ide",
-        .label = "IDE",
-        .kind = .{ .choice = ides[0 .. ide_n + 1] },
-        .value = if (cfg.ide.len == 0) ides[0] else sess.arena.dupe(u8, cfg.ide) catch ides[0],
-        .help = "/ide open launches this in your graphical editor",
     });
     p.add(.{
         .key = "bash_timeout",
@@ -1627,42 +1660,61 @@ fn rewindPanel(sess: *Session) panel_mod.Panel {
     return p;
 }
 
-/// Saved sessions, newest first, with the prompt that started each.
-///
-/// `/resume` used to paste the raw JSONL of a session into the transcript.
-/// Picking from a list is what the command was always for.
+/// Saved sessions, newest first, with when they last changed and how far they got.
 fn sessionPanel(sess: *Session) panel_mod.Panel {
     var p = panel_mod.Panel{ .title = "Resume a session" };
     const dir_path = std.fs.path.join(sess.arena, &.{ sess.home, ".omfx", "sessions" }) catch return p;
     var dir = Io.Dir.cwd().openDir(sess.io, dir_path, .{ .iterate = true }) catch {
-        p.add(.{ .key = "", .label = "no saved sessions", .kind = .info });
+        p.add(.{ .key = "", .label = "No saved chats yet", .kind = .info });
         return p;
     };
     defer dir.close(sess.io);
     const idlist = session.listIds(dir, sess.io, sess.arena) catch return p;
-    var i: usize = idlist.len;
-    while (i > 0) {
-        i -= 1;
-        const id = idlist[i];
+
+    const Entry = struct { id: []const u8, mtime: i128, asked: []const u8, turns: usize, when: []const u8 };
+    var rows: [panel_mod.max_fields]Entry = undefined;
+    var n: usize = 0;
+    for (idlist) |id| {
+        if (n == rows.len) break;
         const path = session.sessionPath(sess.arena, sess.home, session.resolveId(id)) catch continue;
         const blob = Io.Dir.cwd().readFileAlloc(sess.io, path, sess.arena, .limited(64_000)) catch continue;
-        // The first thing you asked is what makes a session recognisable; the
-        // id is a filename. How far it got is what makes it worth resuming.
-        const asked = session.firstUser(blob);
-        const turns = std.mem.count(u8, blob, "\"kind\":\"user\"");
-        const said = std.fmt.allocPrint(sess.arena, "{d} turn{s}", .{
-            turns,
-            if (turns == 1) "" else "s",
-        }) catch "";
-        p.add(.{
-            .key = sess.arena.dupe(u8, id) catch id,
-            .label = if (asked.len != 0) sess.arena.dupe(u8, asked) catch id else id,
-            .kind = .pick,
-            .value = said,
-        });
-        if (p.n == panel_mod.max_fields) break;
+        const st = Io.Dir.cwd().statFile(sess.io, path, .{}) catch continue;
+        var when_buf: [32]u8 = undefined;
+        const when = sess.arena.dupe(u8, session.formatWhen(&when_buf, sess.io, path)) catch "";
+        rows[n] = .{
+            .id = id,
+            .mtime = st.mtime.toNanoseconds(),
+            .asked = session.firstUser(blob),
+            .turns = std.mem.count(u8, blob, "\"kind\":\"user\""),
+            .when = when,
+        };
+        n += 1;
     }
-    if (p.n == 0) p.add(.{ .key = "", .label = "no saved sessions", .kind = .info });
+    std.mem.sort(Entry, rows[0..n], {}, struct {
+        fn less(_: void, a: Entry, b: Entry) bool {
+            return a.mtime > b.mtime;
+        }
+    }.less);
+
+    for (rows[0..n]) |row| {
+        const turns = std.fmt.allocPrint(sess.arena, "{d} turn{s}", .{
+            row.turns,
+            if (row.turns == 1) "" else "s",
+        }) catch "";
+        const meta = if (row.when.len != 0)
+            std.fmt.allocPrint(sess.arena, "{s}  ·  {s}", .{ row.when, turns }) catch turns
+        else
+            turns;
+        p.add(.{
+            .key = std.fmt.allocPrint(sess.arena, "/resume {s}", .{row.id}) catch row.id,
+            .label = if (row.asked.len != 0) sess.arena.dupe(u8, row.asked) catch row.id else row.id,
+            .kind = .pick,
+            .value = meta,
+            .help = "enter opens  ·  del deletes forever  ·  up/down moves  ·  esc closes",
+        });
+    }
+    if (p.n == 0) p.add(.{ .key = "", .label = "No saved chats yet", .kind = .info });
+    p.selectFirst();
     return p;
 }
 
@@ -1884,6 +1936,26 @@ fn panelKey(sess: *Session, ev: tui.Event) bool {
         .up, .history_prev => p.move(-1),
         .down, .history_next => p.move(1),
         .left, .right => stepPanelValue(sess, ev == .right),
+        .delete => {
+            if (sess.panel_kind != .sessions) return true;
+            const f = p.current() orelse return true;
+            if (f.kind != .pick or f.key.len == 0) return true;
+            const id = if (std.mem.startsWith(u8, f.key, "/resume "))
+                f.key["/resume ".len..]
+            else
+                f.key;
+            if (id.len == 0) return true;
+            const kept = p.sel;
+            session.remove(sess.gpa, sess.io, sess.home, sess.workspace, id);
+            var next = sessionPanel(sess);
+            next.elapsed_ms = panel_mod.open_ms;
+            if (next.n > 0) next.sel = @min(kept, next.n - 1);
+            sess.panel = next;
+            sess.panel_kind = .sessions;
+            sess.note("Deleted forever.", nowMs(sess.io));
+            sess.dirty = true;
+            return true;
+        },
         .enter => {
             const f = p.current() orelse return true;
             switch (f.kind) {
@@ -2053,7 +2125,7 @@ pub fn run(
             if (sess.palette.len == 0) sess.palette_sel = 0 else if (sess.palette_sel >= sess.palette.len) sess.palette_sel = sess.palette.len - 1;
             // Scrollback focus repaints the whole pane even without a status
             // line: the hint row has to say which keys are live.
-            if (state.statusline or sess.focus == .scrollback) {
+            if (state.statusline or sess.focus == .scrollback or tui.jumpVisible(sess.scroll, sess.layout.transcript_rows)) {
                 var hint_buf: [256]u8 = undefined;
                 const armed = sess.arm.note(nowMs(io));
                 const hint: tui.Hint = if (armed.len > 0)
@@ -2066,6 +2138,7 @@ pub fn run(
                     .auto;
                 const toast_line = sess.toasts.line(gpa, sess.layout.cols, nowMs(io)) catch "";
                 defer if (toast_line.len != 0) gpa.free(toast_line);
+                var todo_rows: [todos.max_items][]const u8 = undefined;
                 try tui.writePane(gpa, stdout, sess.layout, .{
                     .model = model,
                     .permission = cmds.footerPerm(state),
@@ -2081,13 +2154,17 @@ pub fn run(
                     .hint = hint,
                     .sel = sess.marked,
                     .toast = toast_line,
+                    .jump = tui.jumpVisible(sess.scroll, sess.layout.transcript_rows),
+                    .tasks = sess.pinTodos(&todo_rows),
                 }, &sess.shown, sess.scroll);
+                sess.publishJumpHit();
             } else {
                 try stdout.writeAll(tui.sync_begin);
                 try stdout.writeAll(sess.cups.toFooter());
                 try stdout.writeAll("\x1b[2K");
                 try stdout.writeAll(shown_comp);
                 try stdout.writeAll(tui.sync_end);
+                sink.setJumpHit(false, 0, 0, 0);
             }
             try stdout.flush();
             sess.dirty = false;
@@ -2151,6 +2228,11 @@ pub fn run(
                 continue;
             },
             .release => |c| {
+                // Jump pill first: only the button cells, not the rest of the row.
+                if (sess.tryJumpClick(c.row, c.col)) {
+                    sess.dragging = false;
+                    continue;
+                }
                 // A press that never moved is a click, and a click on a tool
                 // run opens it. Deciding here rather than on press is what
                 // lets one gesture be both.
@@ -2176,6 +2258,14 @@ pub fn run(
                     continue;
                 }
                 if (sess.bumpScroll(false, sess.layout.transcript_rows)) sess.dirty = true;
+                continue;
+            },
+            .scroll_up => {
+                if (sess.bumpScroll(true, tui.wheel_step)) sess.dirty = true;
+                continue;
+            },
+            .scroll_down => {
+                if (sess.bumpScroll(false, tui.wheel_step)) sess.dirty = true;
                 continue;
             },
             .resize => {
@@ -2734,7 +2824,12 @@ pub fn run(
                 .panel => |kind| {
                     switch (kind) {
                         .help, .shortcuts => sess.openSearchPanel(kind),
-                        else => sess.openPanel(buildPanel(&sess, kind)),
+                        else => {
+                            sess.openPanel(buildPanel(&sess, kind));
+                            // Keep the kind so list panels can act on keys
+                            // (sessions: del) without reopening.
+                            sess.panel_kind = kind;
+                        },
                     }
                     sess.dirty = true;
                     continue;
@@ -2867,6 +2962,7 @@ pub fn run(
                 .cancel = &sess.cancel,
                 .tick = host.on_tick,
                 .tick_ctx = host.ctx,
+                .page_rows = sess.layout.transcript_rows,
             };
             wait_watch.start();
             defer wait_watch.finish();
@@ -3181,6 +3277,77 @@ test "every panel builds without a terminal" {
         try std.testing.expect(p.n > 0);
         for (p.items()) |f| try std.testing.expect(f.label.len > 0);
     }
+}
+
+test "session panel shows when and del removes the file" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try pathing.testWorkspace(a, &tmp);
+    defer a.free(home);
+    const dir_path = try std.fs.path.join(a, &.{ home, ".omfx", "sessions" });
+    defer a.free(dir_path);
+    try Io.Dir.cwd().createDirPath(io, dir_path);
+    {
+        const path = try std.fs.path.join(a, &.{ dir_path, "gone.jsonl" });
+        defer a.free(path);
+        var f = try Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+        defer f.close(io);
+        var buf: [256]u8 = undefined;
+        var w = f.writer(io, &buf);
+        try w.interface.writeAll("{\"kind\":\"user\",\"text\":\"hello there\"}\n");
+        try w.interface.flush();
+    }
+    {
+        const path = try std.fs.path.join(a, &.{ dir_path, "stay.jsonl" });
+        defer a.free(path);
+        var f = try Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+        defer f.close(io);
+        var buf: [256]u8 = undefined;
+        var w = f.writer(io, &buf);
+        try w.interface.writeAll("{\"kind\":\"user\",\"text\":\"keep me\"}\n");
+        try w.interface.flush();
+    }
+
+    var scratch = std.heap.ArenaAllocator.init(a);
+    defer scratch.deinit();
+    var sess = testSession(a);
+    sess.arena = scratch.allocator();
+    sess.home = home;
+    defer sess.deinit();
+
+    sess.openPanel(sessionPanel(&sess));
+    sess.panel_kind = .sessions;
+    const p0 = sess.panel.?;
+    try std.testing.expect(p0.n >= 2);
+    var saw_when = false;
+    for (p0.items()) |f| {
+        if (f.kind != .pick) continue;
+        try std.testing.expect(std.mem.startsWith(u8, f.key, "/resume "));
+        try std.testing.expect(std.mem.indexOf(u8, f.value, "·") != null);
+        try std.testing.expect(f.value.len >= "YYYY-MM-DD HH:MM".len);
+        try std.testing.expect(std.mem.indexOf(u8, f.help, "del deletes") != null);
+        saw_when = true;
+    }
+    try std.testing.expect(saw_when);
+
+    // Select the first pick and delete it forever.
+    sess.panel.?.selectFirst();
+    const before = sess.panel.?.n;
+    try std.testing.expect(panelKey(&sess, .delete));
+    try std.testing.expect(sess.panel != null);
+    try std.testing.expectEqual(cmds.PanelKind.sessions, sess.panel_kind.?);
+    try std.testing.expect(sess.panel.?.n < before);
+
+    var dir = try Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
+    defer dir.close(io);
+    const left = try session.listIds(dir, io, a);
+    defer {
+        for (left) |id| a.free(id);
+        a.free(left);
+    }
+    try std.testing.expectEqual(@as(usize, 1), left.len);
 }
 
 test "the help panel lists every command exactly once" {

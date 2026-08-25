@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const compact = @import("compact.zig");
 const ids = @import("ids.zig");
+const recall = @import("recall.zig");
 
 const log = std.log.scoped(.session);
 
@@ -504,6 +505,337 @@ fn lessThanId(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, a, b);
 }
 
+/// Permanently removes one saved session and the workspace sidecars it owns.
+///
+/// Always drops `{id}.jsonl` and `.omfx/handoff/{id}.md`, plus any recall/run
+/// this session (or its handoff packet) names. Then sweeps recall/run entries
+/// that no remaining session or handoff still cites — so emptying the resume
+/// list also clears orphaned e2e residue, without wiping cites still in use.
+pub fn remove(
+    allocator: std.mem.Allocator,
+    io: Io,
+    home: []const u8,
+    workspace: []const u8,
+    id: []const u8,
+) void {
+    if (id.len == 0) return;
+    const path = sessionPath(allocator, home, resolveId(id)) catch return;
+    defer allocator.free(path);
+    const blob = Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(512_000)) catch "";
+    defer if (blob.len != 0) allocator.free(blob);
+
+    if (workspace.len != 0) cascadeWorkspace(allocator, io, workspace, id, blob);
+
+    Io.Dir.cwd().deleteFile(io, path) catch |err| {
+        log.debug("remove {s}: {s}", .{ id, @errorName(err) });
+    };
+
+    if (workspace.len != 0) sweepOrphans(allocator, io, home, workspace);
+}
+
+fn cascadeWorkspace(
+    allocator: std.mem.Allocator,
+    io: Io,
+    workspace: []const u8,
+    id: []const u8,
+    blob: []const u8,
+) void {
+    const handoff_name = std.fmt.allocPrint(allocator, "{s}.md", .{id}) catch return;
+    defer allocator.free(handoff_name);
+    const handoff = std.fs.path.join(allocator, &.{ workspace, ".omfx", "handoff", handoff_name }) catch return;
+    defer allocator.free(handoff);
+    const packet = Io.Dir.cwd().readFileAlloc(io, handoff, allocator, .limited(64_000)) catch "";
+    defer if (packet.len != 0) allocator.free(packet);
+
+    var recall_ids: [recall.max_items]recall.Id = undefined;
+    var recall_n: usize = 0;
+    recall_n = mergeRecallIds(&recall_ids, recall_n, blob);
+    recall_n = mergeRecallIds(&recall_ids, recall_n, packet);
+
+    var i: usize = 0;
+    while (i < recall_n) : (i += 1) {
+        deleteRecallFile(allocator, io, workspace, recall_ids[i]);
+    }
+
+    deleteRunDir(allocator, io, workspace, id);
+    var run_buf: [32][40]u8 = undefined;
+    var run_lens: [32]usize = undefined;
+    var run_n: usize = 0;
+    run_n = collectRunIds(blob, &run_buf, &run_lens, run_n);
+    run_n = collectRunIds(packet, &run_buf, &run_lens, run_n);
+    var r: usize = 0;
+    while (r < run_n) : (r += 1) {
+        deleteRunDir(allocator, io, workspace, run_buf[r][0..run_lens[r]]);
+    }
+
+    Io.Dir.cwd().deleteFile(io, handoff) catch {};
+}
+
+/// Drop recall/run files that nothing left on disk still points at.
+fn sweepOrphans(
+    allocator: std.mem.Allocator,
+    io: Io,
+    home: []const u8,
+    workspace: []const u8,
+) void {
+    var live_recall: [recall.max_items]recall.Id = undefined;
+    var live_recall_n: usize = 0;
+    var live_runs: [32][40]u8 = undefined;
+    var live_run_lens: [32]usize = undefined;
+    var live_run_n: usize = 0;
+
+    // Remaining sessions (including `last`).
+    const sess_dir_path = std.fs.path.join(allocator, &.{ home, ".omfx", "sessions" }) catch return;
+    defer allocator.free(sess_dir_path);
+    if (Io.Dir.cwd().openDir(io, sess_dir_path, .{ .iterate = true })) |dir_val| {
+        var dir = dir_val;
+        defer dir.close(io);
+        if (listIds(dir, io, allocator)) |idlist| {
+            defer {
+                for (idlist) |sid| allocator.free(sid);
+                allocator.free(idlist);
+            }
+            for (idlist) |sid| {
+                const p = sessionPath(allocator, home, resolveId(sid)) catch continue;
+                defer allocator.free(p);
+                const blob = Io.Dir.cwd().readFileAlloc(io, p, allocator, .limited(512_000)) catch continue;
+                defer allocator.free(blob);
+                live_recall_n = mergeRecallIds(&live_recall, live_recall_n, blob);
+                live_run_n = collectRunIds(blob, &live_runs, &live_run_lens, live_run_n);
+            }
+        } else |_| {}
+    } else |_| {}
+
+    // Remaining handoff packets.
+    const handoff_dir = std.fs.path.join(allocator, &.{ workspace, ".omfx", "handoff" }) catch return;
+    defer allocator.free(handoff_dir);
+    if (Io.Dir.cwd().openDir(io, handoff_dir, .{ .iterate = true })) |dir_val| {
+        var dir = dir_val;
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (it.next(io) catch null) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
+            const full = std.fs.path.join(allocator, &.{ handoff_dir, entry.name }) catch continue;
+            defer allocator.free(full);
+            const packet = Io.Dir.cwd().readFileAlloc(io, full, allocator, .limited(64_000)) catch continue;
+            defer allocator.free(packet);
+            live_recall_n = mergeRecallIds(&live_recall, live_recall_n, packet);
+            live_run_n = collectRunIds(packet, &live_runs, &live_run_lens, live_run_n);
+        }
+    } else |_| {}
+
+    // Recall files not in the live set.
+    const recall_dir = std.fs.path.join(allocator, &.{ workspace, ".omfx", "recall" }) catch return;
+    defer allocator.free(recall_dir);
+    if (Io.Dir.cwd().openDir(io, recall_dir, .{ .iterate = true })) |dir_val| {
+        var dir = dir_val;
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (it.next(io) catch null) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.startsWith(u8, entry.name, "r")) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".txt")) continue;
+            const num = entry.name[1 .. entry.name.len - ".txt".len];
+            const id_n = std.fmt.parseInt(u16, num, 10) catch continue;
+            if (id_n == 0) continue;
+            const rid: recall.Id = @enumFromInt(id_n);
+            var keep = false;
+            for (live_recall[0..live_recall_n]) |live| {
+                if (live == rid) {
+                    keep = true;
+                    break;
+                }
+            }
+            if (!keep) deleteRecallFile(allocator, io, workspace, rid);
+        }
+    } else |_| {}
+
+    // Run dirs not in the live set.
+    const runs_dir = std.fs.path.join(allocator, &.{ workspace, ".omfx", "runs" }) catch return;
+    defer allocator.free(runs_dir);
+    if (Io.Dir.cwd().openDir(io, runs_dir, .{ .iterate = true })) |dir_val| {
+        var dir = dir_val;
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (it.next(io) catch null) |entry| {
+            if (entry.kind != .directory) continue;
+            if (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, "..")) continue;
+            var keep = false;
+            for (0..live_run_n) |j| {
+                if (std.mem.eql(u8, live_runs[j][0..live_run_lens[j]], entry.name)) {
+                    keep = true;
+                    break;
+                }
+            }
+            if (!keep) deleteRunDir(allocator, io, workspace, entry.name);
+        }
+    } else |_| {}
+}
+
+fn deleteRecallFile(
+    allocator: std.mem.Allocator,
+    io: Io,
+    workspace: []const u8,
+    id: recall.Id,
+) void {
+    const name = std.fmt.allocPrint(allocator, "r{d}.txt", .{@intFromEnum(id)}) catch return;
+    defer allocator.free(name);
+    const full = std.fs.path.join(allocator, &.{ workspace, ".omfx", "recall", name }) catch return;
+    defer allocator.free(full);
+    Io.Dir.cwd().deleteFile(io, full) catch {};
+}
+
+fn mergeRecallIds(out: *[recall.max_items]recall.Id, n0: usize, src: []const u8) usize {
+    var n = n0;
+    var scratch: [recall.max_items]recall.Id = undefined;
+    const from_cites = recall.collectIds(src, &scratch);
+    var i: usize = 0;
+    while (i < from_cites and n < out.len) : (i += 1) {
+        n = takeRecall(out, n, scratch[i]);
+    }
+    n = collectRecallPaths(src, out, n);
+    n = collectHandoffRecallLine(src, out, n);
+    return n;
+}
+
+fn takeRecall(out: *[recall.max_items]recall.Id, n: usize, id: recall.Id) usize {
+    if (@intFromEnum(id) == 0) return n;
+    for (out[0..n]) |old| {
+        if (old == id) return n;
+    }
+    if (n >= out.len) return n;
+    out[n] = id;
+    return n + 1;
+}
+
+fn collectRecallPaths(src: []const u8, out: *[recall.max_items]recall.Id, n0: usize) usize {
+    const needle = ".omfx/recall/r";
+    var n = n0;
+    var i: usize = 0;
+    while (i < src.len and n < out.len) {
+        const rest = src[i..];
+        const hit = std.mem.indexOf(u8, rest, needle) orelse break;
+        i += hit + needle.len;
+        const id = takeDigits(src, &i) orelse continue;
+        n = takeRecall(out, n, id);
+    }
+    return n;
+}
+
+/// Handoff packets list bare `rN` tokens under `## recall`, not `cite rN`.
+fn collectHandoffRecallLine(src: []const u8, out: *[recall.max_items]recall.Id, n0: usize) usize {
+    const hdr = "## recall";
+    const at = std.mem.indexOf(u8, src, hdr) orelse return n0;
+    var i = at + hdr.len;
+    while (i < src.len and (src[i] == '\r' or src[i] == '\n' or src[i] == ' ')) : (i += 1) {}
+    var n = n0;
+    while (i < src.len and n < out.len) {
+        if (src[i] == '#') break;
+        if (src[i] == '\n') {
+            const line_start = i + 1;
+            if (line_start < src.len and src[line_start] == '#') break;
+            i += 1;
+            continue;
+        }
+        if (src[i] == 'r' and i + 1 < src.len and src[i + 1] >= '0' and src[i + 1] <= '9') {
+            i += 1;
+            const id = takeDigits(src, &i) orelse continue;
+            n = takeRecall(out, n, id);
+            continue;
+        }
+        i += 1;
+    }
+    return n;
+}
+
+fn takeDigits(src: []const u8, i: *usize) ?recall.Id {
+    var v: u16 = 0;
+    var saw = false;
+    while (i.* < src.len and src[i.*] >= '0' and src[i.*] <= '9') : (i.* += 1) {
+        saw = true;
+        v = v *% 10 + (src[i.*] - '0');
+    }
+    if (!saw or v == 0) return null;
+    return @enumFromInt(v);
+}
+
+fn collectRunIds(
+    src: []const u8,
+    buf: *[32][40]u8,
+    lens: *[32]usize,
+    n0: usize,
+) usize {
+    const needle = ".omfx/runs/";
+    var n = n0;
+    var i: usize = 0;
+    while (i < src.len and n < buf.len) {
+        const rest = src[i..];
+        const hit = std.mem.indexOf(u8, rest, needle) orelse break;
+        i += hit + needle.len;
+        const start = i;
+        while (i < src.len and (std.ascii.isAlphanumeric(src[i]) or src[i] == '-' or src[i] == '_')) : (i += 1) {}
+        const id = src[start..i];
+        if (id.len == 0 or id.len >= buf[0].len) continue;
+        if (std.mem.eql(u8, id, ".active")) continue;
+        var dup = false;
+        for (0..n) |j| {
+            if (std.mem.eql(u8, buf[j][0..lens[j]], id)) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) continue;
+        @memcpy(buf[n][0..id.len], id);
+        lens[n] = id.len;
+        n += 1;
+    }
+    return n;
+}
+
+fn deleteRunDir(
+    allocator: std.mem.Allocator,
+    io: Io,
+    workspace: []const u8,
+    run_id: []const u8,
+) void {
+    if (run_id.len == 0) return;
+    const full = std.fs.path.join(allocator, &.{ workspace, ".omfx", "runs", run_id }) catch return;
+    defer allocator.free(full);
+    Io.Dir.cwd().deleteTree(io, full) catch {};
+
+    // Drop .active when it pointed at the run we just removed.
+    const active = std.fs.path.join(allocator, &.{ workspace, ".omfx", "runs", ".active" }) catch return;
+    defer allocator.free(active);
+    const cur = Io.Dir.cwd().readFileAlloc(io, active, allocator, .limited(64)) catch return;
+    defer allocator.free(cur);
+    if (std.mem.eql(u8, std.mem.trim(u8, cur, " \t\r\n"), run_id)) {
+        Io.Dir.cwd().deleteFile(io, active) catch {};
+    }
+}
+
+/// Wall-clock stamp for the resume list. Empty when unreadable.
+pub fn formatWhen(buf: []u8, io: Io, path: []const u8) []const u8 {
+    const st = Io.Dir.cwd().statFile(io, path, .{}) catch return "";
+    return formatSecs(buf, st.mtime.toSeconds());
+}
+
+pub fn formatSecs(buf: []u8, secs_raw: i64) []const u8 {
+    const secs: u64 = @intCast(@max(secs_raw, 0));
+    const epoch = std.time.epoch.EpochSeconds{ .secs = secs };
+    const day = epoch.getEpochDay();
+    const yd = day.calculateYearDay();
+    const md = yd.calculateMonthDay();
+    const ds = epoch.getDaySeconds();
+    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}", .{
+        yd.year,
+        md.month.numeric(),
+        md.day_index + 1,
+        ds.getHoursIntoDay(),
+        ds.getMinutesIntoHour(),
+    }) catch "";
+}
+
 test "prune keeps the newest and drops the rest" {
     const a = std.testing.allocator;
     const io = std.testing.io;
@@ -535,6 +867,162 @@ test "prune keeps the newest and drops the rest" {
         a.free(still);
     }
     try std.testing.expectEqual(@as(usize, 2), still.len);
+}
+
+test "remove deletes one session file permanently" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try @import("../tools/pathing.zig").testWorkspace(a, &tmp);
+    defer a.free(home);
+    const dir_path = try std.fs.path.join(a, &.{ home, ".omfx", "sessions" });
+    defer a.free(dir_path);
+    try Io.Dir.cwd().createDirPath(io, dir_path);
+    var dir = try Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
+    defer dir.close(io);
+
+    // Session body cites a recall archive and a run dir.
+    {
+        const keep_body =
+            \\{"kind":"assistant","body":"cite r7 tool=read. .omfx/recall/r7.txt and .omfx/runs/r2/checkpoint.md"}
+            \\
+        ;
+        var f = try dir.createFile(io, "keep-me.jsonl", .{ .truncate = true });
+        defer f.close(io);
+        var kbuf: [256]u8 = undefined;
+        var kw = f.writer(io, &kbuf);
+        try kw.interface.writeAll(keep_body);
+        try kw.interface.flush();
+        const body =
+            \\{"kind":"assistant","body":"cite r3 tool=read path=a chars=1. read .omfx/recall/r3.txt. also .omfx/runs/r9/checkpoint.md"}
+            \\
+        ;
+        var g = try dir.createFile(io, "drop-me.jsonl", .{ .truncate = true });
+        defer g.close(io);
+        var buf: [512]u8 = undefined;
+        var w = g.writer(io, &buf);
+        try w.interface.writeAll(body);
+        try w.interface.flush();
+    }
+
+    const handoff_dir = try std.fs.path.join(a, &.{ home, ".omfx", "handoff" });
+    defer a.free(handoff_dir);
+    try Io.Dir.cwd().createDirPath(io, handoff_dir);
+    {
+        const packet = try std.fs.path.join(a, &.{ handoff_dir, "drop-me.md" });
+        defer a.free(packet);
+        var h = try Io.Dir.cwd().createFile(io, packet, .{ .truncate = true });
+        defer h.close(io);
+        var buf: [256]u8 = undefined;
+        var w = h.writer(io, &buf);
+        try w.interface.writeAll("## recall\nr5\n");
+        try w.interface.flush();
+        const keep_packet = try std.fs.path.join(a, &.{ handoff_dir, "keep-me.md" });
+        defer a.free(keep_packet);
+        var k = try Io.Dir.cwd().createFile(io, keep_packet, .{ .truncate = true });
+        k.close(io);
+    }
+
+    const recall_dir = try std.fs.path.join(a, &.{ home, ".omfx", "recall" });
+    defer a.free(recall_dir);
+    try Io.Dir.cwd().createDirPath(io, recall_dir);
+    for ([_][]const u8{ "r3.txt", "r5.txt", "r7.txt" }) |name| {
+        const p = try std.fs.path.join(a, &.{ recall_dir, name });
+        defer a.free(p);
+        var f = try Io.Dir.cwd().createFile(io, p, .{ .truncate = true });
+        f.close(io);
+    }
+
+    for ([_][]const u8{ "r9", "r2", "drop-me" }) |run_id| {
+        const run_dir = try std.fs.path.join(a, &.{ home, ".omfx", "runs", run_id });
+        defer a.free(run_dir);
+        try Io.Dir.cwd().createDirPath(io, run_dir);
+        const meta = try std.fs.path.join(a, &.{ run_dir, "meta.json" });
+        defer a.free(meta);
+        var f = try Io.Dir.cwd().createFile(io, meta, .{ .truncate = true });
+        f.close(io);
+    }
+    {
+        const active = try std.fs.path.join(a, &.{ home, ".omfx", "runs", ".active" });
+        defer a.free(active);
+        var f = try Io.Dir.cwd().createFile(io, active, .{ .truncate = true });
+        defer f.close(io);
+        var buf: [16]u8 = undefined;
+        var w = f.writer(io, &buf);
+        try w.interface.writeAll("r9");
+        try w.interface.flush();
+    }
+
+    remove(a, io, home, home, "drop-me");
+    const left = try listIds(dir, io, a);
+    defer {
+        for (left) |id| a.free(id);
+        a.free(left);
+    }
+    try std.testing.expectEqual(@as(usize, 1), left.len);
+    try std.testing.expectEqualStrings("keep-me", left[0]);
+
+    // Handoff for this session is gone; the other stays.
+    {
+        const gone = try std.fs.path.join(a, &.{ handoff_dir, "drop-me.md" });
+        defer a.free(gone);
+        try std.testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, gone, .{}));
+        const kept = try std.fs.path.join(a, &.{ handoff_dir, "keep-me.md" });
+        defer a.free(kept);
+        try Io.Dir.cwd().access(io, kept, .{});
+    }
+    // Cited recalls gone; r7 kept because keep-me still cites it.
+    {
+        const r3 = try std.fs.path.join(a, &.{ recall_dir, "r3.txt" });
+        defer a.free(r3);
+        try std.testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, r3, .{}));
+        const r5 = try std.fs.path.join(a, &.{ recall_dir, "r5.txt" });
+        defer a.free(r5);
+        try std.testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, r5, .{}));
+        const r7 = try std.fs.path.join(a, &.{ recall_dir, "r7.txt" });
+        defer a.free(r7);
+        try Io.Dir.cwd().access(io, r7, .{});
+    }
+    // Named + same-id runs gone; r2 kept by keep-me. .active cleared with r9.
+    {
+        const r9 = try std.fs.path.join(a, &.{ home, ".omfx", "runs", "r9" });
+        defer a.free(r9);
+        try std.testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, r9, .{}));
+        const same = try std.fs.path.join(a, &.{ home, ".omfx", "runs", "drop-me" });
+        defer a.free(same);
+        try std.testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, same, .{}));
+        const r2 = try std.fs.path.join(a, &.{ home, ".omfx", "runs", "r2" });
+        defer a.free(r2);
+        try Io.Dir.cwd().access(io, r2, .{});
+        const active = try std.fs.path.join(a, &.{ home, ".omfx", "runs", ".active" });
+        defer a.free(active);
+        try std.testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, active, .{}));
+    }
+    // Missing ids are fine.
+    remove(a, io, home, home, "drop-me");
+}
+
+test "formatWhen returns a stamped clock from mtime" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try @import("../tools/pathing.zig").testWorkspace(a, &tmp);
+    defer a.free(home);
+    const dir_path = try std.fs.path.join(a, &.{ home, ".omfx", "sessions" });
+    defer a.free(dir_path);
+    try Io.Dir.cwd().createDirPath(io, dir_path);
+    const path = try std.fs.path.join(a, &.{ dir_path, "stamp.jsonl" });
+    defer a.free(path);
+    {
+        var f = try Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+        f.close(io);
+    }
+    var buf: [32]u8 = undefined;
+    const when = formatWhen(&buf, io, path);
+    try std.testing.expect(when.len >= "YYYY-MM-DD HH:MM".len);
+    try std.testing.expect(when[4] == '-' and when[7] == '-' and when[10] == ' ' and when[13] == ':');
 }
 
 test "summarize replaces one half and keeps the other" {

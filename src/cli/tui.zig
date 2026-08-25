@@ -167,6 +167,11 @@ pub const Footer = struct {
     queued: []const u8 = "",
     /// Ephemeral confirmation above the footer. Empty means nothing to draw.
     toast: []const u8 = "",
+    /// Floating jump-to-bottom pill above the composer when scrolled up.
+    jump: bool = false,
+    /// Open todos painted as sticky chrome above the composer (Claude Ctrl+T
+    /// pattern). Not part of the scrolling transcript.
+    tasks: []const []const u8 = &.{},
 
     fn hintLine(self: Footer, buf: []u8, cols: u16) []const u8 {
         return switch (self.hint) {
@@ -1397,11 +1402,26 @@ pub fn writeChrome(
     try stdout.writeAll(sync_begin);
     try stdout.writeAll(hide_cursor);
     try stdout.writeAll(head);
-    if (footer.toast.len != 0) {
-        const toast_row = layout.footer_start_row -| 1;
-        if (toast_row >= layout.transcript_start_row) {
-            var cup: [32]u8 = undefined;
-            try stdout.writeAll(try moveTo(&cup, toast_row, 1));
+    const overlay = chromeOverlay(footer);
+    if (overlay != 0 and layout.footer_start_row > layout.transcript_start_row) {
+        const start_row = layout.footer_start_row - @min(overlay, layout.footer_start_row - layout.transcript_start_row);
+        try eraseRows(stdout, start_row, overlay);
+        var cup: [32]u8 = undefined;
+        var r = start_row;
+        for (footer.tasks) |line| {
+            try stdout.writeAll(try moveTo(&cup, r, 1));
+            try stdout.writeAll(line);
+            try stdout.writeAll("\x1b[K");
+            r +|= 1;
+        }
+        if (footer.jump) {
+            const pill = try formatJumpPill(allocator, layout.cols);
+            defer allocator.free(pill);
+            try stdout.writeAll(try moveTo(&cup, r, 1));
+            try stdout.writeAll(pill);
+            try stdout.writeAll("\x1b[K");
+        } else if (footer.toast.len != 0) {
+            try stdout.writeAll(try moveTo(&cup, r, 1));
             try stdout.writeAll(footer.toast);
             try stdout.writeAll("\x1b[K");
         }
@@ -1473,6 +1493,67 @@ pub fn inComposer(layout: Layout, row: u16) bool {
 pub fn maxScroll(total: usize, rows: u16) usize {
     return if (total > rows) total - rows else 0;
 }
+
+/// Rows from the live tail before the jump-to-bottom pill appears.
+pub fn jumpThreshold(transcript_rows: u16) usize {
+    return @max(3, transcript_rows / 4);
+}
+
+pub fn jumpVisible(scroll: usize, transcript_rows: u16) bool {
+    return scroll >= jumpThreshold(transcript_rows);
+}
+
+/// Label matches the Cursor affordance people already know.
+pub const jump_label = "Jump to bottom (click) \u{2193}";
+
+pub const JumpHit = struct {
+    /// 1-based terminal row (matches SGR mouse reports).
+    row: u16,
+    /// Inclusive 1-based columns of the pill only — not the full row.
+    col0: u16,
+    col1: u16,
+};
+
+pub fn jumpHitBox(layout: Layout) ?JumpHit {
+    if (layout.footer_start_row <= layout.transcript_start_row) return null;
+    const row = layout.footer_start_row - 1;
+    // One cell of padding each side inside the pill.
+    const inner_cells = width.cellsTo(jump_label) + 2;
+    if (inner_cells == 0 or inner_cells > layout.cols) return null;
+    const start0 = (layout.cols - inner_cells) / 2;
+    return .{
+        .row = row,
+        .col0 = start0 + 1,
+        .col1 = start0 + inner_cells,
+    };
+}
+
+pub fn jumpHit(layout: Layout, term_row: u16, term_col: u16) bool {
+    const box = jumpHitBox(layout) orelse return false;
+    return term_row == box.row and term_col >= box.col0 and term_col <= box.col1;
+}
+
+/// Full-width row with a centered pill. Empty cells outside the pill stay
+/// inactive so a click beside the button does nothing.
+pub fn formatJumpPill(allocator: std.mem.Allocator, cols: u16) ![]u8 {
+    const inner = try std.fmt.allocPrint(allocator, " {s} ", .{jump_label});
+    defer allocator.free(inner);
+    const cells = width.cellsTo(inner);
+    if (cells == 0) return allocator.dupe(u8, "");
+    const pad: u16 = if (cols > cells) (cols - cells) / 2 else 0;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var i: u16 = 0;
+    while (i < pad) : (i += 1) try out.append(allocator, ' ');
+    try out.appendSlice(allocator, paint.sel_bg);
+    try out.appendSlice(allocator, paint.user_fg);
+    try out.appendSlice(allocator, inner);
+    try out.appendSlice(allocator, paint.reset);
+    return out.toOwnedSlice(allocator);
+}
+
+/// Rows one mouse-wheel notch moves the transcript.
+pub const wheel_step: u16 = 3;
 
 /// Stays put when content already fits, so the pane does not flicker.
 pub fn stepScroll(scroll: usize, total: usize, rows: u16, up: bool, step: u16) usize {
@@ -1672,6 +1753,7 @@ pub fn writeSelected(out: *Io.Writer, row: []const u8, from: u16, to: u16) !void
             continue;
         }
         const len = width.utf8LenAt(row, i);
+        if (len == 0) break;
         try out.writeAll(row[i..][0..len]);
         i += len;
     }
@@ -1692,9 +1774,17 @@ pub fn plainCells(out: *std.ArrayList(u8), allocator: std.mem.Allocator, row: []
             continue;
         }
         const len = width.utf8LenAt(row, i);
+        if (len == 0) break;
         try out.appendSlice(allocator, row[i..][0..len]);
         i += len;
     }
+}
+
+/// Rows reserved above the footer for sticky chrome (tasks, jump, toast).
+pub fn chromeOverlay(footer: Footer) u16 {
+    var n: u16 = @intCast(@min(footer.tasks.len, std.math.maxInt(u16)));
+    if (footer.jump) n +|= 1 else if (footer.toast.len != 0) n +|= 1;
+    return n;
 }
 
 pub fn writeTranscript(
@@ -1704,14 +1794,28 @@ pub fn writeTranscript(
     scroll: usize,
     sel: Sel,
 ) PaintError!void {
+    return writeTranscriptOverlay(stdout, layout, t, scroll, sel, 0);
+}
+
+pub fn writeTranscriptOverlay(
+    stdout: *Io.Writer,
+    layout: Layout,
+    t: *const Transcript,
+    scroll: usize,
+    sel: Sel,
+    overlay_h: u16,
+) PaintError!void {
     const total = t.rowCount();
-    const rows = layout.transcript_rows;
+    const full = layout.transcript_rows;
+    const rows: u16 = if (full > overlay_h) full - overlay_h else full;
+    if (rows == 0) return;
     const off = @min(scroll, maxScroll(total, rows));
     const start: usize = if (total > rows + off) total - rows - off else 0;
     const vis: u16 = if (total > start) @intCast(@min(rows, total - start)) else 0;
     const first = transcriptFirstRow(layout.transcript_start_row, rows, vis);
+    const bottom = layout.scrollBottom(overlay_h);
     var region_buf: [32]u8 = undefined;
-    const region = try setScrollRegion(&region_buf, layout.regionTop(), layout.regionBottom());
+    const region = try setScrollRegion(&region_buf, layout.regionTop(), bottom);
     try stdout.writeAll(sync_begin);
     try stdout.writeAll(region);
     try stdout.writeAll("\x1b[?7l");
@@ -1747,10 +1851,14 @@ pub fn writePane(
         .generating => footer.status,
         .idle => "",
     });
+    // Open todos live in footer chrome, not the scrollback — clear any legacy
+    // pin so they cannot double-draw or steal scroll height.
+    t.setPinned(&.{});
+    const overlay = chromeOverlay(footer);
     if (t.isEmpty() and footer.turn == .idle) {
         try writeWelcome(allocator, stdout, layout, footer);
     } else {
-        try writeTranscript(stdout, layout, t, scroll, footer.sel);
+        try writeTranscriptOverlay(stdout, layout, t, scroll, footer.sel, overlay);
     }
     try writeFooter(allocator, stdout, layout, footer);
 }
@@ -2548,4 +2656,19 @@ test "a click maps back to the row the pane painted there" {
     try std.testing.expectEqual(@as(?usize, 2), transcriptRowAt(layout, &t, 0, first + 2));
     try std.testing.expectEqual(@as(?usize, null), transcriptRowAt(layout, &t, 0, first + 3));
     try std.testing.expectEqual(@as(?usize, null), transcriptRowAt(layout, &t, 0, 0));
+}
+
+test "jump pill is centered and hit-tested only on the label" {
+    const a = std.testing.allocator;
+    const layout = Layout.compute(24, 80);
+    try std.testing.expect(jumpVisible(20, layout.transcript_rows));
+    try std.testing.expect(!jumpVisible(0, layout.transcript_rows));
+    const box = jumpHitBox(layout).?;
+    try std.testing.expect(jumpHit(layout, box.row, box.col0));
+    try std.testing.expect(jumpHit(layout, box.row, box.col1));
+    try std.testing.expect(!jumpHit(layout, box.row, 1));
+    try std.testing.expect(!jumpHit(layout, box.row, layout.cols));
+    const pill = try formatJumpPill(a, layout.cols);
+    defer a.free(pill);
+    try std.testing.expect(std.mem.indexOf(u8, pill, jump_label) != null);
 }

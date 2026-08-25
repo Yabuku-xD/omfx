@@ -8,6 +8,7 @@ pub const Parsed = union(enum) {
         id: []const u8,
         name: []const u8,
         args: []const u8,
+        index: usize = 0,
     },
     /// Real counts from the provider, never an estimate.
     ///
@@ -105,7 +106,7 @@ fn isThinkType(typ: []const u8) bool {
 
 fn classOpenAi(typ: []const u8, json: []const u8) Class {
     if (ends(typ, "output_text.delta") or eql(typ, "output_text")) return .answer;
-    if (isThinkType(typ) or has(json, "thinking_delta")) return .think;
+    if (isThinkType(typ) or has(json, "thinking_delta") or has(json, "reasoning_content") or has(json, "\"reasoning\":") or has(json, "reasoning_details")) return .think;
     return .other;
 }
 
@@ -126,8 +127,21 @@ fn firstString(json: []const u8, keys: []const []const u8) ?[]const u8 {
 }
 
 fn asThink(json: []const u8) Parsed {
-    if (firstString(json, &.{ "delta", "thinking", "text" })) |c| return .{ .think = c };
+    // Command Code / DeepSeek / Gemini-via-CC stream thinking as `reasoning`
+    // (sometimes `reasoning_content`). Never prefer bare `text` first: that
+    // key also appears inside `reasoning_details` and would mis-route.
+    if (firstString(json, &.{ "reasoning_content", "reasoning", "delta", "thinking" })) |c| return .{ .think = c };
+    // Typed thinking blocks (Anthropic / Responses) carry the body under text.
+    if (firstString(json, &.{"text"})) |c| return .{ .think = c };
     return .ignore;
+}
+
+/// Narrow field reads to the streaming `delta` object when present so nested
+/// payloads (`reasoning_details`, tool args) cannot leak as the answer.
+fn deltaScope(json: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, json, "\"delta\":{")) |i| return json[i..];
+    if (std.mem.indexOf(u8, json, "\"delta\": {")) |i| return json[i..];
+    return json;
 }
 
 fn asText(json: []const u8, key: []const u8) Parsed {
@@ -160,18 +174,31 @@ pub fn parseOpenAiData(data: []const u8) Parsed {
         }
     }
 
-    if (jsonString(trimmed, "content")) |content| {
+    const scope = deltaScope(trimmed);
+    // Visible answer first when a delta carries both (rare).
+    if (jsonString(scope, "content")) |content| {
         if (content.len > 0) return .{ .text = content };
     }
-    const name = jsonString(trimmed, "name");
-    const args = jsonString(trimmed, "arguments");
-    const id = jsonString(trimmed, "id");
-    if (name != null or args != null) {
-        return .{ .tool_call = .{
-            .id = id orelse "",
-            .name = name orelse "",
-            .args = args orelse "",
-        } };
+    if (jsonString(scope, "reasoning_content")) |c| {
+        if (c.len > 0) return .{ .think = c };
+    }
+    if (jsonString(scope, "reasoning")) |c| {
+        if (c.len > 0) return .{ .think = c };
+    }
+    // Chat.completions streams tools under `tool_calls`; Responses uses
+    // `function_call`. Require one so a random `"name"` elsewhere is ignored.
+    if (has(trimmed, "tool_calls") or has(trimmed, "\"type\":\"function_call\"")) {
+        const name = jsonString(trimmed, "name");
+        const args = jsonString(trimmed, "arguments");
+        const id = jsonString(trimmed, "id");
+        if (name != null or args != null) {
+            return .{ .tool_call = .{
+                .id = id orelse "",
+                .name = name orelse "",
+                .args = args orelse "",
+                .index = jsonUsize(trimmed, "index") orelse 0,
+            } };
+        }
     }
     return .ignore;
 }
@@ -202,7 +229,13 @@ pub fn parseData(protocol: types.Protocol, data: []const u8) Parsed {
 }
 
 fn thinkBody(body: []const u8) bool {
-    return has(body, "\"type\":\"reasoning\"") or has(body, "summary_text");
+    // `"type":"reasoning"` alone misses Command Code's `"type":"reasoning.text"`.
+    return has(body, "\"type\":\"reasoning\"") or
+        has(body, "reasoning.text") or
+        has(body, "reasoning_details") or
+        has(body, "\"reasoning\":") or
+        has(body, "reasoning_content") or
+        has(body, "summary_text");
 }
 
 pub fn lastTypeText(body: []const u8, type_name: []const u8) []const u8 {
@@ -239,11 +272,12 @@ pub fn extract(protocol: types.Protocol, body: []const u8) Extract {
     }
     if (out.text.len == 0) out.text = lastTypeText(body, "output_text");
     if (out.think.len == 0) out.think = lastTypeText(body, "summary_text");
-    if (out.text.len == 0) {
-        if (jsonString(body, "content")) |c| {
-            out.text = c;
-        } else if (!thinkBody(body)) {
-            if (jsonString(body, "text")) |c| out.text = c;
+    // Never scan bare `"text"` / unscoped `"content"` as the answer: Command
+    // Code (and other OpenAI-compat routers) put reasoning fragments under
+    // `reasoning_details[].text`, which would leak as a one-word reply.
+    if (out.text.len == 0 and std.mem.indexOf(u8, body, "data:") == null and !thinkBody(body)) {
+        if (std.mem.indexOf(u8, body, "\"message\"") != null) {
+            if (jsonString(body, "content")) |c| out.text = c;
         }
     }
     return out;
@@ -409,6 +443,71 @@ test "unescapeAlloc turns json newlines into real ones" {
 test "openai text delta" {
     const p = parseOpenAiData(
         \\{"choices":[{"delta":{"content":"hi"}}]}
+    );
+    try std.testing.expectEqualStrings("hi", p.text);
+}
+
+test "deepseek reasoning_content is think" {
+    const p = parseOpenAiData(
+        \\{"choices":[{"delta":{"reasoning_content":"plan"}}]}
+    );
+    try std.testing.expectEqualStrings("plan", p.think);
+}
+
+test "commandcode reasoning field is think" {
+    const p = parseOpenAiData(
+        \\{"choices":[{"delta":{"reasoning":"The","reasoning_details":[{"type":"reasoning.text","text":"The"}]}}]}
+    );
+    try std.testing.expectEqualStrings("The", p.think);
+}
+
+test "extract does not steal reasoning_details text as the answer" {
+    const body =
+        \\data: {"choices":[{"delta":{"reasoning":"The","reasoning_details":[{"type":"reasoning.text","text":"The"}]}}]}
+        \\
+        \\data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"glob","arguments":""}}]}}]}
+        \\
+        \\data: [DONE]
+        \\
+    ;
+    const got = extract(.openai_compat, body);
+    try std.testing.expectEqualStrings("", got.text);
+    try std.testing.expectEqualStrings("The", got.think);
+}
+
+test "extract never leaks reasoning_details text even without reasoning key" {
+    // Worst case: only reasoning_details (no top-level reasoning field).
+    const body =
+        \\data: {"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"The"}]}}]}
+        \\
+        \\data: [DONE]
+        \\
+    ;
+    const got = extract(.openai_compat, body);
+    try std.testing.expectEqualStrings("", got.text);
+}
+
+test "gemini-style commandcode reasoning does not become the answer" {
+    const body =
+        \\data: {"choices":[{"delta":{"role":"assistant"}}]}
+        \\
+        \\data: {"choices":[{"delta":{"reasoning":"The","reasoning_details":[{"type":"reasoning.text","text":"The","format":"unknown","index":0}]}}]}
+        \\
+        \\data: {"choices":[{"delta":{"reasoning":" user","reasoning_details":[{"type":"reasoning.text","text":" user","format":"unknown","index":0}]}}]}
+        \\
+        \\data: {"choices":[{"delta":{"content":"Hello there."}}]}
+        \\
+        \\data: [DONE]
+        \\
+    ;
+    const got = extract(.openai_compat, body);
+    try std.testing.expectEqualStrings("Hello there.", got.text);
+    try std.testing.expectEqualStrings(" user", got.think);
+}
+
+test "deepseek content wins over reasoning_content in same delta" {
+    const p = parseOpenAiData(
+        \\{"choices":[{"delta":{"reasoning_content":"plan","content":"hi"}}]}
     );
     try std.testing.expectEqualStrings("hi", p.text);
 }

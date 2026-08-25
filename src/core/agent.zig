@@ -66,6 +66,7 @@ fn postOrStop(
         .ack = if (flags.host.on_tick != null) "" else stopping_ack,
         .tick = flags.host.on_tick,
         .tick_ctx = flags.host.ctx,
+        .page_rows = flags.host.page_rows,
     };
     watch.start();
     defer watch.finish();
@@ -481,6 +482,7 @@ fn chatTurn(
     var prev_args: []u8 = try allocator.dupe(u8, "");
     var same: usize = 0;
     var malformed: usize = 0;
+    var orient_streak: usize = 0;
     while (true) {
         // A tool boundary is the other place a turn can pause; the SSE reader
         // covers the streaming half.
@@ -728,6 +730,11 @@ fn chatTurn(
             result = joined;
         }
 
+        // Harness circuit breaker: soft prompt lines do not stop re-plan thrash.
+        // Decide before asst_text is moved into the thread.
+        const round_orients = preambleReorients(asst_text) or toolLooksOrient(tool_name, tool_args);
+        if (round_orients) orient_streak += 1 else orient_streak = 0;
+
         // A tool round with no prose gets no assistant turn at all.
         //
         // This used to append "[tool <name>]" as the assistant's entire
@@ -752,6 +759,13 @@ fn chatTurn(
         else
             try std.fmt.allocPrint(allocator, "Tool {s} result:\n{s}Continue.", .{ tool_name, result_nl });
         allocator.free(result_nl);
+
+        if (orient_streak >= orient_after) {
+            const nudged = try std.fmt.allocPrint(allocator, "{s}\n{s}\n", .{ follow_raw, orient_nudge });
+            allocator.free(follow_raw);
+            follow_raw = nudged;
+        }
+
         if (Tool.Name.fromSlice(tool_name)) |n| {
             if (n == .board or n == .peer) {
                 const tail_now = board.loadTail(allocator, io, workspace);
@@ -957,6 +971,71 @@ fn executeAdmitted(a: AdmitArgs) !AdmitOutcome {
 }
 
 pub const doom_after: usize = 3;
+/// Explore-only tool rounds before the harness injects a stop-reorienting nudge.
+pub const orient_after: usize = 3;
+
+const orient_nudge =
+    \\harness: stop re-orienting. Results above already cover the tree. Advance the open todo with one specific next step — do not restate the plan or re-list the repo.
+;
+
+fn asciiLowerEq(hay: []const u8, needle: []const u8) bool {
+    if (needle.len > hay.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= hay.len) : (i += 1) {
+        var ok = true;
+        for (needle, 0..) |nc, j| {
+            const hc = hay[i + j];
+            const a = if (hc >= 'A' and hc <= 'Z') hc + 32 else hc;
+            const b = if (nc >= 'A' and nc <= 'Z') nc + 32 else nc;
+            if (a != b) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) return true;
+    }
+    return false;
+}
+
+fn preambleReorients(text: []const u8) bool {
+    const head = if (text.len > 480) text[0..480] else text;
+    const needles = [_][]const u8{
+        "get oriented",
+        "lay of the land",
+        "getting oriented",
+        "let me start by",
+        "let me first get",
+        "map the codebase",
+        "survey the repo",
+        "go through the whole",
+    };
+    for (needles) |n| {
+        if (asciiLowerEq(head, n)) return true;
+    }
+    return false;
+}
+
+fn bashLooksOrient(args: []const u8) bool {
+    // Cheap scan of the JSON args blob — enough for ls/pwd/find thrash.
+    const markers = [_][]const u8{
+        "\"ls\"", " ls", "ls ", "ls\n", "pwd", "find ", "tree", "du ", "git status", "git log",
+    };
+    for (markers) |m| {
+        if (asciiLowerEq(args, m)) return true;
+    }
+    return false;
+}
+
+fn toolLooksOrient(name: []const u8, args: []const u8) bool {
+    const n = Tool.Name.fromSlice(name) orelse return false;
+    return switch (n) {
+        .list, .glob, .semantic_search, .file_info => true,
+        .bash => bashLooksOrient(args),
+        // read/grep can be progress or orient; count them only with a reorient preamble.
+        .read, .grep => false,
+        else => false,
+    };
+}
 /// Receipt: every real provider names a tool from the advertised list on the
 /// first try. Three in a row is a model that has lost the list, not a slip.
 pub const max_malformed: usize = 3;
@@ -1347,6 +1426,16 @@ test "doom_loop trips on the third identical call" {
     try std.testing.expectEqual(@as(usize, 2), bumpRepeat(&same, "write", "{}", "write", "{}"));
     try std.testing.expectEqual(@as(usize, 3), bumpRepeat(&same, "write", "{}", "write", "{}"));
     try std.testing.expect(same >= doom_after);
+}
+
+test "reorient preamble and list/bash orient tools are detected" {
+    try std.testing.expect(preambleReorients("Let me get oriented with the repo first."));
+    try std.testing.expect(preambleReorients("I'll start by getting oriented."));
+    try std.testing.expect(!preambleReorients("I'll edit src/main.zig next."));
+    try std.testing.expect(toolLooksOrient("list", "{}"));
+    try std.testing.expect(toolLooksOrient("bash", "{\"command\":\"ls -la\"}"));
+    try std.testing.expect(!toolLooksOrient("edit", "{\"path\":\"x\"}"));
+    try std.testing.expect(!toolLooksOrient("read", "{\"path\":\"README.md\"}"));
 }
 
 test "a tool round with no prose leaves no assistant turn behind" {
