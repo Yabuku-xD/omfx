@@ -516,10 +516,14 @@ pub const Live = union(enum) {
         self.flushAsst();
         switch (self.*) {
             .json => |j| {
+                const st: []const u8 = if (done) "tool_end" else "tool_start";
                 var buf: [240]u8 = undefined;
-                const st: []const u8 = if (done) "done" else "run";
-                const line = std.fmt.bufPrint(&buf, "{s} {s} {s}", .{ name, st, detail }) catch return;
-                emitJson(j.stdout, "tool", line);
+                const line = std.fmt.bufPrint(&buf, "{s} {s}", .{ name, detail }) catch return;
+                emitJson(j.stdout, st, line);
+                // Keep legacy `tool` for older hosts.
+                var legacy: [240]u8 = undefined;
+                const leg = std.fmt.bufPrint(&legacy, "{s} {s} {s}", .{ name, if (done) "done" else "run", detail }) catch return;
+                emitJson(j.stdout, "tool", leg);
             },
             .stream => |*s| {
                 closeThinkStream(s);
@@ -570,7 +574,13 @@ pub const Live = union(enum) {
     fn onAsk(ctx: ?*anyopaque, name: []const u8, detail: []const u8) sink.Ask {
         const self = asLive(ctx) orelse return .deny;
         const t = switch (self.*) {
-            .json, .stream => return .deny,
+            .json => |j| {
+                var buf: [240]u8 = undefined;
+                const line = std.fmt.bufPrint(&buf, "deny {s} {s}", .{ name, detail }) catch "deny";
+                emitJson(j.stdout, "permission", line);
+                return .deny;
+            },
+            .stream => return .deny,
             .tui => |*tty_live| tty_live,
         };
         return switch (tui.askPerm(t.stdin, t.stdout, t.allocator, t.layout, t.footer.model, name, detail)) {

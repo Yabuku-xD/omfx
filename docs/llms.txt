@@ -23,7 +23,11 @@ omfx ask "explain this repository"
 
 - [CLI commands](using/cli.md): Top-level commands and global flags.
 - [Slash commands](using/slash-commands.md): Commands inside the interactive session.
-- [Sessions](using/sessions.md): Save, resume, rewind, fork, and compact.
+- [Sessions](using/sessions.md): Save, resume, rewind, fork, handoff, and compact.
+- [Runs](using/runs.md): Checkpoint / sleep / wake without transcript dump.
+- [Specs](using/specs.md): Requirements → design → tasks without dumping docs into the prompt.
+- [JSONL](using/jsonl.md): `ask --json` event stream for CI hosts.
+- [Compare](compare.md): Field notes vs other coding-agent CLIs.
 - [Troubleshooting](using/troubleshooting.md): Install, auth, diagnostics, and terminal issues.
 
 ## Configure

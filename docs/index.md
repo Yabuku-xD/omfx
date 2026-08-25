@@ -59,10 +59,13 @@ In an interactive session, type `/` for commands. See [Slash commands](using/sla
 - **One-shot LSP**: after a clean parse, omfx runs diagnostics from a language server on PATH. Nothing is bundled; no daemon.
 - **Effort `auto`**: reasoning budget follows the prompt, not a fixed default.
 - **ARC compact + recall**: dropped context lands in inspectable recall files, not a rewrite pass from another model.
+- **Deterministic handoff**: `/handoff` packets are path/board/cite stubs — no last-reply dump.
+- **Thin specs**: `/spec` keeps requirements→design→tasks on disk; only the active task pointer enters orientation.
+- **Permissions**: symbolic allowlist DSL; session rules may only shrink privilege.
 - **Hybrid semantic search**: repo rank, symbols, and tokens fused; no embeddings required.
 - **Memory + playbook**: workspace and user facts, plus verified lessons that can graduate into skills.
 - **Shared board**: structured notes for facts, failures, and paths for peers and coordination.
-- **Ranked repo map**: orientation by symbol references, not directory walk order.
+- **Ranked repo map**: personalized file-graph rank + symbol packing inside a 4k char budget (no tree-sitter).
 - **Credential-aware `/models`**: signed-in providers first, then that provider's models.
 - **Stacked skills + `@files`**: several skills and file anchors in one prompt.
 - **Web fallback chain**: nineteen search backends; pick an order in `/web`, first match wins.
@@ -76,6 +79,10 @@ In normal mode, sensitive tools prompt before they run. Plan mode is read-only. 
 
 - [CLI commands](using/cli.md)
 - [Sessions](using/sessions.md)
+- [Runs](using/runs.md)
+- [Specs](using/specs.md)
+- [JSONL](using/jsonl.md)
+- [Compare](compare.md)
 - [Peers](capabilities/peers.md)
 - [Tools](capabilities/tools.md)
 - [Configuration](configure/configuration.md)

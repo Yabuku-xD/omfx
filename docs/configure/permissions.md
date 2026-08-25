@@ -19,9 +19,28 @@ Shift-Tab cycles normal → plan → yolo. Yolo is never written to disk.
 /plan go
 ```
 
-## Allowlist
+## Allowlist (deterministic DSL)
 
-`/allowlist` inspects or appends persistent rules in settings so repeated safe tools stop prompting.
+No learned classifier. Rules are symbolic tool + argument checks. They live in settings and are enforced at runtime — never pasted into the system prompt.
+
+```
+/allowlist
+/allowlist write allow
+/allowlist bash:git * allow
+/allowlist write.path=src/* allow
+/allowlist bash:rm *#fallback=ask deny
+/allowlist session bash deny
+/allowlist remove write
+```
+
+| Pattern | Meaning |
+| --- | --- |
+| `tool` | Match the tool name |
+| `tool:prefix*` | Match command/path prefix (`bash:git *`) |
+| `tool.arg=value` | Named JSON arg (`write.path=src/*`) |
+| `#fallback=ask\|deny` | On deny: prompt instead of hard-fail (`ask`) |
+
+`/allowlist session …` adds ephemeral shrink-only rules (ask|deny). Expanding privilege requires a persistent `/allowlist … allow`.
 
 ## Sandbox
 

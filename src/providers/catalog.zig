@@ -6,10 +6,9 @@ const env_mod = @import("../core/env.zig");
 
 /// One named backend.
 ///
-/// Scoped deliberately to three vendors and their subscription logins, ported
-/// from `oh-my-pi/packages/ai/src/registry/oauth` (Anthropic PKCE, OpenAI Codex
-/// PKCE + device, xAI device). Every constant below matches that source; the
-/// flows themselves live in `oauth.zig`.
+/// Scoped to vendors and their subscription logins. OAuth row shapes follow
+/// common PKCE / device-code patterns (Anthropic PKCE, OpenAI Codex
+/// PKCE + device, xAI device, GitHub device code). The flows live in `oauth.zig`.
 ///
 /// A row is either an API key you paste, or a subscription you already pay for.
 /// Both land in the same `~/.omfx/auth.json`, and `auth.zig` prefers a stored

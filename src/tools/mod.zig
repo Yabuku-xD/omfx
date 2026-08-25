@@ -17,6 +17,7 @@ pub const cdp = @import("cdp.zig");
 pub const relay = @import("relay.zig");
 pub const mcp = @import("mcp.zig");
 pub const undo = @import("undo.zig");
+pub const git_work = @import("git_work.zig");
 pub const patch = @import("patch.zig");
 pub const gate = @import("gate.zig");
 pub const lsp = @import("lsp.zig");
@@ -44,6 +45,7 @@ test {
     _ = relay;
     _ = mcp;
     _ = undo;
+    _ = git_work;
     _ = patch;
     _ = gate;
     _ = isolate;

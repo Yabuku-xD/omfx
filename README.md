@@ -59,7 +59,7 @@ Manual `/peers` always works; optional auto peers are task-gated when `peer=on`.
 Name a model in plain words like `sonnet 5 from anthropic` to pin it. Depth capped;
 nested peers denied. Optional git worktrees for isolation.
 
-**Ranked repo map** — orientation by symbol references, not directory walk order.
+**Ranked repo map** — personalized file-graph rank + symbol packing (4k cap); no tree-sitter, no dump.
 Volatile status and the map refresh on the user message, not the cached system prefix.
 
 **Credential-aware models** — the list matches what your login actually offers.
@@ -67,7 +67,19 @@ Subscription and API windows capped correctly. Auto effort plus every reasoning
 level the model declares. Vision when supported.
 
 **Permissions** — ask before sensitive tools; plan is read-only until you go; yolo
-is session-only and never persisted. Allowlist, sandbox, Shift-Tab cycling.
+is session-only and never persisted. Deterministic allowlist DSL (named args,
+`#fallback=ask`), session shrink-only rules, sandbox, Shift-Tab cycling. No
+learned classifier and no policy dump into the prompt.
+
+**Handoff and specs** — `/handoff [goal]` writes a reviewable packet (paths,
+board, recall ids) without dumping the last reply. `/spec` keeps
+requirements→design→tasks on disk and injects only the active task pointer.
+
+**Git auto-commit** — opt-in `/settings git_auto=on` (dirty snapshot + per-edit
+commits with omfx trailer). `/undo` is SHA-gated against the last omfx commit.
+
+**Headless JSONL** — `omfx ask --json` streams session/tool/permission/result
+events for CI hosts; events never enter the model thread.
 
 **Web fallback chain** — nineteen search backends in your order; test the chain;
 first working provider wins. Set order by picking, not by typing ids.
@@ -78,7 +90,7 @@ mid-sentence, with file anchors inline. Reload rescans.
 **External IDE** — `/ide open` launches code, cursor, zed, and friends on the
 workspace. Separate from ctrl-g's terminal editor.
 
-**Plugins** — Claude-compatible marketplaces via `/plugin marketplace add`.
+**Plugins** — marketplaces via `/plugin marketplace add` (`.claude-plugin` / `.omfx-plugin`).
 
 **Browser relay** — your open Chrome tabs via a local listener, not a headless farm.
 
@@ -100,11 +112,18 @@ cache read and write.
 vars. Hooks deny risky calls and redact secrets in output. Telemetry off unless asked.
 Run logs stay local with no prompt text uploaded.
 
+## Vs the field
+
+Thin harness, thick honesty: parse gate, ARC cites, deterministic handoff packets,
+named-arg permissions, and opt-in git auto-commit — without dumping transcripts
+or policy into the model context. Field notes: [docs/compare.md](docs/compare.md).
+
 ## Use
 
 ```
 omfx                         Interactive full-screen session
 omfx ask <prompt>            One-shot request (no alt screen)
+omfx ask --json <prompt>     JSONL events for CI / hosts
 omfx update [--check|--force]  Install the latest GitHub release
 omfx doctor                  Runtime status
 omfx version                 Print version
@@ -118,8 +137,12 @@ Inside a session: `/login`, `/models`, `/help`. Flags: `--provider`, `--model`,
 
 - [Quick start](docs/index.md)
 - [Documentation index](docs/llms.txt)
+- [Compare](docs/compare.md)
 - [Slash commands](docs/using/slash-commands.md)
 - [Sessions](docs/using/sessions.md)
+- [Runs](docs/using/runs.md)
+- [Specs](docs/using/specs.md)
+- [JSONL](docs/using/jsonl.md)
 - [Tools](docs/capabilities/tools.md)
 - [Peers and board](docs/capabilities/peers.md)
 - [IDE](docs/capabilities/ide.md)

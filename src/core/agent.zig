@@ -13,6 +13,7 @@ const peer_policy = @import("peer_policy.zig");
 const board = @import("board.zig");
 const pathing = @import("../tools/pathing.zig");
 const ssvp = @import("ssvp.zig");
+const spec_mod = @import("spec.zig");
 const playbook = @import("playbook.zig");
 const vision = @import("vision.zig");
 const contract_mod = @import("contract.zig");
@@ -275,6 +276,8 @@ pub const Run = struct {
     prior_assistant: []const u8 = "",
     lookup: env.Lookup = env.emptyLookup(),
     auth_json: []const u8 = "",
+    /// Ephemeral shrink-only rules; never injected into the system prompt.
+    session_rules: []const permissions.Rule = &.{},
 };
 
 /// HTTP failures collapse here. A peer re-enters `chatOnce` from `chatTurn`, so
@@ -330,10 +333,12 @@ fn workspaceState(
     io: Io,
     dir: Io.Dir,
     workspace: []const u8,
+    query: []const u8,
 ) ![]u8 {
     const git_block = try context.gitSnapshot(allocator, io, workspace);
     defer allocator.free(git_block);
-    const map_block = try repomap.build(allocator, dir, io);
+    // Personalize the map toward this turn's tokens; still capped at 4k chars.
+    const map_block = try repomap.buildFor(allocator, dir, io, query);
     defer allocator.free(map_block);
     if (git_block.len == 0 and map_block.len == 0) return allocator.dupe(u8, "");
     if (git_block.len == 0) return allocator.dupe(u8, map_block);
@@ -408,7 +413,7 @@ fn chatTurn(
         t.tools_bytes = @intCast(@min(pclient.advertisedBytes(endpoint), std.math.maxInt(u32)));
     }
 
-    const state_block = try workspaceState(allocator, io, dir, workspace);
+    const state_block = try workspaceState(allocator, io, dir, workspace, user);
     defer allocator.free(state_block);
     const user_with_state = if (state_block.len == 0)
         try allocator.dupe(u8, user)
@@ -485,7 +490,7 @@ fn chatTurn(
             last.deinit(allocator);
             return std.fmt.allocPrint(allocator, "plan mode: {s} blocked. /plan go to implement.\n", .{call.name});
         }
-        var decision = admitCall(mode, call.name, call.args, has_tty, cfg.rules, always[0..always_n]);
+        var decision = admitCall(mode, call.name, call.args, has_tty, cfg.rules, run.session_rules, always[0..always_n]);
         if (mode == .auto and decision == .prompt and auto_denials < 2 and !permissions.isRoutine(call.name, call.args)) {
             auto_denials += 1;
         }
@@ -615,7 +620,7 @@ fn chatTurn(
             var ex_detail_buf: [permissions.max_command]u8 = undefined;
             const ex_path = toolDetail(&ex_detail_buf, ex.args);
             host.tool(ex.name, ex_path, false);
-            const d = admitCall(mode, ex.name, ex.args, has_tty, cfg.rules, always[0..always_n]);
+            const d = admitCall(mode, ex.name, ex.args, has_tty, cfg.rules, run.session_rules, always[0..always_n]);
             if (d != .allow) {
                 host.toolOut(ex.name, ex_path, true, "permission denied\n");
                 continue;
@@ -990,8 +995,15 @@ fn assembleSystem(
     else
         try std.fmt.allocPrint(allocator, "{s}Board gist (board read for more; FACT needs path=):\n{s}\n", .{ sys_base, last_summary });
     defer allocator.free(sys_mid);
-    if (plan) return std.fmt.allocPrint(allocator, "{s}{s}", .{ sys_mid, prompt.plan_text });
-    return allocator.dupe(u8, sys_mid);
+    const spec_line = try spec_mod.orientationLine(allocator, io, workspace);
+    defer if (spec_line.len > 0) allocator.free(spec_line);
+    const sys_spec = if (spec_line.len == 0)
+        try allocator.dupe(u8, sys_mid)
+    else
+        try std.fmt.allocPrint(allocator, "{s}{s}", .{ sys_mid, spec_line });
+    defer allocator.free(sys_spec);
+    if (plan) return std.fmt.allocPrint(allocator, "{s}{s}", .{ sys_spec, prompt.plan_text });
+    return allocator.dupe(u8, sys_spec);
 }
 
 fn admitCall(
@@ -1000,12 +1012,13 @@ fn admitCall(
     args: []const u8,
     has_tty: bool,
     rules: []const permissions.Rule,
+    session: []const permissions.Rule,
     always: []const []const u8,
 ) permissions.Decision {
     for (always) |a| {
         if (std.mem.eql(u8, a, name)) return .allow;
     }
-    return permissions.admitWithDsl(mode, name, args, has_tty, rules);
+    return permissions.admitWithSession(mode, name, args, has_tty, rules, session);
 }
 
 fn exploreBlock(allocator: std.mem.Allocator, tool: []const u8) ![]u8 {
@@ -1399,7 +1412,7 @@ test "the workspace map still reaches the model, at the head of the turn" {
     try w.interface.flush();
     f.close(io);
 
-    const state = try workspaceState(a, io, tmp.dir, "/no-such-omfx-git-workspace");
+    const state = try workspaceState(a, io, tmp.dir, "/no-such-omfx-git-workspace", "startServer");
     defer a.free(state);
     try std.testing.expect(std.mem.indexOf(u8, state, "svc.zig") != null);
 }

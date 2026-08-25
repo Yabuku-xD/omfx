@@ -31,6 +31,6 @@ This is separate from **Editor** (`editor` / ctrl-g), which opens the draft in a
 
 omfx looks for common CLI shims on `PATH`: `code`, `cursor`, `zed`, `windsurf`, `subl`, `idea`, `webstorm`, `fleet`, and related binaries. Install the editor's shell command if the binary is missing.
 
-## How this differs from Claude Code `/ide`
+## Scope
 
-Claude Code can attach a running IDE extension for diffs and live diagnostics. omfx's `/ide` only launches the external app on the workspace — intentionally lightweight, no ACP bridge inside the TUI.
+`/ide` only launches the external app on the workspace — intentionally lightweight, no ACP bridge inside the TUI.
