@@ -323,7 +323,11 @@ fn doReload(ctx: *Ctx) !void {
     if (cfg.composer.len > 0) ctx.state.composer = try ctx.arena.dupe(u8, cfg.composer);
     ctx.state.extra_n = 0;
     for (cfg.workspace_dirs) |d| ctx.state.appendExtra(try ctx.arena.dupe(u8, d)) catch break;
-    pathing.setAccess(.{ .workspace = ctx.workspace, .extra = ctx.state.extraSlice() });
+    pathing.setAccess(.{
+        .workspace = ctx.workspace,
+        .extra = ctx.state.extraSlice(),
+        .read_extra = skills.readAccessRoots(ctx.arena, ctx.io, ctx.home, ctx.workspace) catch &.{},
+    });
     relay.ensure(ctx.gpa, ctx.io, port);
     model_signals.ensure(ctx.gpa, ctx.io, ctx.home);
     const names = skills.listAllNames(ctx.gpa, ctx.io, Io.Dir.cwd(), ctx.home, ctx.workspace) catch try ctx.gpa.alloc([]const u8, 0);
@@ -896,7 +900,8 @@ pub fn fillCommands(state: *State) void {
 
 fn persistExtra(ctx: *Ctx) !void {
     try settings.setWorkspaceDirs(ctx.gpa, ctx.io, ctx.home, ctx.state.extraSlice());
-    pathing.setAccess(.{ .workspace = ctx.workspace, .extra = ctx.state.extraSlice() });
+    const skill_roots = skills.readAccessRoots(ctx.arena, ctx.io, ctx.home, ctx.workspace) catch &.{};
+    pathing.setAccess(.{ .workspace = ctx.workspace, .extra = ctx.state.extraSlice(), .read_extra = skill_roots });
 }
 
 fn doWorkspace(ctx: *Ctx, rest: []const u8) !void {

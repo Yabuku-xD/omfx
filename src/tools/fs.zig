@@ -17,12 +17,14 @@ pub fn read(
     workspace: []const u8,
     rel: []const u8,
 ) ![]u8 {
-    try pathing.assertInside(workspace, rel);
+    try pathing.assertReadable(workspace, rel);
+    // Absolute skill paths live outside the workspace Dir; open via cwd.
+    const open_dir = if (std.fs.path.isAbsolute(rel)) Io.Dir.cwd() else dir;
     // A FIFO, a socket, or a character device has no end: reading one parks the
     // turn with nothing to interrupt it. Only a regular file is readable here.
-    const st = try dir.statFile(io, rel, .{});
+    const st = try open_dir.statFile(io, rel, .{});
     if (st.kind != .file) return error.NotAFile;
-    return dir.readFileAlloc(io, rel, allocator, .limited(max_read_bytes));
+    return open_dir.readFileAlloc(io, rel, allocator, .limited(max_read_bytes));
 }
 
 /// What the `read` tool shows the model: numbered lines, pageable. `offset` is
@@ -140,8 +142,9 @@ pub fn list(
     rel: []const u8,
 ) ![]u8 {
     const path = if (rel.len == 0 or std.mem.eql(u8, rel, ".") or std.mem.eql(u8, rel, "./")) "." else rel;
-    if (!std.mem.eql(u8, path, ".")) try pathing.assertInside(workspace, path);
-    var child = try dir.openDir(io, path, .{ .iterate = true });
+    if (!std.mem.eql(u8, path, ".")) try pathing.assertReadable(workspace, path);
+    const open_dir = if (std.fs.path.isAbsolute(path)) Io.Dir.cwd() else dir;
+    var child = try open_dir.openDir(io, path, .{ .iterate = true });
     defer child.close(io);
     var it = child.iterate();
     var out: std.ArrayList(u8) = .empty;
