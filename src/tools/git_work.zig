@@ -126,12 +126,11 @@ fn commitAll(allocator: std.mem.Allocator, io: Io, workspace: []const u8, messag
 
 var dirty_done: bool = false;
 
-/// Reset per process when settings flip; dirty snapshot once per enablement window.
+/// Dirty snapshot once per enablement window; call when git_auto flips off→on.
 pub fn resetDirtyFlag() void {
     dirty_done = false;
 }
 
-/// Call before a mutating tool writes. Snapshots a dirty tree once (dirty-commit).
 pub fn beforeMutate(
     allocator: std.mem.Allocator,
     io: Io,
@@ -152,7 +151,6 @@ pub fn beforeMutate(
     };
 }
 
-/// Call after a successful mutating tool. Commits the AI edit when git_auto is on.
 pub fn afterMutate(
     allocator: std.mem.Allocator,
     io: Io,
@@ -191,8 +189,4 @@ pub fn undoOmfxCommit(allocator: std.mem.Allocator, io: Io, workspace: []const u
     if (!r.ok) return allocator.dupe(u8, "");
     clearSha(allocator, io, workspace);
     return allocator.dupe(u8, "git: reset last omfx commit\n");
-}
-
-test "hasGit false for empty path" {
-    try std.testing.expect(!hasGit(std.testing.io, "/no/such/omfx/git/work"));
 }

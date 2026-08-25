@@ -1,6 +1,6 @@
 # Specs
 
-Three-file workflow without dumping requirements into every turn.
+Three-file workflow: full docs on disk, a thin pointer plus a short phase postcard in the system prompt — never the document bodies.
 
 ## Layout
 
@@ -17,18 +17,17 @@ Active pointer: `.omfx/specs/.active` (`name` + `phase`).
 
 ```
 /spec                 list specs
-/spec new <name>      create stubs; phase=requirements
-/spec <name>          resume a spec
-/spec next            requirements → design → tasks → execute
-/spec run [name]      jump to execute
+/spec new <name>      create stubs; phase=requirements; starts a turn
+/spec <name>          resume a spec; starts a turn
+/spec next            requirements → design → tasks → execute; starts a turn
+/spec run [name]      jump to execute; starts a turn
 ```
 
-## Context rule
+## What enters the model
 
-Orientation injects only:
+Every turn while a spec is active:
 
-```
-spec=<name> phase=<phase> task=<first open checkbox>
-```
+1. Orientation pointer only, e.g. `spec=auth phase=design task=…`
+2. Spec overlay (same tools as the base postcard; use `read`/`write`/`edit`/`patch` on phase files; keep bodies on disk)
 
-Read the markdown files when needed. `/plan` stays for ad-hoc read-only research; `/spec` owns the three-file gates.
+`/plan` is separate: ad-hoc read-only frontier interview. `/spec` owns the gated three-file flow. If both are on, plan still blocks mutations until `/plan go`.

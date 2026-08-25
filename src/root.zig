@@ -37,6 +37,7 @@ pub const context = @import("core/context.zig");
 pub const board = @import("core/board.zig");
 pub const handoff = @import("core/handoff.zig");
 pub const checkpoint = @import("core/checkpoint.zig");
+pub const packet_snip = @import("core/packet_snip.zig");
 pub const spec = @import("core/spec.zig");
 pub const ssvp = @import("core/ssvp.zig");
 pub const playbook = @import("core/playbook.zig");
@@ -99,6 +100,7 @@ test {
     _ = board;
     _ = handoff;
     _ = checkpoint;
+    _ = packet_snip;
     _ = spec;
     _ = ssvp;
     _ = playbook;

@@ -1,5 +1,4 @@
-//! Thin three-file specs: requirements / design / tasks on disk, one pointer in the prompt.
-//! Never inject full requirements/design into the system prompt.
+//! Thin three-file specs on disk; orientation gets only a pointer, never the bodies.
 
 const std = @import("std");
 const Io = std.Io;
@@ -215,7 +214,6 @@ fn firstOpenTask(allocator: std.mem.Allocator, io: Io, workspace: []const u8, na
     return allocator.dupe(u8, "") catch return &.{};
 }
 
-/// One orientation line for assembleSystem — never the full documents.
 pub fn orientationLine(allocator: std.mem.Allocator, io: Io, workspace: []const u8) ![]u8 {
     const cur = loadActive(allocator, io, workspace) orelse return allocator.dupe(u8, "");
     defer allocator.free(cur.name);

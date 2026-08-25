@@ -17,7 +17,7 @@ Type `/` in the interactive session to search commands. Everything else is sent 
 | `/rewind` | Go back to an earlier prompt, or compress |
 | `/fork` | Copy this session to a new id |
 | `/handoff [goal]` | New session from a thin packet (no transcript dump) |
-| `/spec` | Spec-first workflow (`new` / `next` / `run`) |
+| `/spec` | Spec-first: disk docs + phase overlay when active; `next` / `run` |
 | `/checkpoint [note]` | Snapshot run pointers under `.omfx/runs/` |
 | `/sleep [note]` | Checkpoint + park (zero compute until `/wake`) |
 | `/wake [id\|list]` | Resume a run from a thin stub |
@@ -36,7 +36,7 @@ Type `/` in the interactive session to search commands. Everything else is sent 
 | `/sandbox` | OS sandbox on bash |
 | `/yolo` | Allow writes this session |
 | `/effort` | Reasoning level; `auto` picks per prompt (ctrl-t cycles) |
-| `/plan` | Read-only plan mode; `/plan go` implements |
+| `/plan` | Enter read-only plan mode (`/plan` alone); `/plan go` implements; `/plan off` exits |
 
 Model and provider picks settle in the footer for three seconds; menus and errors stay in the scrollback.
 

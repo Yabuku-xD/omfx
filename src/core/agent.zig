@@ -337,7 +337,7 @@ fn workspaceState(
 ) ![]u8 {
     const git_block = try context.gitSnapshot(allocator, io, workspace);
     defer allocator.free(git_block);
-    // Personalize the map toward this turn's tokens; still capped at 4k chars.
+    // Personalize toward this turn's tokens; still capped at 4k chars.
     const map_block = try repomap.buildFor(allocator, dir, io, query);
     defer allocator.free(map_block);
     if (git_block.len == 0 and map_block.len == 0) return allocator.dupe(u8, "");
@@ -1000,7 +1000,7 @@ fn assembleSystem(
     const sys_spec = if (spec_line.len == 0)
         try allocator.dupe(u8, sys_mid)
     else
-        try std.fmt.allocPrint(allocator, "{s}{s}", .{ sys_mid, spec_line });
+        try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ sys_mid, spec_line, prompt.spec_text });
     defer allocator.free(sys_spec);
     if (plan) return std.fmt.allocPrint(allocator, "{s}{s}", .{ sys_spec, prompt.plan_text });
     return allocator.dupe(u8, sys_spec);

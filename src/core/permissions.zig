@@ -112,7 +112,6 @@ pub fn parseAction(s: []const u8) ?DslAction {
     return null;
 }
 
-/// Split `pattern#fallback=ask` into bare pattern + fallback.
 pub fn parsePattern(raw: []const u8) struct { pattern: []const u8, fallback: Fallback } {
     const hash = std.mem.indexOfScalar(u8, raw, '#') orelse
         return .{ .pattern = raw, .fallback = .none };
@@ -147,7 +146,6 @@ pub fn ruleMatches(rule: Rule, tool: []const u8, args_json: []const u8) bool {
     if (std.mem.eql(u8, pat, "*")) return true;
     if (std.mem.eql(u8, pat, tool)) return true;
 
-    // Named arg: tool.arg=value
     if (std.mem.indexOfScalar(u8, pat, '=')) |eq| {
         const left = pat[0..eq];
         const want = pat[eq + 1 ..];

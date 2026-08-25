@@ -69,9 +69,9 @@ pub const File = struct {
     telemetry: Toggle = .off,
     /// When on, the model may invoke the peer tool. Manual `/peers` always works.
     peer: Toggle = .off,
-    /// Auto-commit after successful writes. Off by default.
+    /// Off by default; commits after successful writes.
     git_auto: Toggle = .off,
-    /// When git_auto is on, snapshot a dirty tree before the first AI edit.
+    /// With git_auto: snapshot a dirty tree before the first AI edit.
     git_dirty: Toggle = .on,
     workspace_dirs: []const []const u8 = &.{},
     mcp: []const McpServer = &.{},
@@ -631,12 +631,7 @@ pub fn setPref(allocator: std.mem.Allocator, io: Io, home: []const u8, key: Pref
         .thinking => merged.thinking = Toggle.fromSlice(value),
         .telemetry => merged.telemetry = Toggle.fromSlice(value),
         .peer => merged.peer = Toggle.fromSlice(value),
-        .git_auto => {
-            merged.git_auto = Toggle.fromSlice(value);
-            if (merged.git_auto == .off) {
-                // Leave dirty flag alone; process reset is via git_work.resetDirtyFlag from applySetting.
-            }
-        },
+        .git_auto => merged.git_auto = Toggle.fromSlice(value),
         .git_dirty => merged.git_dirty = Toggle.fromSlice(value),
         .statusline_place => merged.statusline_place = value,
         .statusline_fields => merged.statusline_fields = value,
