@@ -744,42 +744,35 @@ const HostWriter = struct {
         // Failing the write is what actually tears down the HTTP read. Setting
         // the flag alone just lets the model finish talking to a closed ear.
         if (self.host.cancelled()) return error.WriteFailed;
-        const start = self.body.items.len;
         // Buffered bytes first — `streamImpl` fills `w.buffer` then rebases
         // through drain; ignoring them drops SSE chunks (Zig 0.16 Writer contract).
+        // Return value is bytes consumed from `data` only (not the buffer).
         if (w.end != 0) {
-            const buffered = w.buffer[0..w.end];
-            self.body.appendSlice(self.allocator, buffered) catch return error.WriteFailed;
-            if (self.body.items.len > max_response_bytes) {
-                self.overflow = true;
-                return error.WriteFailed;
-            }
-            try self.ingest(buffered);
+            try self.take(w.buffer[0..w.end]);
             w.end = 0;
         }
-        if (data.len == 0) return self.body.items.len - start;
+        if (data.len == 0) return 0;
+        var n: usize = 0;
+        for (data[0 .. data.len - 1]) |bytes| {
+            try self.take(bytes);
+            n += bytes.len;
+        }
         const pattern = data[data.len - 1];
-        for (data) |bytes| {
-            self.body.appendSlice(self.allocator, bytes) catch return error.WriteFailed;
-            // Failing the write is what tears down the HTTP read, so this is
-            // also how a stream that never ends is stopped before it is memory.
-            if (self.body.items.len > max_response_bytes) {
-                self.overflow = true;
-                return error.WriteFailed;
-            }
-            try self.ingest(bytes);
+        var s: usize = 0;
+        while (s < splat) : (s += 1) {
+            try self.take(pattern);
         }
-        if (splat == 0) {
-            if (self.body.items.len >= pattern.len)
-                self.body.shrinkRetainingCapacity(self.body.items.len - pattern.len);
-        } else if (splat > 1) {
-            var i: usize = 0;
-            while (i < splat - 1) : (i += 1) {
-                self.body.appendSlice(self.allocator, pattern) catch return error.WriteFailed;
-                try self.ingest(pattern);
-            }
+        return n + splat * pattern.len;
+    }
+
+    fn take(self: *HostWriter, bytes: []const u8) error{WriteFailed}!void {
+        if (bytes.len == 0) return;
+        self.body.appendSlice(self.allocator, bytes) catch return error.WriteFailed;
+        if (self.body.items.len > max_response_bytes) {
+            self.overflow = true;
+            return error.WriteFailed;
         }
-        return self.body.items.len - start;
+        try self.ingest(bytes);
     }
 
     fn ingest(self: *HostWriter, chunk: []const u8) error{WriteFailed}!void {
