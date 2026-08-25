@@ -2258,8 +2258,8 @@ pub fn run(
                 sess.dirty = true;
                 continue;
             },
-            // A long prompt belongs in a real editor. Claude Code binds this
-            // to ctrl-g; the draft goes out to $EDITOR and comes back edited.
+            // A long prompt belongs in a real editor. ctrl-g (or the bound
+            // external-editor key) sends the draft to $EDITOR and loads it back.
             .external_editor => {
                 editDraftExternally(&sess) catch {};
                 sess.dirty = true;
@@ -2478,7 +2478,7 @@ pub fn run(
             }
         }
 
-        // Skills stack with @files in one prompt: Claude-style leading `/a /b
+        // Skills stack with @files in one prompt: leading `/a /b
         // task @path`, and omp-style mid-prose `/skill` tokens. After system
         // slash commands so `/help` stays a command, not a skill.
         if (try skills.expand(arena, io, home, workspace, prompt_text)) |expanded| {
@@ -2641,6 +2641,7 @@ pub fn run(
                 .prior_assistant = if (state.interrupted) state.last_reply else "",
                 .lookup = lookup,
                 .auth_json = auth_json,
+                .session_rules = state.sessionRuleSlice(),
             },
         ) catch |err| blk: {
             reply_owned = false;

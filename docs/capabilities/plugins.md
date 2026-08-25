@@ -19,7 +19,7 @@ Claude-compatible plugin marketplaces. Skills and hooks from other agent CLIs re
 
 ## Manifest
 
-A marketplace is a git repo with `.claude-plugin/marketplace.json` (Claude Code's shape) listing plugins and sources. You can also point at an `.omfx-plugin/` layout when publishing for omfx specifically.
+A marketplace is a git repo with `.claude-plugin/marketplace.json` (common marketplace layout) listing plugins and sources. You can also point at an `.omfx-plugin/` layout when publishing for omfx specifically.
 
 Suggested starting catalog:
 
@@ -33,4 +33,4 @@ Registered marketplaces are stored in `~/.omfx/settings.json` as `plugin_marketp
 
 ## Skills without a marketplace
 
-Most day-to-day skills need no plugin install. omfx already walks skill roots from Claude, Codex, Pi, and others. See [Skills](skills.md).
+Most day-to-day skills need no plugin install. omfx already walks common skill roots (`.agents/skills`, `.claude/skills`, `.codex/skills`, and others). See [Skills](skills.md).

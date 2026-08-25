@@ -40,7 +40,7 @@ Place flags before or after the command.
 | `--auto` | Permission auto mode |
 | `--prompt-permissions` | Force prompts |
 | `--resume [last\|id]` | Continue a saved session |
-| `--json` | Structured output where supported (`ask`) |
+| `--json` | JSONL events for `ask` ([schema](jsonl.md)) |
 | `--check` | With `update`: report only, do not install |
 | `--force` | With `update`: reinstall even if current |
 | `-h`, `--help` | Help |

@@ -34,6 +34,7 @@ const relay = @import("../tools/relay.zig");
 const mcp = @import("../tools/mcp.zig");
 const web_search = @import("../tools/web_search.zig");
 const undo = @import("../tools/undo.zig");
+const git_work = @import("../tools/git_work.zig");
 const jobs = @import("../tools/jobs.zig");
 const pathing = @import("../tools/pathing.zig");
 const bash = @import("../tools/bash.zig");
@@ -41,6 +42,9 @@ const isolate = @import("../tools/isolate.zig");
 const diagram = @import("../core/diagram.zig");
 const peer_router = @import("../core/peer_router.zig");
 const model_signals = @import("../providers/model_signals.zig");
+const handoff_mod = @import("../core/handoff.zig");
+const checkpoint_mod = @import("../core/checkpoint.zig");
+const spec_mod = @import("../core/spec.zig");
 
 const cmd_ctx = @import("cmd_ctx.zig");
 const model_pick = @import("model_pick.zig");
@@ -274,7 +278,13 @@ fn runCmd(ctx: *Ctx, cmd: slash.Name, rest: []const u8) !Flow {
         .undo => {
             const msg = try undo.pop(ctx.gpa, Io.Dir.cwd(), ctx.io, ctx.workspace);
             defer ctx.gpa.free(msg);
-            try emit(ctx, msg);
+            const git_note = try git_work.undoOmfxCommit(ctx.gpa, ctx.io, ctx.workspace);
+            defer ctx.gpa.free(git_note);
+            if (git_note.len == 0) {
+                try emit(ctx, msg);
+            } else {
+                try emit(ctx, try std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ msg, git_note }));
+            }
         },
         .copy => try doCopy(ctx),
         .diagram => try doDiagram(ctx),
@@ -284,7 +294,11 @@ fn runCmd(ctx: *Ctx, cmd: slash.Name, rest: []const u8) !Flow {
         .init => try doInit(ctx, rest),
         .rewind => if (rest.len == 0) return .{ .panel = .rewind } else try doRewind(ctx, rest),
         .fork => try doFork(ctx),
-        .handoff => try doHandoff(ctx),
+        .handoff => try doHandoff(ctx, rest),
+        .spec => try doSpec(ctx, rest),
+        .checkpoint => try doCheckpoint(ctx, rest, .ready),
+        .sleep => try doCheckpoint(ctx, rest, .sleeping),
+        .wake => return doWake(ctx, rest),
         .ide => try doIde(ctx, rest),
         .plugin => try emit(ctx, try plugins.run(ctx.arena, ctx.io, ctx.home, rest)),
     }
@@ -356,6 +370,7 @@ fn doPeers(ctx: *Ctx, rest: []const u8) !void {
         .plan = ctx.state.plan,
         .lookup = ctx.lookup,
         .auth_json = json,
+        .session_rules = ctx.state.sessionRuleSlice(),
     }) catch |err| blk: {
         reply_owned = false;
         break :blk try std.fmt.allocPrint(ctx.arena, "error: {s}\n", .{@errorName(err)});
@@ -501,12 +516,23 @@ fn doAllowlist(ctx: *Ctx, rest: []const u8) !void {
     var cfg = settings.load(ctx.gpa, ctx.io, ctx.home);
     defer cfg.deinit(ctx.gpa);
     if (rest.len == 0) {
-        if (cfg.rules.len == 0) {
+        if (cfg.rules.len == 0 and ctx.state.session_rule_n == 0) {
             try emit(ctx, "The allowlist is empty. Rules live in ~/.omfx/settings.json.\n");
             return;
         }
         var out: std.ArrayList(u8) = .empty;
         for (cfg.rules) |r| {
+            try out.appendSlice(ctx.arena, r.pattern);
+            if (r.fallback != .none) {
+                try out.appendSlice(ctx.arena, "#fallback=");
+                try out.appendSlice(ctx.arena, r.fallback.asSlice());
+            }
+            try out.appendSlice(ctx.arena, "  ");
+            try out.appendSlice(ctx.arena, @tagName(r.action));
+            try out.append(ctx.arena, '\n');
+        }
+        for (ctx.state.sessionRuleSlice()) |r| {
+            try out.appendSlice(ctx.arena, "session ");
             try out.appendSlice(ctx.arena, r.pattern);
             try out.appendSlice(ctx.arena, "  ");
             try out.appendSlice(ctx.arena, @tagName(r.action));
@@ -517,7 +543,7 @@ fn doAllowlist(ctx: *Ctx, rest: []const u8) !void {
     }
     var it = std.mem.tokenizeScalar(u8, rest, ' ');
     const first = it.next() orelse {
-        try emit(ctx, "Add a rule with /allowlist <pattern> allow|ask|deny, or drop one with /allowlist remove <pattern>.\n");
+        try emit(ctx, "Add a rule with /allowlist <pattern> allow|ask|deny, or /allowlist session <pattern> ask|deny.\n");
         return;
     };
     if (std.mem.eql(u8, first, "remove")) {
@@ -530,6 +556,28 @@ fn doAllowlist(ctx: *Ctx, rest: []const u8) !void {
             try emit(ctx, try std.fmt.allocPrint(ctx.arena, "removed {s}\n", .{pat}))
         else
             try emit(ctx, try std.fmt.allocPrint(ctx.arena, "not in allowlist: {s}\n", .{pat}));
+        return;
+    }
+    if (std.mem.eql(u8, first, "session")) {
+        const rest2 = std.mem.trim(u8, it.rest(), " \t");
+        const sp = std.mem.lastIndexOfScalar(u8, rest2, ' ') orelse {
+            try emit(ctx, "Session rules shrink only: /allowlist session <pattern> ask|deny.\n");
+            return;
+        };
+        const pattern = std.mem.trim(u8, rest2[0..sp], " \t");
+        const action_s = std.mem.trim(u8, rest2[sp + 1 ..], " \t");
+        const action = permissions.parseAction(action_s) orelse {
+            try emit(ctx, "Session rules shrink only: /allowlist session <pattern> ask|deny.\n");
+            return;
+        };
+        ctx.state.appendSessionRule(pattern, action) catch |err| {
+            switch (err) {
+                error.Expand => try emit(ctx, "Session rules cannot expand privilege; use /allowlist <pattern> allow.\n"),
+                error.Full => try emit(ctx, "Session allowlist is full (8 rules).\n"),
+            }
+            return;
+        };
+        try emit(ctx, try std.fmt.allocPrint(ctx.arena, "session {s} {s}\n", .{ pattern, @tagName(action) }));
         return;
     }
     const sp = std.mem.lastIndexOfScalar(u8, rest, ' ') orelse {
@@ -683,14 +731,20 @@ pub fn applySetting(ctx: *Ctx, pair: []const u8) !bool {
     if (std.mem.eql(u8, key, "ide")) ctx.state.ide = if (std.mem.eql(u8, value, "auto")) "" else try ctx.arena.dupe(u8, value);
     if (std.mem.eql(u8, key, "bash_timeout")) deadline.setDefaultSecs(std.fmt.parseInt(u32, value, 10) catch 0);
     if (std.mem.eql(u8, key, "effort")) ctx.state.effort = if (std.mem.eql(u8, value, auto_effort)) "" else try ctx.arena.dupe(u8, value);
+    if (std.mem.eql(u8, key, "git_auto") and std.mem.eql(u8, value, "on")) {
+        git_work.resetDirtyFlag();
+    }
     return true;
 }
 
-const settings_usage = "usage: /settings <key>=<value>\n  sound thinking telemetry peer statusline sandbox mode composer editor ide\n  review cdp_port effort bash_timeout keep_sessions max_peer_depth\n";
+const settings_usage = "usage: /settings <key>=<value>\n  sound thinking telemetry peer git_auto git_dirty statusline sandbox mode composer editor ide\n  review cdp_port effort bash_timeout keep_sessions max_peer_depth\n";
 
 fn settingNote(allocator: std.mem.Allocator, key: []const u8, value: []const u8) ![]u8 {
     if (std.mem.eql(u8, key, "peer")) {
         return std.fmt.allocPrint(allocator, "Auto peers {s}.\n", .{value});
+    }
+    if (std.mem.eql(u8, key, "git_auto")) {
+        return std.fmt.allocPrint(allocator, "Git auto-commit {s}.\n", .{value});
     }
     return std.fmt.allocPrint(allocator, "{s}={s}\n", .{ key, value });
 }
@@ -1313,16 +1367,8 @@ fn doFork(ctx: *Ctx) !void {
     }
 }
 
-fn doHandoff(ctx: *Ctx) !void {
-    const brief = try std.fmt.allocPrint(
-        ctx.arena,
-        "Handoff. Continue this task.\nGoal: {s}\nLast tool: {s}\nLast reply:\n{s}\nRead .omfx/recall if cites appear. Do not replay dropped turns.\n",
-        .{
-            if (ctx.state.last_goal.len == 0) "(none)" else ctx.state.last_goal,
-            if (ctx.state.last_tool.len == 0) "(none)" else ctx.state.last_tool,
-            if (ctx.state.last_reply.len > 800) ctx.state.last_reply[0..800] else ctx.state.last_reply,
-        },
-    );
+fn doHandoff(ctx: *Ctx, rest: []const u8) !void {
+    const goal = if (rest.len > 0) rest else ctx.state.last_goal;
     var n = ctx.state.fork_n;
     var id_buf: [24]u8 = undefined;
     const picked = blk: {
@@ -1337,8 +1383,26 @@ fn doHandoff(ctx: *Ctx) !void {
     };
     ctx.state.fork_n = n;
     const id = try ctx.arena.dupe(u8, picked);
+
+    const built = handoff_mod.build(ctx.gpa, ctx.io, ctx.workspace, id, .{
+        .goal = goal,
+        .last_tool = ctx.state.last_tool,
+        .last_reply = ctx.state.last_reply,
+    }) catch |err| {
+        try emit(ctx, try std.fmt.allocPrint(ctx.arena, "handoff failed: {s}\n", .{@errorName(err)}));
+        return;
+    };
+    defer ctx.gpa.free(built.stub);
+    defer ctx.gpa.free(built.packet);
+    defer ctx.gpa.free(built.rel_path);
+
+    handoff_mod.writePacket(ctx.gpa, ctx.io, ctx.workspace, built.rel_path, built.packet) catch |err| {
+        try emit(ctx, try std.fmt.allocPrint(ctx.arena, "handoff packet: {s}\n", .{@errorName(err)}));
+        return;
+    };
+
     const dest = try session.sessionPath(ctx.arena, ctx.home, session.resolveId(id));
-    const line = try session.encode(ctx.arena, .user, brief);
+    const line = try session.encode(ctx.arena, .user, built.stub);
     if (std.fs.path.dirname(dest)) |dir| ensureDir(ctx.io, dir);
     var file = Io.Dir.cwd().createFile(ctx.io, dest, .{ .truncate = true }) catch |err| {
         try emit(ctx, try std.fmt.allocPrint(ctx.arena, "handoff failed: {s}\n", .{@errorName(err)}));
@@ -1354,7 +1418,134 @@ fn doHandoff(ctx: *Ctx) !void {
     w.interface.flush() catch |err| {
         log.warn("handoff flush: {s}", .{@errorName(err)});
     };
-    try emit(ctx, try std.fmt.allocPrint(ctx.arena, "handoff {s}\n/resume {s}\n", .{ id, id }));
+    try emit(ctx, try std.fmt.allocPrint(ctx.arena, "handoff {s}\npacket {s}\n/resume {s}\n", .{ id, built.rel_path, id }));
+}
+
+fn doSpec(ctx: *Ctx, rest: []const u8) !void {
+    const trimmed = std.mem.trim(u8, rest, " \t");
+    if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "list")) {
+        const msg = try spec_mod.list(ctx.gpa, ctx.io, ctx.workspace);
+        defer ctx.gpa.free(msg);
+        try emit(ctx, msg);
+        return;
+    }
+    var it = std.mem.tokenizeScalar(u8, trimmed, ' ');
+    const first = it.next() orelse {
+        try emit(ctx, "usage: /spec [list|new <name>|<name>|next|run]\n");
+        return;
+    };
+    if (std.mem.eql(u8, first, "new")) {
+        const name = it.next() orelse {
+            try emit(ctx, "usage: /spec new <name>\n");
+            return;
+        };
+        const msg = spec_mod.create(ctx.gpa, ctx.io, ctx.workspace, name) catch |err| {
+            try emit(ctx, try std.fmt.allocPrint(ctx.arena, "spec new: {s}\n", .{@errorName(err)}));
+            return;
+        };
+        defer ctx.gpa.free(msg);
+        try emit(ctx, msg);
+        return;
+    }
+    if (std.mem.eql(u8, first, "next")) {
+        const msg = try spec_mod.advance(ctx.gpa, ctx.io, ctx.workspace);
+        defer ctx.gpa.free(msg);
+        try emit(ctx, msg);
+        return;
+    }
+    if (std.mem.eql(u8, first, "run")) {
+        const name = it.next();
+        if (name) |n| {
+            const msg = try spec_mod.resumeNamed(ctx.gpa, ctx.io, ctx.workspace, n);
+            defer ctx.gpa.free(msg);
+            try emit(ctx, msg);
+        }
+        try setActiveExecute(ctx);
+        try emit(ctx, "spec run: phase=execute. Work the open tasks; read .omfx/specs/<name>/ as needed.\n");
+        return;
+    }
+    const msg = try spec_mod.resumeNamed(ctx.gpa, ctx.io, ctx.workspace, first);
+    defer ctx.gpa.free(msg);
+    try emit(ctx, msg);
+}
+
+fn setActiveExecute(ctx: *Ctx) !void {
+    const cur = spec_mod.loadActive(ctx.gpa, ctx.io, ctx.workspace) orelse return;
+    defer ctx.gpa.free(cur.name);
+    try spec_mod.setActive(ctx.gpa, ctx.io, ctx.workspace, .{ .name = cur.name, .phase = .execute });
+}
+
+fn doCheckpoint(ctx: *Ctx, rest: []const u8, status: checkpoint_mod.Status) !void {
+    const note = std.mem.trim(u8, rest, " \t");
+    const git_sha = blk: {
+        const p = try std.fs.path.join(ctx.arena, &.{ ctx.workspace, ".omfx", "git_last_sha" });
+        const raw = Io.Dir.cwd().readFileAlloc(ctx.io, p, ctx.arena, .limited(80)) catch break :blk "";
+        break :blk std.mem.trim(u8, raw, " \t\r\n");
+    };
+    const built = checkpoint_mod.build(ctx.gpa, ctx.io, ctx.workspace, status, .{
+        .goal = ctx.state.last_goal,
+        .note = note,
+        .last_tool = ctx.state.last_tool,
+        .last_reply = ctx.state.last_reply,
+        .mode = ctx.state.mode.asSlice(),
+        .plan = ctx.state.plan.asSlice(),
+        .git_sha = git_sha,
+    }) catch |err| {
+        try emit(ctx, try std.fmt.allocPrint(ctx.arena, "checkpoint failed: {s}\n", .{@errorName(err)}));
+        return;
+    };
+    defer ctx.gpa.free(built.id);
+    defer ctx.gpa.free(built.stub);
+    defer ctx.gpa.free(built.packet);
+    defer ctx.gpa.free(built.meta);
+    defer ctx.gpa.free(built.rel_dir);
+
+    checkpoint_mod.writeRun(ctx.gpa, ctx.io, ctx.workspace, built) catch |err| {
+        try emit(ctx, try std.fmt.allocPrint(ctx.arena, "checkpoint write: {s}\n", .{@errorName(err)}));
+        return;
+    };
+
+    if (status == .sleeping) {
+        try emit(ctx, try std.fmt.allocPrint(
+            ctx.arena,
+            "sleep {s}\n{s}/\nparked (zero compute). /wake {s}\n",
+            .{ built.id, built.rel_dir, built.id },
+        ));
+    } else {
+        try emit(ctx, try std.fmt.allocPrint(
+            ctx.arena,
+            "checkpoint {s}\n{s}/\n",
+            .{ built.id, built.rel_dir },
+        ));
+    }
+}
+
+fn doWake(ctx: *Ctx, rest: []const u8) !Flow {
+    const trimmed = std.mem.trim(u8, rest, " \t");
+    if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "list")) {
+        const msg = try checkpoint_mod.list(ctx.gpa, ctx.io, ctx.workspace);
+        defer ctx.gpa.free(msg);
+        try emit(ctx, msg);
+        return .handled;
+    }
+    const id = if (std.mem.eql(u8, trimmed, "last"))
+        (checkpoint_mod.loadActiveId(ctx.arena, ctx.io, ctx.workspace) orelse {
+            try emit(ctx, "No active run. /wake list\n");
+            return .handled;
+        })
+    else
+        trimmed;
+
+    const stub = checkpoint_mod.wakeStub(ctx.gpa, ctx.io, ctx.workspace, id) catch |err| {
+        try emit(ctx, try std.fmt.allocPrint(ctx.arena, "wake failed: {s}\n", .{@errorName(err)}));
+        return .handled;
+    };
+    defer ctx.gpa.free(stub);
+    const owned = try ctx.arena.dupe(u8, stub);
+    ctx.state.last_goal = if (owned.len > 80) owned[0..80] else owned;
+    try emit(ctx, try std.fmt.allocPrint(ctx.arena, "wake {s}\n", .{id}));
+    // Thin stub becomes the next user turn — no transcript replay into the model.
+    return .{ .retry = owned };
 }
 
 fn doIde(ctx: *Ctx, rest: []const u8) !void {
@@ -1552,6 +1743,10 @@ test "bench: slash commands dispatch" {
         "/compact",
         "/fork",
         "/handoff",
+        "/spec",
+        "/checkpoint",
+        "/sleep",
+        "/wake list",
         "/login",
         "/web",
         "/browser",

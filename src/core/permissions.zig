@@ -76,9 +76,33 @@ pub fn isReversibleBash(command: []const u8) bool {
 
 pub const DslAction = enum { allow, ask, deny };
 
+/// Fallback when a deny rule matches (arXiv:2504.11703).
+pub const Fallback = enum {
+    none,
+    ask,
+    deny,
+
+    pub fn fromSlice(s: []const u8) ?Fallback {
+        if (std.mem.eql(u8, s, "ask")) return .ask;
+        if (std.mem.eql(u8, s, "deny")) return .deny;
+        if (std.mem.eql(u8, s, "none") or s.len == 0) return .none;
+        return null;
+    }
+
+    pub fn asSlice(self: Fallback) []const u8 {
+        return switch (self) {
+            .none => "none",
+            .ask => "ask",
+            .deny => "deny",
+        };
+    }
+};
+
 pub const Rule = struct {
+    /// Match text without `#fallback=…` suffix.
     pattern: []const u8,
     action: DslAction,
+    fallback: Fallback = .none,
 };
 
 pub fn parseAction(s: []const u8) ?DslAction {
@@ -88,6 +112,29 @@ pub fn parseAction(s: []const u8) ?DslAction {
     return null;
 }
 
+/// Split `pattern#fallback=ask` into bare pattern + fallback.
+pub fn parsePattern(raw: []const u8) struct { pattern: []const u8, fallback: Fallback } {
+    const hash = std.mem.indexOfScalar(u8, raw, '#') orelse
+        return .{ .pattern = raw, .fallback = .none };
+    const head = std.mem.trim(u8, raw[0..hash], " \t");
+    const tail = std.mem.trim(u8, raw[hash + 1 ..], " \t");
+    if (std.mem.startsWith(u8, tail, "fallback=")) {
+        const v = std.mem.trim(u8, tail["fallback=".len..], " \t");
+        return .{ .pattern = head, .fallback = Fallback.fromSlice(v) orelse .none };
+    }
+    return .{ .pattern = raw, .fallback = .none };
+}
+
+/// Encode pattern with optional fallback for settings.json keys.
+pub fn formatPattern(buf: []u8, pattern: []const u8, fallback: Fallback) []const u8 {
+    if (fallback == .none) {
+        if (pattern.len > buf.len) return pattern;
+        @memcpy(buf[0..pattern.len], pattern);
+        return buf[0..pattern.len];
+    }
+    return std.fmt.bufPrint(buf, "{s}#fallback={s}", .{ pattern, fallback.asSlice() }) catch pattern;
+}
+
 fn globPrefix(pat: []const u8, s: []const u8) bool {
     if (std.mem.eql(u8, pat, "*")) return true;
     if (std.mem.endsWith(u8, pat, "*")) return std.mem.startsWith(u8, s, pat[0 .. pat.len - 1]);
@@ -95,11 +142,31 @@ fn globPrefix(pat: []const u8, s: []const u8) bool {
 }
 
 pub fn ruleMatches(rule: Rule, tool: []const u8, args_json: []const u8) bool {
-    if (std.mem.eql(u8, rule.pattern, "*")) return true;
-    if (std.mem.eql(u8, rule.pattern, tool)) return true;
-    const colon = std.mem.indexOfScalar(u8, rule.pattern, ':') orelse return false;
-    if (!std.mem.eql(u8, rule.pattern[0..colon], tool)) return false;
-    const rest = rule.pattern[colon + 1 ..];
+    const parsed = parsePattern(rule.pattern);
+    const pat = parsed.pattern;
+    if (std.mem.eql(u8, pat, "*")) return true;
+    if (std.mem.eql(u8, pat, tool)) return true;
+
+    // Named arg: tool.arg=value
+    if (std.mem.indexOfScalar(u8, pat, '=')) |eq| {
+        const left = pat[0..eq];
+        const want = pat[eq + 1 ..];
+        const dot = std.mem.indexOfScalar(u8, left, '.') orelse return false;
+        if (!std.mem.eql(u8, left[0..dot], tool)) return false;
+        const arg_name = left[dot + 1 ..];
+        if (arg_name.len == 0) return false;
+        var val_buf: [max_command]u8 = undefined;
+        const got = sse.argStringInto(&val_buf, args_json, arg_name) orelse return false;
+        if (!globPrefix(want, got)) return false;
+        if (rule.action == .allow and want.len != 0 and std.mem.endsWith(u8, want, "*")) {
+            return staticWords(got[want.len - 1 ..]);
+        }
+        return true;
+    }
+
+    const colon = std.mem.indexOfScalar(u8, pat, ':') orelse return false;
+    if (!std.mem.eql(u8, pat[0..colon], tool)) return false;
+    const rest = pat[colon + 1 ..];
     var cmd_buf: [max_command]u8 = undefined;
     const command = shellCommand(&cmd_buf, args_json) orelse
         sse.argStringInto(&cmd_buf, args_json, "path") orelse "";
@@ -125,13 +192,47 @@ fn staticWords(tail: []const u8) bool {
     return true;
 }
 
+pub const Match = struct {
+    action: DslAction,
+    fallback: Fallback,
+};
+
 /// Last matching wildcard wins. Empty rules fall through to mode.
+/// `session` is applied after `rules` so ephemeral shrinks win.
 pub fn matchLast(rules: []const Rule, tool: []const u8, args_json: []const u8) ?DslAction {
-    var found: ?DslAction = null;
+    const m = matchLastFull(rules, &.{}, tool, args_json) orelse return null;
+    return m.action;
+}
+
+pub fn matchLastFull(
+    rules: []const Rule,
+    session: []const Rule,
+    tool: []const u8,
+    args_json: []const u8,
+) ?Match {
+    var found: ?Match = null;
     for (rules) |r| {
-        if (ruleMatches(r, tool, args_json)) found = r.action;
+        if (!ruleMatches(r, tool, args_json)) continue;
+        const fb = if (r.fallback != .none) r.fallback else parsePattern(r.pattern).fallback;
+        found = .{ .action = r.action, .fallback = fb };
+    }
+    for (session) |r| {
+        if (!ruleMatches(r, tool, args_json)) continue;
+        const fb = if (r.fallback != .none) r.fallback else parsePattern(r.pattern).fallback;
+        found = .{ .action = r.action, .fallback = fb };
     }
     return found;
+}
+
+fn applyMatch(m: Match, has_tty: bool) Decision {
+    return switch (m.action) {
+        .allow => .allow,
+        .ask => if (has_tty) .prompt else .need_tty,
+        .deny => switch (m.fallback) {
+            .ask => if (has_tty) .prompt else .need_tty,
+            .deny, .none => .deny,
+        },
+    };
 }
 
 pub const Decision = enum {
@@ -155,12 +256,19 @@ pub fn admitWithDsl(
     has_tty: bool,
     rules: []const Rule,
 ) Decision {
-    if (matchLast(rules, tool, args_json)) |a| {
-        return switch (a) {
-            .allow => .allow,
-            .deny => .deny,
-            .ask => if (has_tty) .prompt else .need_tty,
-        };
+    return admitWithSession(mode, tool, args_json, has_tty, rules, &.{});
+}
+
+pub fn admitWithSession(
+    mode: config.PermissionMode,
+    tool: []const u8,
+    args_json: []const u8,
+    has_tty: bool,
+    rules: []const Rule,
+    session: []const Rule,
+) Decision {
+    if (matchLastFull(rules, session, tool, args_json)) |m| {
+        return applyMatch(m, has_tty);
     }
     if (!isSensitive(tool)) return .allow;
     return switch (mode) {
@@ -315,4 +423,30 @@ test "a wildcard allow does not hand over the rest of the shell" {
     // A deny may only ever match more, so it keeps the loose prefix.
     const stop = Rule{ .pattern = "bash:git *", .action = .deny };
     try std.testing.expect(ruleMatches(stop, "bash", "{\"command\":\"git log; rm -rf ~\"}"));
+}
+
+test "named arg DSL matches path and command" {
+    const r = Rule{ .pattern = "write.path=src/*", .action = .allow };
+    try std.testing.expect(ruleMatches(r, "write", "{\"path\":\"src/a.zig\"}"));
+    try std.testing.expect(!ruleMatches(r, "write", "{\"path\":\"docs/a.md\"}"));
+    const b = Rule{ .pattern = "bash.command=git status", .action = .deny };
+    try std.testing.expect(ruleMatches(b, "bash", "{\"command\":\"git status\"}"));
+}
+
+test "deny fallback=ask prompts instead of hard deny" {
+    const rules = [_]Rule{.{ .pattern = "bash", .action = .deny, .fallback = .ask }};
+    try std.testing.expectEqual(Decision.prompt, admitWithDsl(.yolo, "bash", "{\"command\":\"rm x\"}", true, &rules));
+    try std.testing.expectEqual(Decision.need_tty, admitWithDsl(.yolo, "bash", "{\"command\":\"rm x\"}", false, &rules));
+}
+
+test "session rules override settings last-match" {
+    const base = [_]Rule{.{ .pattern = "write", .action = .allow }};
+    const sess = [_]Rule{.{ .pattern = "write", .action = .deny }};
+    try std.testing.expectEqual(Decision.deny, admitWithSession(.yolo, "write", "{}", false, &base, &sess));
+}
+
+test "parsePattern strips fallback suffix" {
+    const p = parsePattern("bash:rm *#fallback=ask");
+    try std.testing.expectEqualStrings("bash:rm *", p.pattern);
+    try std.testing.expectEqual(Fallback.ask, p.fallback);
 }

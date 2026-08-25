@@ -25,12 +25,20 @@ Bare `/resume` opens the sessions panel. Outside the TUI: `omfx session resume l
 
 - `/rewind` — pick a prior prompt; `/rewind <n>` steps back
 - `/rewind <n> from` / `/rewind <n> upto` — compress one side instead of discarding
-- `/undo` — undo the last tracked file operation (not the same as rewind)
+- `/undo` — undo the last tracked file operation; if `git_auto` recorded an omfx commit at HEAD, also resets that commit (SHA-gated)
 
 ## Fork and handoff
 
 - `/fork` — copy the session to a new id; keep working here
-- `/handoff` — start a new session with a brief of the current goal
+- `/handoff [goal]` — new session from a **deterministic packet** (board paths, recall ids, open todos). No last-reply dump. Reviewable at `.omfx/handoff/<id>.md`; the new thread starts with a thin stub that points at the packet.
+
+## Specs
+
+`/spec` manages `.omfx/specs/<name>/{requirements,design,tasks}.md`. Only the active task pointer enters orientation — see [Specs](specs.md).
+
+## Runs (checkpoint / sleep)
+
+`/checkpoint`, `/sleep`, and `/wake` park and resume long work under `.omfx/runs/` without replaying the transcript — see [Runs](runs.md).
 
 ## Compact and recall
 

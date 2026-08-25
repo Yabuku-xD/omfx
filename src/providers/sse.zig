@@ -36,10 +36,9 @@ pub const Usage = struct {
 
     /// Everything the window is holding.
     ///
-    /// Output is included deliberately. Claude Code's own percentage leaves it
-    /// out while its limit check includes it, which is why that display can
-    /// read 20% on a session that has already been refused
-    /// (anthropics/claude-code#28167).
+    /// Output is included deliberately. Some UIs omit output from the displayed
+    /// percentage while the refusal check includes it — that mismatch can show
+    /// ~20% on a session that has already been refused.
     pub fn total(self: Usage) u32 {
         return self.input +| self.output +| self.cache_read +| self.cache_write;
     }

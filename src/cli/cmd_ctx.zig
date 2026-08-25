@@ -14,6 +14,7 @@ const catalog = @import("../providers/catalog.zig");
 const auth = @import("../providers/auth.zig");
 const registry = @import("../providers/registry.zig");
 const undo = @import("../tools/undo.zig");
+const permissions = @import("../core/permissions.zig");
 
 pub const Flow = union(enum) {
     handled,
@@ -123,6 +124,32 @@ pub const State = struct {
     marks: [max_marks]Mark = [_]Mark{.{}} ** max_marks,
     marks_n: usize = 0,
     fork_n: usize = 0,
+    /// Ephemeral session rules (ask/deny only). Never enter the system prompt.
+    session_rules: [max_session_rules]permissions.Rule = undefined,
+    session_rule_n: usize = 0,
+    session_pats: [max_session_rules][96]u8 = undefined,
+
+    pub const max_session_rules: usize = 8;
+
+    pub fn sessionRuleSlice(self: *const State) []const permissions.Rule {
+        return self.session_rules[0..self.session_rule_n];
+    }
+
+    /// Session rules may only shrink privilege (ask|deny). Allow must be persistent.
+    pub fn appendSessionRule(self: *State, pattern: []const u8, action: permissions.DslAction) error{Full, Expand}!void {
+        if (action == .allow) return error.Expand;
+        if (self.session_rule_n >= max_session_rules) return error.Full;
+        const parsed = permissions.parsePattern(pattern);
+        if (parsed.pattern.len == 0 or parsed.pattern.len > self.session_pats[0].len) return error.Full;
+        const i = self.session_rule_n;
+        @memcpy(self.session_pats[i][0..parsed.pattern.len], parsed.pattern);
+        self.session_rules[i] = .{
+            .pattern = self.session_pats[i][0..parsed.pattern.len],
+            .action = action,
+            .fallback = parsed.fallback,
+        };
+        self.session_rule_n += 1;
+    }
 
     pub fn deinit(self: *State, gpa: std.mem.Allocator) void {
         self.pending.deinit(gpa);

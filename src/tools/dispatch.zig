@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const fs = @import("fs.zig");
 const undo = @import("undo.zig");
+const git_work = @import("git_work.zig");
 const bash = @import("bash.zig");
 const search = @import("search.zig");
 const web = @import("web.zig");
@@ -106,14 +107,19 @@ pub fn run(
         .write => blk: {
             const path = args.str("path") orelse return error.MissingPath;
             const contents = args.str("contents") orelse "";
+            git_work.beforeMutate(allocator, io, workspace, home);
             undo.recordWrite(allocator, dir, io, workspace, path);
             try fs.write(dir, io, allocator, workspace, path, contents);
+            git_work.afterMutate(allocator, io, workspace, home, path);
             break :blk try std.fmt.allocPrint(allocator, "wrote {s}", .{path});
         },
         .edit => blk: {
             const path = args.str("path") orelse return error.MissingPath;
+            git_work.beforeMutate(allocator, io, workspace, home);
             if (std.mem.indexOf(u8, args_json, "\"edits\"") != null) {
-                break :blk try editsFromJson(allocator, dir, io, workspace, path, args_json);
+                const out = try editsFromJson(allocator, dir, io, workspace, path, args_json);
+                git_work.afterMutate(allocator, io, workspace, home, path);
+                break :blk out;
             }
             undo.recordWrite(allocator, dir, io, workspace, path);
             if (args.str("symbol")) |symbol| {
@@ -121,11 +127,13 @@ pub fn run(
                 const action = symbols.parseAction(args.str("action") orelse "replace") orelse return error.MissingOld;
                 const text = args.str("text") orelse args.str("new_string") orelse "";
                 try symbols.splice(dir, io, allocator, workspace, path, symbol, action, text);
+                git_work.afterMutate(allocator, io, workspace, home, path);
                 break :blk try std.fmt.allocPrint(allocator, "edited {s} ({s} {s})", .{ path, @tagName(action), symbol });
             }
             const old = args.str("old_string") orelse return error.MissingOld;
             const new = args.str("new_string") orelse "";
             try fs.edit(dir, io, allocator, workspace, path, old, new);
+            git_work.afterMutate(allocator, io, workspace, home, path);
             break :blk try std.fmt.allocPrint(allocator, "edited {s}", .{path});
         },
         .bash => blk: {
@@ -168,16 +176,20 @@ pub fn run(
             const path = args.str("path") orelse return error.MissingPath;
             if (path.len == 0) return error.MissingPath;
             try pathing.assertInside(workspace, path);
+            git_work.beforeMutate(allocator, io, workspace, home);
             undo.recordDelete(allocator, dir, io, workspace, path);
             dir.deleteFile(io, path) catch try dir.deleteDir(io, path);
+            git_work.afterMutate(allocator, io, workspace, home, path);
             break :blk try std.fmt.allocPrint(allocator, "deleted {s}", .{path});
         },
         .rename => blk: {
             const from = args.str("from") orelse args.str("path") orelse return error.MissingPath;
             const to = args.str("to") orelse return error.MissingPath;
             if (from.len == 0 or to.len == 0) return error.MissingPath;
+            git_work.beforeMutate(allocator, io, workspace, home);
             undo.recordRename(allocator, dir, io, workspace, from, to);
             try search.rename(dir, io, workspace, from, to);
+            git_work.afterMutate(allocator, io, workspace, home, to);
             break :blk try std.fmt.allocPrint(allocator, "renamed {s} -> {s}", .{ from, to });
         },
         .list => fs.list(dir, io, allocator, workspace, args.str("path") orelse "."),
@@ -185,8 +197,10 @@ pub fn run(
             const from = args.str("from") orelse args.str("path") orelse return error.MissingPath;
             const to = args.str("to") orelse return error.MissingPath;
             if (from.len == 0 or to.len == 0) return error.MissingPath;
+            git_work.beforeMutate(allocator, io, workspace, home);
             undo.recordWrite(allocator, dir, io, workspace, to);
             try fs.copy(dir, io, workspace, from, to);
+            git_work.afterMutate(allocator, io, workspace, home, to);
             break :blk try std.fmt.allocPrint(allocator, "copied {s} -> {s}", .{ from, to });
         },
         .mkdir => blk: {
@@ -256,7 +270,10 @@ pub fn run(
         .patch => blk: {
             const spec = args.str("patch") orelse args.str("spec") orelse return error.EmptyPatch;
             const patch = @import("patch.zig");
-            break :blk try patch.apply(allocator, dir, io, workspace, spec);
+            git_work.beforeMutate(allocator, io, workspace, home);
+            const out = try patch.apply(allocator, dir, io, workspace, spec);
+            git_work.afterMutate(allocator, io, workspace, home, "patch");
+            break :blk out;
         },
         .mcp => blk: {
             const action = args.str("action") orelse "list";

@@ -22,7 +22,7 @@ Other CLIs converge on the same idea: name several skills in one prompt, keep th
 | --- | --- | --- |
 | Leading stack | `/deslop /tdd fix @src/main.zig` | Consecutive known skills at the start expand; everything after is the shared task, including `@paths` |
 | Mid-prompt | `please /deslop this @note.txt` | Each `/skill` in prose expands in place; `@files` still inject |
-| Codex-style | `$skill` + `@file` | Multiple skill mentions mean use them all; files are anchors |
+| `$skill` + `@file` | `$deslop @note.txt` | Multiple skill mentions mean use them all; files are anchors |
 
 omfx follows the leading stack and the mid-prompt form. Expansion stops at the first token that is not a known skill. Cap is eight skills per prompt. Skill bodies stay on disk (`Read …/SKILL.md and follow it`) so context stays progressive.
 

@@ -187,8 +187,16 @@ pub fn main(init: std.process.Init) !void {
                 omfx.live.json(stdout, &cancel)
             else
                 omfx.live.stream(stdout, &cancel, gpa, omfx.tui.ThinkView.init(omfx.settings.thinkingOn(cfg)), paint);
+            if (parsed.json) {
+                var sess_buf: [320]u8 = undefined;
+                const sess_line = std.fmt.bufPrint(&sess_buf, "provider={s} model={s}", .{
+                    if (endpoint.id.len > 0) endpoint.id else endpoint.vendor.asSlice(),
+                    endpoint.model,
+                }) catch "session";
+                omfx.live.emitJson(stdout, "session", sess_line);
+            }
             const peer_depth = cfg.max_peer_depth;
-            const reply = try omfx.agent.chatOnce(
+            const reply = omfx.agent.chatOnce(
                 gpa,
                 io,
                 Io.Dir.cwd(),
@@ -206,7 +214,13 @@ pub fn main(init: std.process.Init) !void {
                     .lookup = lookup,
                     .auth_json = auth_json,
                 },
-            );
+            ) catch |err| {
+                if (parsed.json) {
+                    omfx.live.emitJson(stdout, "error", @errorName(err));
+                    try stdout.flush();
+                }
+                return err;
+            };
             defer gpa.free(reply);
             live.closeThink();
             if (!parsed.json) {

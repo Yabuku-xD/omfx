@@ -69,6 +69,10 @@ pub const File = struct {
     telemetry: Toggle = .off,
     /// When on, the model may invoke the peer tool. Manual `/peers` always works.
     peer: Toggle = .off,
+    /// Auto-commit after successful writes. Off by default.
+    git_auto: Toggle = .off,
+    /// When git_auto is on, snapshot a dirty tree before the first AI edit.
+    git_dirty: Toggle = .on,
     workspace_dirs: []const []const u8 = &.{},
     mcp: []const McpServer = &.{},
     max_peer_depth: u8 = 1,
@@ -189,6 +193,12 @@ pub fn parse(allocator: std.mem.Allocator, json: []const u8) !File {
         .thinking = Toggle.fromSlice(extractString(raw, "thinking")),
         .telemetry = Toggle.fromSlice(extractString(raw, "telemetry")),
         .peer = Toggle.fromSlice(extractString(raw, "peer")),
+        .git_auto = Toggle.fromSlice(extractString(raw, "git_auto")),
+        .git_dirty = blk: {
+            const s = extractString(raw, "git_dirty");
+            if (s.len == 0) break :blk Toggle.on;
+            break :blk Toggle.fromSlice(s);
+        },
         .workspace_dirs = workspace_dirs,
         .plugin_marketplaces = plugin_marketplaces,
         .mcp = mcp,
@@ -299,7 +309,8 @@ fn extractPermRules(json: []const u8, out: *[max_rules]permissions.Rule) usize {
         const action_s = inner[q3 + 1 .. q4];
         i = q4 + 1;
         const action = permissions.parseAction(action_s) orelse continue;
-        out[n] = .{ .pattern = pattern, .action = action };
+        const parsed = permissions.parsePattern(pattern);
+        out[n] = .{ .pattern = parsed.pattern, .action = action, .fallback = parsed.fallback };
         n += 1;
     }
     return n;
@@ -348,7 +359,9 @@ pub fn encodeFile(allocator: std.mem.Allocator, file: File) ![]u8 {
         try w.writeAll(",\n  \"permissions\": {");
         for (file.rules, 0..) |r, i| {
             if (i != 0) try w.writeAll(",");
-            try w.print("\"{s}\":\"{s}\"", .{ r.pattern, @tagName(r.action) });
+            var key_buf: [256]u8 = undefined;
+            const key = permissions.formatPattern(&key_buf, r.pattern, r.fallback);
+            try w.print("\"{s}\":\"{s}\"", .{ key, @tagName(r.action) });
         }
         try w.writeAll("}");
     }
@@ -377,6 +390,8 @@ pub fn encodeFile(allocator: std.mem.Allocator, file: File) ![]u8 {
     if (file.thinking == .on) try w.writeAll(",\n  \"thinking\": \"on\"");
     if (file.telemetry == .on) try w.writeAll(",\n  \"telemetry\": \"on\"");
     if (file.peer == .on) try w.writeAll(",\n  \"peer\": \"on\"");
+    if (file.git_auto == .on) try w.writeAll(",\n  \"git_auto\": \"on\"");
+    if (file.git_dirty == .off) try w.writeAll(",\n  \"git_dirty\": \"off\"");
     if (file.workspace_dirs.len > 0) {
         try w.writeAll(",\n  \"workspace_dirs\": ");
         try writeQuotedList(w, file.workspace_dirs);
@@ -475,6 +490,8 @@ fn copyMeta(file: File, web: Web) File {
         .thinking = file.thinking,
         .telemetry = file.telemetry,
         .peer = file.peer,
+        .git_auto = file.git_auto,
+        .git_dirty = file.git_dirty,
         .workspace_dirs = file.workspace_dirs,
         .mcp = file.mcp,
         .max_peer_depth = file.max_peer_depth,
@@ -503,7 +520,10 @@ pub fn appendRule(
     var store: [max_rules]permissions.Rule = undefined;
     const n = @min(file.rules.len, max_rules - 1);
     if (file.rules.len > 0) @memcpy(store[0..n], file.rules[0..n]);
-    store[n] = .{ .pattern = pattern, .action = action };
+    store[n] = blk: {
+        const parsed = permissions.parsePattern(pattern);
+        break :blk .{ .pattern = parsed.pattern, .action = action, .fallback = parsed.fallback };
+    };
     var merged = copyMeta(file, file.web);
     merged.rules = store[0 .. n + 1];
     const body = try encodeFile(allocator, merged);
@@ -558,6 +578,8 @@ pub const Pref = enum {
     thinking,
     telemetry,
     peer,
+    git_auto,
+    git_dirty,
     statusline_place,
     statusline_fields,
 
@@ -576,6 +598,14 @@ pub fn telemetryOn(file: File) bool {
 
 pub fn peerAutoOn(file: File) bool {
     return file.peer == .on;
+}
+
+pub fn gitAutoOn(file: File) bool {
+    return file.git_auto == .on;
+}
+
+pub fn gitDirtyOn(file: File) bool {
+    return file.git_dirty == .on;
 }
 
 /// Unset follows the host: a real player exists on macOS, so the chime is on
@@ -601,6 +631,13 @@ pub fn setPref(allocator: std.mem.Allocator, io: Io, home: []const u8, key: Pref
         .thinking => merged.thinking = Toggle.fromSlice(value),
         .telemetry => merged.telemetry = Toggle.fromSlice(value),
         .peer => merged.peer = Toggle.fromSlice(value),
+        .git_auto => {
+            merged.git_auto = Toggle.fromSlice(value);
+            if (merged.git_auto == .off) {
+                // Leave dirty flag alone; process reset is via git_work.resetDirtyFlag from applySetting.
+            }
+        },
+        .git_dirty => merged.git_dirty = Toggle.fromSlice(value),
         .statusline_place => merged.statusline_place = value,
         .statusline_fields => merged.statusline_fields = value,
     }

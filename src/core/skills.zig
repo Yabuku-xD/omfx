@@ -64,14 +64,11 @@ pub const roots = [_][]const u8{
 /// discovered so the common ones are found on the first try and so this file
 /// is the place to read the answer.
 ///
-/// Verified 2026-08-23:
-///   .agents/skills          the cross-tool convention. Codex documents
-///                           `$HOME/.agents/skills` and OpenCode calls it
-///                           "global agent-compatible"
-///   .claude/skills          Claude Code; OpenCode reads it too, as
-///                           "global Claude-compatible"
-///   .config/opencode/skills OpenCode's own global path
-///   .codex/skills           Codex CLI
+/// Verified 2026-08-23 (directory names are on-disk compatibility roots):
+///   .agents/skills          cross-tool convention (`$HOME/.agents/skills`)
+///   .claude/skills          widely used home root ("global agent-compatible")
+///   .config/opencode/skills vendor-specific global path
+///   .codex/skills           vendor-specific home root
 ///   .grok/skills            Grok Build (and `.grok/bundled/skills`)
 ///   .hermes/skills          Hermes
 ///   .commandcode/skills     Command Code
@@ -318,8 +315,8 @@ fn clip(s: []const u8, cap: usize) []const u8 {
 
 /// Longest skill list a prompt can call in one go. Receipt: the machine this
 /// was written on has 167 skills; naming more than a handful in one prompt is
-/// not composition, it is a paste. Matches Claude Code's leading stack
-/// (first skill plus up to five more) with room for two inline extras.
+/// not composition, it is a paste. Caps the leading stack at one primary plus
+/// up to five more, with room for two inline extras.
 pub const max_in_prompt: usize = 8;
 
 /// Rewrite `/skill` tokens into instructions to read those skills.
@@ -327,9 +324,9 @@ pub const max_in_prompt: usize = 8;
 /// Null when the prompt names no known skill, which leaves ordinary text and
 /// system commands alone.
 ///
-/// Two shapes, matching what the other CLIs do:
+/// Two shapes, matching common agent-CLI skill invocation:
 ///
-/// - **Leading stack** (Claude Code): `/a /b fix @src/foo.zig` peels consecutive
+/// - **Leading stack**: `/a /b fix @src/foo.zig` peels consecutive
 ///   known skills at the start; everything after the stack is the shared task
 ///   for all of them, including `@file` mentions. Stops at the first token that
 ///   is not a known skill.
@@ -669,7 +666,7 @@ test "leading skills stack and share the trailing task including @files" {
         f.close(io);
     }
 
-    // Claude Code shape: `/a /b args` — both skills, shared task, @path intact.
+    // Leading stack: `/a /b args` — both skills, shared task, @path intact.
     const stacked = (try expand(a, io, "", ws, "/deslop /tdd fix @src/main.zig")).?;
     defer a.free(stacked);
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, stacked, "Read "));

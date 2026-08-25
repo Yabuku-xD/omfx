@@ -16,7 +16,11 @@ Type `/` in the interactive session to search commands. Everything else is sent 
 | `/compact` | Compact older turns now |
 | `/rewind` | Go back to an earlier prompt, or compress |
 | `/fork` | Copy this session to a new id |
-| `/handoff` | New session with a brief |
+| `/handoff [goal]` | New session from a thin packet (no transcript dump) |
+| `/spec` | Spec-first workflow (`new` / `next` / `run`) |
+| `/checkpoint [note]` | Snapshot run pointers under `.omfx/runs/` |
+| `/sleep [note]` | Checkpoint + park (zero compute until `/wake`) |
+| `/wake [id\|list]` | Resume a run from a thin stub |
 | `/quit` | Exit (`/exit`) |
 
 ## Account and model
@@ -28,7 +32,7 @@ Type `/` in the interactive session to search commands. Everything else is sent 
 | `/models` | Signed-in providers, then models; Esc goes back |
 | `/fast` | Toggle effort=none |
 | `/permissions` | `ask` \| `auto` \| `yolo` |
-| `/allowlist` | Persistent permission rules |
+| `/allowlist` | Permission DSL; `session` rules shrink only |
 | `/sandbox` | OS sandbox on bash |
 | `/yolo` | Allow writes this session |
 | `/effort` | Reasoning level; `auto` picks per prompt (ctrl-t cycles) |

@@ -20,7 +20,7 @@ pub const show_after_ms: i64 = 1_500;
 /// Paint count must not drive this: a token flood would spin it like a fan.
 pub const spin_ms: i64 = 80;
 
-/// Same braille frames Codex and Grok use in the tab title. One array, both surfaces.
+/// Braille spinner frames for the tab title. One array, shared by both surfaces.
 pub const glyphs = [_][]const u8{ "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280f}" };
 
 pub fn glyph(frame: usize) []const u8 {
