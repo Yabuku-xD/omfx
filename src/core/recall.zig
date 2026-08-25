@@ -114,12 +114,12 @@ pub fn cite(allocator: std.mem.Allocator, item: Cite) std.mem.Allocator.Error![]
     return switch (item.target) {
         .path => |p| std.fmt.allocPrint(
             allocator,
-            "cite r{d} tool={s} path={s} chars={d}. Re-read the file, or read .omfx/recall/r{d}.txt.\n",
+            "cite r{d} tool={s} path={s} chars={d}. Use read_result id=r{d} to reload the archived body.\n",
             .{ n, item.tool, p, item.chars, n },
         ),
         .none => std.fmt.allocPrint(
             allocator,
-            "cite r{d} tool={s} chars={d}. read .omfx/recall/r{d}.txt for the body.\n",
+            "cite r{d} tool={s} chars={d}. Use read_result id=r{d} for the body.\n",
             .{ n, item.tool, item.chars, n },
         ),
     };
@@ -154,7 +154,7 @@ pub fn collectIds(src: []const u8, out: *[max_items]Id) usize {
     return n;
 }
 
-test "cite names the archive path" {
+test "cite names read_result id" {
     const s = try cite(std.testing.allocator, .{
         .id = @enumFromInt(3),
         .tool = "bash",
@@ -163,7 +163,7 @@ test "cite names the archive path" {
     });
     defer std.testing.allocator.free(s);
     try std.testing.expect(std.mem.indexOf(u8, s, "cite r3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, ".omfx/recall/r3.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "read_result id=r3") != null);
 }
 
 test "put then collectIds round trip" {

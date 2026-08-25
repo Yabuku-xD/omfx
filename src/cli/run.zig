@@ -60,7 +60,7 @@ pub fn doctorText(allocator: std.mem.Allocator, home: []const u8, model: []const
     const ids = try catalog.idsComma(allocator);
     defer allocator.free(ids);
     return renderDoctor(allocator, .{
-        .permission_mode = .ask,
+        .permission_mode = .auto,
         .sandbox = sandboxName(),
         .model = model,
         .profile_root = profile,
@@ -89,7 +89,7 @@ test "join prompt" {
 
 test "doctor names mode sandbox and model" {
     const text = try renderDoctor(std.testing.allocator, .{
-        .permission_mode = .ask,
+        .permission_mode = .auto,
         .sandbox = "none",
         .model = "(unset)",
         .profile_root = "/Users/demo/.omfx",
@@ -97,7 +97,7 @@ test "doctor names mode sandbox and model" {
         .catalog = "anthropic,openai",
     });
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "permission_mode=normal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "permission_mode=auto") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "sandbox=none") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "model=(unset)") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "catalog=anthropic,openai") != null);

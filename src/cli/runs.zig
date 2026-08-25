@@ -283,7 +283,16 @@ pub fn applyPartToggle(rec: *Store.Rec, part: Part) bool {
         .summary => {
             if (!rec.openable()) return false;
             rec.expanded = !rec.expanded;
-            if (!rec.expanded) rec.open_bits = 0;
+            if (!rec.expanded) {
+                rec.open_bits = 0;
+            } else {
+                // One gesture opens the whole tree: child argument rows plus any
+                // body worth showing. Expanding is read-only UI, not a tool call.
+                for (rec.bodies, 0..) |body, i| {
+                    if (i >= 64) break;
+                    if (bodyOpenable(body)) rec.open_bits |= @as(u64, 1) << @intCast(i);
+                }
+            }
         },
         .child => |i| rec.toggleChildBit(i),
     }

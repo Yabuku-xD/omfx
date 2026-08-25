@@ -63,7 +63,7 @@ pub fn summarizePrefix(allocator: std.mem.Allocator, turns: []const Turn, kept_f
             }
             const out = try std.fmt.allocPrint(
                 allocator,
-                "Dropped {d} earlier turns ({d} chars). Last role={s} ({d} chars). {s}. read .omfx/recall/rN.txt. Continue from the kept tail.",
+                "Dropped {d} earlier turns ({d} chars). Last role={s} ({d} chars). {s}. Use read_result id=rN for cited bodies. Continue from the kept tail.",
                 .{ n, chars, last_role, last_chars, list.items },
             );
             list.deinit(allocator);

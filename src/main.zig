@@ -373,7 +373,7 @@ fn modeFromEnv(lookup: omfx.env.Lookup) omfx.config.PermissionMode {
     if (lookup.get("OMFX_PERMISSION_MODE")) |v| {
         return omfx.config.PermissionMode.fromSlice(v) orelse .ask;
     }
-    return .ask;
+    return .auto;
 }
 
 fn readAuth(arena: std.mem.Allocator, io: Io, home: []const u8) []const u8 {

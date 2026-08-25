@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const sse = @import("sse.zig");
 
 const log = std.log.scoped(.oauth);
+const headless = @import("../core/headless.zig");
 
 fn writePrompt(io: Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
@@ -146,6 +147,7 @@ fn jsonNumber(json: []const u8, key: []const u8) ?u64 {
 }
 
 pub fn openBrowser(io: Io, url: []const u8) void {
+    if (headless.guiBlocked()) return;
     const argv: []const []const u8 = switch (builtin.os.tag) {
         .macos => &.{ "open", url },
         .windows => &.{ "cmd", "/c", "start", "", url },

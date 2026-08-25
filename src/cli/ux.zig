@@ -742,7 +742,7 @@ test "e2e ui: permission, confirm, panels, hints, and empty states flow" {
     var st = State{ .mode = .ask, .reads = reads };
     try std.testing.expect(std.mem.indexOf(u8, cmds.cycleSurface(&st), "look first") != null);
     try std.testing.expect(std.mem.indexOf(u8, cmds.cycleSurface(&st), "without asking") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cmds.cycleSurface(&st), "ask before") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cmds.cycleSurface(&st), "risky ones ask") != null);
 
     // Virtual window keeps the last row on screen.
     try std.testing.expectEqual(@as(usize, 5), virt.windowStart(10, 9, 5));

@@ -1,8 +1,10 @@
 const std = @import("std");
 const Io = std.Io;
+const builtin = @import("builtin");
 
 const log = std.log.scoped(.fs);
 const pathing = @import("pathing.zig");
+const headless = @import("../core/headless.zig");
 
 pub const max_read_bytes: usize = 1_000_000;
 /// A whole-file read of a huge file buries the answer and burns the window.
@@ -242,7 +244,7 @@ pub fn info(
 }
 
 pub fn openPath(io: Io, abs: []const u8) void {
-    const builtin = @import("builtin");
+    if (headless.guiBlocked()) return;
     const argv: []const []const u8 = switch (builtin.os.tag) {
         .macos => &.{ "open", abs },
         .windows => &.{ "cmd", "/c", "start", "", abs },

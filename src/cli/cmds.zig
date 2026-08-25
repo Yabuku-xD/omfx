@@ -250,8 +250,8 @@ test "cycleSurface walks normal plan yolo" {
     try std.testing.expectEqualStrings("plan", footerPerm(&st));
     try std.testing.expectEqualStrings("yolo  changes without asking", cycleSurface(&st));
     try std.testing.expectEqualStrings("yolo", footerPerm(&st));
-    try std.testing.expectEqualStrings("normal  ask before changes", cycleSurface(&st));
-    try std.testing.expectEqualStrings("normal", footerPerm(&st));
+    try std.testing.expectEqualStrings("normal  routine tools run; risky ones ask", cycleSurface(&st));
+    try std.testing.expectEqualStrings("auto", footerPerm(&st));
     applySurface(&st, "plan");
     try std.testing.expectEqualStrings("plan", footerPerm(&st));
 }

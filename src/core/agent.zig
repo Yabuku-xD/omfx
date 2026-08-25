@@ -236,6 +236,7 @@ fn chatTurn(
         switch (admitted) {
             .stop => |msg| {
                 last.deinit(allocator);
+                if (host.cancelled()) return allocator.dupe(u8, interrupted_text);
                 return msg;
             },
             .allow => |ok| {
@@ -271,6 +272,7 @@ fn chatTurn(
                     allocator.free(asst_text);
                     allocator.free(tool_name);
                     allocator.free(tool_args);
+                    if (host.cancelled()) return allocator.dupe(u8, interrupted_text);
                     return deny_body;
                 }
 

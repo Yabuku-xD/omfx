@@ -27,6 +27,10 @@ pub fn halt() void {
     halted.store(true, .release);
 }
 
+pub fn unhalt() void {
+    halted.store(false, .release);
+}
+
 pub fn isHalted() bool {
     return halted.load(.acquire);
 }

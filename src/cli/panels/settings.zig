@@ -7,6 +7,7 @@ const tty = @import("../tty.zig");
 const tui = @import("../tui.zig");
 const cmds = @import("../cmds.zig");
 const settings = @import("../../core/settings.zig");
+const headless = @import("../../core/headless.zig");
 
 const session_mod = @import("../repl/session.zig");
 const Session = session_mod.Session;
@@ -201,6 +202,7 @@ pub fn stepPanelValue(sess: *Session, forward: bool) void {
 }
 
 pub fn editDraftExternally(sess: *Session) !void {
+    if (headless.guiBlocked()) return;
     const editor = if (sess.state.editor.len != 0)
         sess.state.editor
     else

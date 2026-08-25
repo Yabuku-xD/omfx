@@ -223,7 +223,7 @@ pub fn presentResult(
     const secret = hooks.hasSecret(archive_src);
     if (follow_raw.len <= compact.result_budget and !secret) return trimmed;
     defer allocator.free(trimmed);
-    if (!secret and exploreSkipRecall(tool_name)) {
+    if (!secret and exploreSkipRecall(tool_name, path)) {
         return compact.capResult(allocator, trimmed);
     }
     const target: recall.Target = if (path) |p| .{ .path = p } else .none;
@@ -243,8 +243,14 @@ pub fn presentResult(
     return compact.capResult(allocator, joined);
 }
 
-fn exploreSkipRecall(tool_name: []const u8) bool {
+fn exploreSkipRecall(tool_name: []const u8, path: ?[]const u8) bool {
     const n = Tool.Name.fromSlice(tool_name) orelse return false;
+    if (n == .read_result) return true;
+    if (n == .read) {
+        if (path) |p| {
+            if (permissions.isHarnessPath(p)) return true;
+        }
+    }
     return switch (n) {
         .list, .glob, .grep, .semantic_search, .file_info, .bash, .job, .web_search, .web_fetch, .web_scrape => true,
         else => false,

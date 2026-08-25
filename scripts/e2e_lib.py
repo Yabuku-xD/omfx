@@ -55,6 +55,7 @@ _PROVIDER_KEYS = (
 
 def provider_env(base: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(os.environ)
+    env.setdefault("OMFX_HEADLESS", "1")
     if base:
         env.update(base)
     return env

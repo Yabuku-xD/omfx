@@ -5,6 +5,7 @@ const Io = std.Io;
 const tty = @import("tty.zig");
 const slash = @import("../core/slash.zig");
 const cli = @import("../core/cli.zig");
+const sink = @import("../core/sink.zig");
 const activity = @import("activity.zig");
 const modal = @import("modal.zig");
 const diffview = @import("diffview.zig");
@@ -217,6 +218,19 @@ fn permChoice(sel: usize) Perm {
         else => .deny,
     };
 }
+
+/// Block live painters and the cancel watcher while a modal reads stdin alone.
+fn beginModal() void {
+    tty.halt();
+    sink.enterModal();
+    tty.flushInput();
+}
+
+fn endModal() void {
+    sink.leaveModal();
+    tty.unhalt();
+}
+
 fn paintModalFrame(stdout: *Io.Writer, g: modal.Geometry, frame: []const u8) !void {
     try stdout.writeAll(hide_cursor);
     var clear_r: u16 = g.row0;
@@ -275,6 +289,9 @@ pub fn askPerm(
     defer if (body.ptr != head.ptr) allocator.free(body);
     const painted = painted_preview != null;
 
+    beginModal();
+    defer endModal();
+
     while (true) {
         const sz = size(layout.rows, layout.cols);
         layout.* = Layout.compute(sz.rows, sz.cols);
@@ -294,7 +311,7 @@ pub fn askPerm(
                 '3' => return .deny,
                 else => {},
             },
-            .esc => return .deny,
+            .esc => return .quit,
             .interrupt, .quit, .ctrl_d, .eof => return .quit,
             else => {},
         }
@@ -317,6 +334,8 @@ pub fn askConfirm(
         .{ .key = "1", .label = yes_label },
         .{ .key = "2", .label = no_label },
     };
+    beginModal();
+    defer endModal();
     while (true) {
         const sz = size(layout.rows, layout.cols);
         layout.* = Layout.compute(sz.rows, sz.cols);

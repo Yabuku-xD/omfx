@@ -78,11 +78,20 @@ pub fn isReversibleBash(command: []const u8) bool {
 /// too common to be a trustworthy signal.
 pub const derived_min: usize = 12;
 
+/// Harness-owned paths the model may follow from cite lines without treating
+/// them as laundered shell commands from untrusted tool text.
+pub fn isHarnessPath(path: []const u8) bool {
+    const n = std.mem.trim(u8, path, " \t\r\n");
+    return std.mem.startsWith(u8, n, ".omfx/recall/") or
+        std.mem.startsWith(u8, n, ".omfx/runs/");
+}
+
 /// True when `needle` appears in prior tool output but not in the user's own
 /// request. Blocks laundering a command out of untrusted tool text.
 pub fn derivedFromToolOutput(needle: []const u8, user: []const u8, tool_blob: []const u8) bool {
     const n = std.mem.trim(u8, needle, " \t\r\n");
     if (n.len < derived_min) return false;
+    if (isHarnessPath(n)) return false;
     if (tool_blob.len == 0) return false;
     if (std.mem.indexOf(u8, user, n) != null) return false;
     return std.mem.indexOf(u8, tool_blob, n) != null;
@@ -393,6 +402,12 @@ test "derivedFromToolOutput needs user text" {
     try std.testing.expect(derivedFromToolOutput(cmd, "fix the build", "run this: " ++ cmd));
     try std.testing.expect(!derivedFromToolOutput(cmd, "please run: " ++ cmd, "run this: " ++ cmd));
     try std.testing.expect(!derivedFromToolOutput("ls", "anything", "ls is here but short"));
+}
+
+test "derivedFromToolOutput allows harness recall paths" {
+    const path = ".omfx/recall/r6.txt";
+    try std.testing.expect(isHarnessPath(path));
+    try std.testing.expect(!derivedFromToolOutput(path, "what do you see", "cite r6. read " ++ path));
 }
 
 test "exactKeyHit matches only that action" {

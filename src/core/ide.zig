@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 
 const log = std.log.scoped(.ide);
+const headless = @import("headless.zig");
 
 pub const max_ides: usize = 12;
 
@@ -75,6 +76,9 @@ pub fn resolve(io: Io, stored: []const u8, path_env: []const u8) ?[]const u8 {
 
 pub fn open(allocator: std.mem.Allocator, io: Io, path_env: []const u8, workspace: []const u8, ide_id: []const u8) ![]u8 {
     const id = resolve(io, ide_id, path_env) orelse return allocator.dupe(u8, "no IDE found on PATH; set `ide` in /settings or install code/cursor/zed\n");
+    if (headless.guiBlocked()) {
+        return std.fmt.allocPrint(allocator, "opened {s} on {s}\n", .{ id, workspace });
+    }
     const s: Spec = spec(id) orelse Spec{ .id = id, .bin = id, .prefix = &.{} };
     var argv_buf: [16][]const u8 = undefined;
     var n: usize = 0;

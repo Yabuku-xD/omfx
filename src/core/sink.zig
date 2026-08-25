@@ -164,10 +164,27 @@ pub fn dropSteer() void {
 ///
 /// This cannot peek. `recv(MSG_PEEK)` fails with ENOTSOCK on a TTY, which is
 /// what made the previous version of this function never fire.
+
+/// Painters and the cancel watcher stand down while a modal owns the keyboard.
+var modal_depth: std.atomic.Value(u32) = .init(0);
+
+pub fn enterModal() void {
+    _ = modal_depth.fetchAdd(1, .release);
+}
+
+pub fn leaveModal() void {
+    _ = modal_depth.fetchSub(1, .release);
+}
+
+pub fn modalActive() bool {
+    return modal_depth.load(.acquire) != 0;
+}
+
 fn pollCancelKey() bool {
     // The watcher thread owns stdin for the request. A second drain here
     // splits CSI across readers and the tail lands in the composer as text.
     if (watchOwnsStdin()) return false;
+    if (modalActive()) return false;
     return drainKeys();
 }
 
@@ -291,6 +308,7 @@ pub fn routeTurnKeys(bytes: []const u8, page_rows: u16) bool {
 /// `wait_ms` 0 polls and returns; a positive value blocks that long, which is
 /// what lets the watcher thread idle instead of spinning.
 fn pollCancelKeyTimeout(wait_ms: i32, page_rows: u16) bool {
+    if (modalActive()) return false;
     return drainKeysTimeout(wait_ms, page_rows);
 }
 
@@ -422,6 +440,11 @@ pub const Watch = struct {
         var stalled = false;
         const started = wallMs();
         while (!self.stop.load(.acquire)) {
+            if (modal_depth.load(.acquire) != 0) {
+                var wait = std.c.timespec{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+                _ = std.c.nanosleep(&wait, null);
+                continue;
+            }
             const hit = pollCancelKeyTimeout(60, self.page_rows);
             if (hit) {
                 self.cancel.store(true, .release);

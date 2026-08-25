@@ -56,7 +56,7 @@ pub const Surface = enum {
 
     pub fn hint(self: Surface) []const u8 {
         return switch (self) {
-            .normal => "normal  ask before changes",
+            .normal => "normal  routine tools run; risky ones ask",
             .plan => "plan  look first; say go when ready",
             .yolo => "yolo  changes without asking",
         };
@@ -72,7 +72,8 @@ pub const Surface = enum {
 
     pub fn permission(self: Surface) PermissionMode {
         return switch (self) {
-            .normal, .plan => .ask,
+            .normal => .auto,
+            .plan => .ask,
             .yolo => .yolo,
         };
     }
@@ -115,7 +116,7 @@ pub fn profileRoot(allocator: std.mem.Allocator, home: []const u8) ![]u8 {
 pub const Config = struct {
     workspace: []const u8,
     profile_root: []const u8,
-    permission_mode: PermissionMode = .ask,
+    permission_mode: PermissionMode = .auto,
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         allocator.free(self.workspace);
@@ -144,6 +145,7 @@ test "Surface cycles normal plan yolo" {
     try std.testing.expectEqual(Surface.plan, Surface.fromFlags(true, .ask));
     try std.testing.expectEqual(Surface.yolo, Surface.fromFlags(false, .yolo));
     try std.testing.expect(Surface.plan.planning());
+    try std.testing.expectEqual(PermissionMode.auto, Surface.normal.permission());
     try std.testing.expectEqual(PermissionMode.ask, Surface.plan.permission());
 }
 

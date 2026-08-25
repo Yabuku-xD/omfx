@@ -739,6 +739,10 @@ pub const Live = union(enum) {
         };
         const preview = askprev.build(t.allocator, name, args) catch "";
         defer if (preview.len != 0) t.allocator.free(preview);
+        // The spinner repaints the full TUI every ~80ms; without stopping it the
+        // permission box flickers and keystrokes never reach askPerm.
+        stopSpinTty(t);
+        defer if (!t.cancel.load(.acquire)) startSpinTty(t);
         return switch (tui.askPerm(t.stdin, t.stdout, t.allocator, t.layout, name, detail, preview)) {
             .allow => .allow,
             .always => .always,
