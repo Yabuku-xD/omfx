@@ -77,10 +77,10 @@ pub const Host = struct {
     /// Called wherever a turn can pause: every SSE line, every tool boundary.
     pub fn pollCancel(self: Host) void {
         const flag = self.cancel orelse {
-            _ = drainKeys();
+            _ = pollCancelKey();
             return;
         };
-        if (drainKeys()) flag.store(true, .release);
+        if (pollCancelKey()) flag.store(true, .release);
     }
 
     /// Apply a pending Shift+Tab permission cycle to `mode_live`.
@@ -433,6 +433,11 @@ var jump_col0: std.atomic.Value(u32) = .init(0);
 var jump_col1: std.atomic.Value(u32) = .init(0);
 var jump_pending: std.atomic.Value(bool) = .init(false);
 
+/// Left click in the transcript while a turn owns stdin. The live painter
+/// resolves it to a tool run and toggles expand, same as idle clickRun.
+var run_click_row: std.atomic.Value(u32) = .init(0);
+var run_click_col: std.atomic.Value(u32) = .init(0);
+
 /// Header context meter hit box (1-based cells) while a turn owns stdin.
 var ctx_active: std.atomic.Value(bool) = .init(false);
 var ctx_row: std.atomic.Value(u32) = .init(0);
@@ -459,6 +464,13 @@ pub fn setJumpHit(active: bool, row: u16, col0: u16, col1: u16) void {
 
 pub fn takeJumpToBottom() bool {
     return jump_pending.swap(false, .acq_rel);
+}
+
+pub fn takeRunClick() ?struct { row: u16, col: u16 } {
+    const row = run_click_row.swap(0, .acq_rel);
+    if (row == 0) return null;
+    const col: u16 = @truncate(run_click_col.swap(0, .acq_rel));
+    return .{ .row = @truncate(row), .col = col };
 }
 
 pub fn setContextHit(active: bool, row: u16, col0: u16, col1: u16) void {
@@ -491,6 +503,27 @@ fn noteJumpIfHit(row: u16, col: u16) void {
     const c0: u16 = @truncate(jump_col0.load(.acquire));
     const c1: u16 = @truncate(jump_col1.load(.acquire));
     if (col >= c0 and col <= c1) jump_pending.store(true, .release);
+}
+
+fn jumpWouldHit(row: u16, col: u16) bool {
+    if (!jump_active.load(.acquire)) return false;
+    if (row != @as(u16, @truncate(jump_row.load(.acquire)))) return false;
+    const c0: u16 = @truncate(jump_col0.load(.acquire));
+    const c1: u16 = @truncate(jump_col1.load(.acquire));
+    return col >= c0 and col <= c1;
+}
+
+fn ctxWouldHit(row: u16, col: u16) bool {
+    if (!ctx_active.load(.acquire)) return false;
+    if (row != @as(u16, @truncate(ctx_row.load(.acquire)))) return false;
+    const c0: u16 = @truncate(ctx_col0.load(.acquire));
+    const c1: u16 = @truncate(ctx_col1.load(.acquire));
+    return col >= c0 and col <= c1;
+}
+
+fn noteRunClick(row: u16, col: u16) void {
+    run_click_row.store(row, .release);
+    run_click_col.store(col, .release);
 }
 
 fn noteContextIfHit(row: u16, col: u16) void {
@@ -603,8 +636,11 @@ fn takeScrollSeq(bytes: []const u8, page_rows: u16) ?struct { n: usize, delta: i
             const col = std.fmt.parseInt(u16, rest[0..semi2], 10) catch 0;
             const row = std.fmt.parseInt(u16, rest[semi2 + 1 ..], 10) catch 0;
             if (row != 0 and col != 0) {
+                const on_jump = jumpWouldHit(row, col);
+                const on_ctx = ctxWouldHit(row, col);
                 noteJumpIfHit(row, col);
                 noteContextIfHit(row, col);
+                if (!on_jump and !on_ctx) noteRunClick(row, col);
             }
         }
     }
@@ -641,12 +677,16 @@ fn drainKeysTimeout(wait_ms: i32, page_rows: u16) bool {
 }
 
 fn stashKeys(bytes: []const u8) void {
+    steerLock();
+    defer steerUnlock();
     const n = @min(bytes.len, key_hold.len);
     @memcpy(key_hold[0..n], bytes[0..n]);
     key_hold_len = n;
 }
 
 fn joinHeld(bytes: []const u8, buf: *[cancel_drain_bytes + 64]u8) []const u8 {
+    steerLock();
+    defer steerUnlock();
     if (key_hold_len == 0) return bytes;
     const held = key_hold_len;
     key_hold_len = 0;
