@@ -1,6 +1,12 @@
 const std = @import("std");
+const Io = std.Io;
+const config = @import("../config.zig");
+const permissions = @import("../permissions.zig");
 const pclient = @import("../../providers/client.zig");
+const sse = @import("../../providers/sse.zig");
 const sink = @import("../sink.zig");
+const Tool = @import("../tool.zig");
+const playbook = @import("../playbook.zig");
 
 /// Explicit phases for one iteration of the tool-turn loop in `chatTurn`.
 pub const Phase = enum {
@@ -23,6 +29,31 @@ pub const Counters = struct {
     prev_name: []u8,
     prev_args: []u8,
 };
+
+const detail_keys = [_][]const u8{ "path", "command", "pattern", "query", "url", "name", "goal", "question", "id" };
+
+/// What to show next to the verb. Tools name their subject differently, so try
+/// each key rather than leaving grep/glob/web cards with a bare verb.
+pub fn toolDetail(buf: []u8, args: []const u8) []const u8 {
+    for (detail_keys) |key| {
+        const s = sse.argStringInto(buf, args, key) orelse continue;
+        if (s.len > 0) return s;
+    }
+    return "";
+}
+
+pub fn admitCall(
+    mode: config.PermissionMode,
+    name: []const u8,
+    args: []const u8,
+    has_tty: bool,
+    rules: []const permissions.Rule,
+    session: []const permissions.Rule,
+    always: []const []const u8,
+) permissions.Decision {
+    if (permissions.exactKeyHit(always, name, args)) return .allow;
+    return permissions.admitWithSession(mode, name, args, has_tty, rules, session);
+}
 
 /// Pause points where cancel and permission mode can apply.
 pub fn pollBoundary(host: sink.Host) void {
@@ -50,6 +81,195 @@ pub fn finishIfText(
     return out;
 }
 
+/// Pull the tool call out of a provider result and detach bundled extras.
+pub fn extractToolCall(last: *pclient.ChatResult) struct {
+    call: @TypeOf(last.outcome.tool),
+    extras: []pclient.ExtraCall,
+} {
+    const call = switch (last.outcome) {
+        .text => unreachable,
+        .tool => |t| t,
+    };
+    const extras = last.extra;
+    last.extra = &.{};
+    return .{ .call = call, .extras = extras };
+}
+
+/// Tripwire when the model names tools the harness does not have.
+pub fn malformedToolCheck(
+    allocator: std.mem.Allocator,
+    call: struct {
+        name: []const u8,
+        preamble: []const u8,
+    },
+    malformed: *usize,
+    max_malformed: usize,
+    malformed_text: []const u8,
+    last: *pclient.ChatResult,
+    ensure_nl: *const fn (std.mem.Allocator, []const u8) anyerror![]u8,
+) !?[]u8 {
+    if (Tool.Name.fromSlice(call.name) == null) {
+        malformed.* += 1;
+        if (malformed.* >= max_malformed) {
+            const said = if (call.preamble.len != 0) call.preamble else malformed_text;
+            const out = try ensure_nl(allocator, said);
+            last.deinit(allocator);
+            return out;
+        }
+    } else {
+        malformed.* = 0;
+    }
+    return null;
+}
+
+/// Returns owned text when the turn budget is exhausted before the next HTTP round.
+pub fn checkTurnLimit(
+    allocator: std.mem.Allocator,
+    turns: usize,
+    max_tool_turns: usize,
+) !?[]u8 {
+    if (turns >= max_tool_turns) {
+        return try std.fmt.allocPrint(
+            allocator,
+            "stopped: max_tool_turns={d}, next would be {d}; not a clean verdict.\n",
+            .{ max_tool_turns, turns + 1 },
+        );
+    }
+    return null;
+}
+
+pub const TraceHook = struct {
+    ctx: *anyopaque,
+    deny_tool: *const fn (ctx: *anyopaque, name: []const u8, args: []const u8) void,
+};
+
+pub const AdmitArgs = struct {
+    allocator: std.mem.Allocator,
+    io: Io,
+    mode: config.PermissionMode,
+    has_tty: bool,
+    rules: []const permissions.Rule,
+    session_rules: []const permissions.Rule,
+    always: [][]u8,
+    always_n: *usize,
+    always_cap: usize,
+    host: sink.Host,
+    trace: ?TraceHook = null,
+    plan: bool = false,
+    user: []const u8,
+    tool_blob: []const u8,
+    workspace: []const u8,
+    call: struct {
+        name: []const u8,
+        args: []const u8,
+    },
+};
+
+pub const AdmitOutcome = union(enum) {
+    stop: []u8,
+    allow: struct {
+        one_shot: ?[]u8,
+    },
+};
+
+fn denyBody(allocator: std.mem.Allocator, detail: []const u8) ![]u8 {
+    return if (detail.len != 0)
+        try std.fmt.allocPrint(allocator, "permission denied: {s}\n", .{detail})
+    else
+        try allocator.dupe(u8, "permission denied\n");
+}
+
+/// Plan gate, permission admit, prompt, and derived-from-tool-output checks for an incoming call.
+pub fn admitToolCall(a: AdmitArgs) !AdmitOutcome {
+    if (a.plan and permissions.blockedByPlan(a.call.name, a.call.args)) {
+        if (a.trace) |t| t.deny_tool(t.ctx, a.call.name, a.call.args);
+        return .{ .stop = try std.fmt.allocPrint(
+            a.allocator,
+            "plan mode: {s} blocked. /plan go to implement.\n",
+            .{a.call.name},
+        ) };
+    }
+    var decision = admitCall(a.mode, a.call.name, a.call.args, a.has_tty, a.rules, a.session_rules, a.always);
+    if (decision == .allow or decision == .prompt) {
+        var cmd_buf: [permissions.max_command]u8 = undefined;
+        const cmd = permissions.shellCommand(&cmd_buf, a.call.args) orelse
+            sse.argStringInto(&cmd_buf, a.call.args, "path") orelse "";
+        if (permissions.derivedFromToolOutput(cmd, a.user, a.tool_blob)) {
+            decision = if (a.has_tty) .prompt else .deny;
+        }
+    }
+    var one_shot: ?[]u8 = null;
+    if (decision == .prompt) {
+        var detail_buf: [permissions.max_command]u8 = undefined;
+        const detail0 = toolDetail(&detail_buf, a.call.args);
+        const ans = if (a.host.decide(a.call.name, detail0, a.call.args)) |v| v else if (permissions.askHuman(a.io, a.call.name)) sink.Ask.allow else sink.Ask.deny;
+        switch (ans) {
+            .allow => {
+                decision = .allow;
+                one_shot = try permissions.exactKey(a.allocator, a.call.name, a.call.args);
+            },
+            .always => {
+                decision = .allow;
+                if (a.always_n.* < a.always_cap) {
+                    const always_mut = @as([][]u8, @constCast(a.always));
+                    always_mut[a.always_n.*] = try permissions.exactKey(a.allocator, a.call.name, a.call.args);
+                    a.always_n.* += 1;
+                }
+                one_shot = try permissions.exactKey(a.allocator, a.call.name, a.call.args);
+            },
+            .deny => decision = .deny,
+        }
+    }
+    switch (decision) {
+        .allow, .prompt => return .{ .allow = .{ .one_shot = one_shot } },
+        .need_tty, .deny => {
+            if (a.trace) |t| t.deny_tool(t.ctx, a.call.name, a.call.args);
+            var deny_buf: [48]u8 = undefined;
+            const deny_line = std.fmt.bufPrint(&deny_buf, "denied {s}", .{a.call.name}) catch "denied tool";
+            playbook.noteHarmful(a.allocator, a.io, a.workspace, deny_line);
+            var deny_detail_buf: [permissions.max_command]u8 = undefined;
+            const deny_detail = toolDetail(&deny_detail_buf, a.call.args);
+            const body = try denyBody(a.allocator, deny_detail);
+            a.host.toolOut(a.call.name, deny_detail, true, body);
+            return .{ .stop = body };
+        },
+    }
+}
+
+pub const RecheckArgs = struct {
+    allocator: std.mem.Allocator,
+    io: Io,
+    mode: config.PermissionMode,
+    has_tty: bool,
+    rules: []const permissions.Rule,
+    session_rules: []const permissions.Rule,
+    always: []const []const u8,
+    host: sink.Host,
+    one_shot: ?[]const u8,
+    tool_name: []const u8,
+    tool_args: []const u8,
+};
+
+/// Re-check permission after mode may have changed mid-turn.
+pub fn recheckAdmitted(a: RecheckArgs) !?[]u8 {
+    var recheck = admitCall(a.mode, a.tool_name, a.tool_args, a.has_tty, a.rules, a.session_rules, a.always);
+    if (a.one_shot) |k| {
+        if (permissions.exactKeyHit(&.{k}, a.tool_name, a.tool_args)) recheck = .allow;
+    }
+    if (recheck == .prompt) {
+        var detail_buf: [permissions.max_command]u8 = undefined;
+        const detail0 = toolDetail(&detail_buf, a.tool_args);
+        const ans = if (a.host.decide(a.tool_name, detail0, a.tool_args)) |v| v else if (permissions.askHuman(a.io, a.tool_name)) sink.Ask.allow else sink.Ask.deny;
+        recheck = if (ans == .deny) .deny else .allow;
+    }
+    if (recheck != .allow) {
+        var deny_detail_buf: [permissions.max_command]u8 = undefined;
+        const deny_detail = toolDetail(&deny_detail_buf, a.tool_args);
+        return try denyBody(a.allocator, deny_detail);
+    }
+    return null;
+}
+
 test "finishIfText returns null for tool outcomes" {
     var last = pclient.ChatResult{
         .status = 200,
@@ -61,8 +281,8 @@ test "finishIfText returns null for tool outcomes" {
     };
     defer last.deinit(std.testing.allocator);
     const out = try finishIfText(std.testing.allocator, &last, 0, struct {
-        fn f(a: std.mem.Allocator, s: []const u8) ![]u8 {
-            return a.dupe(u8, s);
+        fn f(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+            return alloc.dupe(u8, s);
         }
     }.f);
     try std.testing.expect(out == null);
@@ -74,10 +294,49 @@ test "finishIfText copies text outcomes" {
         .outcome = .{ .text = try std.testing.allocator.dupe(u8, "done") },
     };
     const out = (try finishIfText(std.testing.allocator, &last, 0, struct {
-        fn f(a: std.mem.Allocator, s: []const u8) ![]u8 {
-            return a.dupe(u8, s);
+        fn f(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+            return alloc.dupe(u8, s);
         }
     }.f)).?;
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings("done", out);
+}
+
+test "malformedToolCheck stops after max unknown tools" {
+    var last = pclient.ChatResult{
+        .status = 200,
+        .outcome = .{ .tool = .{
+            .preamble = try std.testing.allocator.dupe(u8, ""),
+            .name = try std.testing.allocator.dupe(u8, "not_a_tool"),
+            .args = try std.testing.allocator.dupe(u8, "{}"),
+        } },
+    };
+    var malformed: usize = 2;
+    const out = (try malformedToolCheck(
+        std.testing.allocator,
+        .{ .name = "not_a_tool", .preamble = "" },
+        &malformed,
+        3,
+        "stopped malformed\n",
+        &last,
+        struct {
+            fn f(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+                return alloc.dupe(u8, s);
+            }
+        }.f,
+    )).?;
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("stopped malformed\n", out);
+}
+
+test "checkTurnLimit trips at the budget" {
+    const out = (try checkTurnLimit(std.testing.allocator, 24, 24)).?;
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "max_tool_turns=24") != null);
+}
+
+test "toolDetail unescapes a command tab" {
+    var buf: [64]u8 = undefined;
+    const d = toolDetail(&buf, "{\"command\":\"ls\\t-la\"}");
+    try std.testing.expectEqualStrings("ls\t-la", d);
 }

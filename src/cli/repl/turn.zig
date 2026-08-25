@@ -22,7 +22,7 @@ const sink = @import("../../core/sink.zig");
 const sound_mod = @import("../sound.zig");
 const runlog = @import("../../core/runlog.zig");
 const activity = @import("../activity.zig");
-const panel_mod = @import("../panel.zig");
+const panels = @import("../panels.zig");
 const session_mod = @import("session.zig");
 
 const Session = session_mod.Session;
@@ -77,7 +77,7 @@ pub fn takeSteering(sess: *Session) void {
 }
 
 fn openSearchPanel(sess: *Session, kind: cmds.PanelKind) void {
-    sess.openPanel(session_mod.buildPanel(sess, kind));
+    sess.openPanel(panels.build(sess, kind));
     sess.panel_kind = kind;
     if (sess.panel) |*p| {
         p.search = true;
@@ -322,7 +322,7 @@ pub fn runTurn(
                     switch (kind) {
                         .help, .shortcuts => openSearchPanel(sess, kind),
                         else => {
-                            sess.openPanel(session_mod.buildPanel(sess, kind));
+                            sess.openPanel(panels.build(sess, kind));
                             sess.panel_kind = kind;
                         },
                     }

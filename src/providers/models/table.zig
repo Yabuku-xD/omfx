@@ -481,8 +481,7 @@ pub const all = [_]Model{
         .efforts = "",
         .vision = true,
     },
-    // -- OpenAI --------------------------------------------------------------
-    //
+    // -- -- OpenAI --------------------------------------------------------------
     // /v1/models publishes ids only, so everything here is transcribed. The
     // Codex rows carry the subscription window (400K), not the API one (1M):
     // a ChatGPT login routes through the Codex backend, which caps there.
@@ -570,8 +569,7 @@ pub const all = [_]Model{
         .efforts = "none,low,medium,high,xhigh,max",
         .vision = true,
     },
-    // -- Command Code ---------------------------------------------------------
-    //
+    // -- -- Command Code ---------------------------------------------------------
     // A router in front of every vendor. `registry.load` fetches /models and
     // enriches vision/reasoning/protocol from their docs into
     // `cache/caps-commandcode.json`. These rows are the offline seed only:
@@ -1357,8 +1355,7 @@ pub const all = [_]Model{
         .efforts = "",
         .vision = false,
     },
-    // -- Anthropic -----------------------------------------------------------
-    //
+    // -- -- Anthropic -----------------------------------------------------------
     // The models endpoint publishes effort levels and max_input_tokens, so
     // these are the offline fallback only. The Pro/Max row stays at 200K: the
     // 1M window needs the context-1m beta header, which a subscription token

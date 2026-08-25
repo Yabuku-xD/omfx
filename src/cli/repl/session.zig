@@ -20,9 +20,6 @@ pub fn nowMs(io: Io) i64 {
     return Io.Clock.Timestamp.now(io, .awake).raw.toMilliseconds();
 }
 
-/// Panel builder wired by repl.zig so session stays free of panel tables.
-pub var buildPanel: *const fn (*Session, cmds.PanelKind) panel_mod.Panel = undefined;
-
 pub const Session = struct {
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,

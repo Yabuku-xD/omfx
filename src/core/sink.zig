@@ -167,11 +167,23 @@ pub fn dropSteer() void {
 fn pollCancelKey() bool {
     // The watcher thread owns stdin for the request. A second drain here
     // splits CSI across readers and the tail lands in the composer as text.
-    if (watchers.load(.acquire) != 0) return false;
+    if (watchOwnsStdin()) return false;
     return drainKeys();
 }
 
 var mode_cycle_pending: std.atomic.Value(bool) = .init(false);
+
+/// Who may read stdin right now. Watch owns it during a turn; repl otherwise.
+pub const InputOwner = enum { repl, watch };
+
+pub fn stdinOwner() InputOwner {
+    if (watchers.load(.acquire) != 0) return .watch;
+    return .repl;
+}
+
+pub fn watchOwnsStdin() bool {
+    return stdinOwner() == .watch;
+}
 
 /// How many cancel watchers currently own stdin. HostWriter must not drain
 /// while this is non-zero: two readers split CSI and the tail is steered.

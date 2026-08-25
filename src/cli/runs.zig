@@ -290,6 +290,37 @@ pub fn applyPartToggle(rec: *Store.Rec, part: Part) bool {
     return true;
 }
 
+/// Optional REPL focus hooks; live mid-turn passes `.{}`.
+pub const ClickHooks = struct {
+    ctx: ?*anyopaque = null,
+    focus_hunk: ?usize = null,
+    before_toggle: ?*const fn (?*anyopaque, run_index: usize, part: Part) void = null,
+    after_toggle: ?*const fn (?*anyopaque, run_index: usize, rec: *Store.Rec) void = null,
+    on_miss: ?*const fn (?*anyopaque) void = null,
+};
+
+/// Toggle a run at a terminal row and redraw in place. Shared by idle REPL and live paint.
+pub fn handleClickAtTermRow(
+    allocator: std.mem.Allocator,
+    layout: tui.Layout,
+    store: *Store,
+    shown: *Transcript,
+    scroll: usize,
+    term_row: u16,
+    hooks: ClickHooks,
+) bool {
+    const click_opt = clickAtTermRow(allocator, layout, store, shown, scroll, term_row) catch return false;
+    const click = click_opt orelse {
+        if (hooks.on_miss) |f| f(hooks.ctx);
+        return false;
+    };
+    const rec = &store.items.items[click.run_index];
+    if (hooks.before_toggle) |f| f(hooks.ctx, click.run_index, click.part);
+    if (!applyPartToggle(rec, click.part)) return false;
+    if (hooks.after_toggle) |f| f(hooks.ctx, click.run_index, rec);
+    return redrawInPlace(allocator, layout.cols, store, shown, rec, hooks.focus_hunk);
+}
+
 test "an opened call shows its output, truncated, and closes on the same key" {
     const a = std.testing.allocator;
     var s = Store.init(a);

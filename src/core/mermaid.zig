@@ -17,7 +17,7 @@ fn starts(line: []const u8, prefix: []const u8) bool {
     return std.mem.startsWith(u8, line, prefix);
 }
 
-const measure = @import("../cli/width.zig");
+const measure = @import("measure.zig");
 
 /// Receipt: every mermaid block recorded in this repo's benches is 2 nodes,
 /// and a diagram stops being readable in a terminal well before 20. 64 is a

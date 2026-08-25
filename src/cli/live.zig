@@ -328,18 +328,15 @@ pub const Live = union(enum) {
 
     /// Toggle a tool run while the main loop is blocked in chatOnce.
     fn toggleRunClick(t: *Tty, term_row: u16) bool {
-        const click = runs_mod.clickAtTermRow(
+        return runs_mod.handleClickAtTermRow(
             t.allocator,
             t.layout.*,
             t.runs,
             t.shown,
             t.scroll.*,
             term_row,
-        ) catch return false;
-        const c = click orelse return false;
-        const rec = &t.runs.items.items[c.run_index];
-        if (!runs_mod.applyPartToggle(rec, c.part)) return false;
-        return runs_mod.redrawInPlace(t.allocator, t.layout.cols, t.runs, t.shown, rec, null);
+            .{},
+        );
     }
 
     fn paintTty(self: *Tty, extra: Extra) void {

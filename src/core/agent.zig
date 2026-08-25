@@ -77,18 +77,6 @@ fn postOrStop(
     };
 }
 
-const detail_keys = [_][]const u8{ "path", "command", "pattern", "query", "url", "name", "goal", "question", "id" };
-
-/// What to show next to the verb. Tools name their subject differently, so try
-/// each key rather than leaving grep/glob/web cards with a bare verb.
-fn toolDetail(buf: []u8, args: []const u8) []const u8 {
-    for (detail_keys) |key| {
-        const s = sse.argStringInto(buf, args, key) orelse continue;
-        if (s.len > 0) return s;
-    }
-    return "";
-}
-
 pub const Guard = struct {
     allocator: std.mem.Allocator,
     paths: [max_read_paths][]u8 = undefined,
@@ -415,7 +403,7 @@ fn chatTurn(
     const host = run.host;
     const depth_cap: u8 = if (run.max_peer_depth == 0) 1 else @min(run.max_peer_depth, max_peer_depth_cap);
     const peer_denied = (permissions.matchLast(cfg.rules, "peer", "{}") orelse .allow) == .deny;
-    var always: [8][]const u8 = undefined;
+    var always: [8][]u8 = undefined;
     var always_n: usize = 0;
     // Prior tool bodies for "copied from untrusted output" checks. Capped so a
     // long turn cannot unbounded-grow the ring.
@@ -485,6 +473,16 @@ fn chatTurn(
     var malformed: usize = 0;
     var orient_streak: usize = 0;
     var tool_rounds: usize = 0;
+    const trace_hook: ?turn_loop.TraceHook = if (trace) |t| .{
+        .ctx = t,
+        .deny_tool = struct {
+            fn f(ctx: *anyopaque, name: []const u8, args: []const u8) void {
+                const tr: *Trace = @ptrCast(@alignCast(ctx));
+                tr.denied = true;
+                tr.setTool(name, args);
+            }
+        }.f,
+    } else null;
     while (true) {
         turn_loop.pollBoundary(host);
         if (host.cancelled()) {
@@ -492,322 +490,253 @@ fn chatTurn(
             return allocator.dupe(u8, interrupted_text);
         }
         if (try turn_loop.finishIfText(allocator, &last, tool_rounds, ensureNl)) |text| return text;
-        const call = switch (last.outcome) {
-            .text => unreachable,
-            .tool => |t| t,
-        };
+        const extracted = turn_loop.extractToolCall(&last);
+        const call = extracted.call;
+        const extras = extracted.extras;
         tool_rounds += 1;
-        // A tool the harness does not have can only be echoed back as an error,
-        // so a model inventing names trades turns without doing any work. The
-        // doom-loop counter misses it: each invented name differs from the last.
-        if (Tool.Name.fromSlice(call.name) == null) {
-            malformed += 1;
-            if (malformed >= max_malformed) {
-                const said = if (call.preamble.len != 0) call.preamble else malformed_text;
-                const out = try ensureNl(allocator, said);
-                last.deinit(allocator);
-                return out;
-            }
-        } else {
-            malformed = 0;
-        }
-        const extras = last.extra;
-        last.extra = &.{};
-        if (plan and permissions.blockedByPlan(call.name, call.args)) {
-            if (trace) |t| {
-                t.denied = true;
-                t.setTool(call.name, call.args);
-            }
-            last.deinit(allocator);
-            return std.fmt.allocPrint(allocator, "plan mode: {s} blocked. /plan go to implement.\n", .{call.name});
-        }
+        if (try turn_loop.malformedToolCheck(
+            allocator,
+            .{ .name = call.name, .preamble = call.preamble },
+            &malformed,
+            max_malformed,
+            malformed_text,
+            &last,
+            ensureNl,
+        )) |stop| return stop;
         const mode = liveMode(run);
-        var decision = admitCall(mode, call.name, call.args, has_tty, cfg.rules, run.session_rules, always[0..always_n]);
-        // Commands copied out of tool output stay blocked unless the user asked.
-        if (decision == .allow or decision == .prompt) {
-            var cmd_buf: [permissions.max_command]u8 = undefined;
-            const cmd = permissions.shellCommand(&cmd_buf, call.args) orelse
-                sse.argStringInto(&cmd_buf, call.args, "path") orelse "";
-            if (permissions.derivedFromToolOutput(cmd, user, tool_blob.items)) {
-                decision = if (has_tty) .prompt else .deny;
-            }
-        }
-        var one_shot: ?[]u8 = null;
-        if (decision == .prompt) {
-            var detail_buf: [permissions.max_command]u8 = undefined;
-            const detail0 = toolDetail(&detail_buf, call.args);
-            const ans = if (host.decide(call.name, detail0, call.args)) |a| a else if (permissions.askHuman(io, call.name)) sink.Ask.allow else sink.Ask.deny;
-            switch (ans) {
-                .allow => {
-                    // One-shot allow: exact action only, re-checked before run.
-                    decision = .allow;
-                    one_shot = try permissions.exactKey(allocator, call.name, call.args);
-                },
-                .always => {
-                    decision = .allow;
-                    if (always_n < always.len) {
-                        always[always_n] = try permissions.exactKey(allocator, call.name, call.args);
-                        always_n += 1;
-                    }
-                    one_shot = try permissions.exactKey(allocator, call.name, call.args);
-                },
-                .deny => decision = .deny,
-            }
-        }
-        defer if (one_shot) |k| allocator.free(k);
-        switch (decision) {
-            .allow => {},
-            .prompt => {},
-            .need_tty, .deny => {
-                if (trace) |t| {
-                    t.denied = true;
-                    t.setTool(call.name, call.args);
-                }
-                var deny_buf: [48]u8 = undefined;
-                const deny_line = std.fmt.bufPrint(&deny_buf, "denied {s}", .{call.name}) catch "denied tool";
-                playbook.noteHarmful(allocator, io, workspace, deny_line);
-                var deny_detail_buf: [permissions.max_command]u8 = undefined;
-                const deny_detail = toolDetail(&deny_detail_buf, call.args);
-                const deny_body = if (deny_detail.len != 0)
-                    try std.fmt.allocPrint(allocator, "permission denied: {s}\n", .{deny_detail})
-                else
-                    try allocator.dupe(u8, "permission denied\n");
-                defer allocator.free(deny_body);
-                host.toolOut(call.name, deny_detail, true, deny_body);
+        const admitted = try turn_loop.admitToolCall(.{
+            .allocator = allocator,
+            .io = io,
+            .mode = mode,
+            .has_tty = has_tty,
+            .rules = cfg.rules,
+            .session_rules = run.session_rules,
+            .always = always[0..always_n],
+            .always_n = &always_n,
+            .always_cap = always.len,
+            .host = host,
+            .trace = trace_hook,
+            .plan = plan,
+            .user = user,
+            .tool_blob = tool_blob.items,
+            .workspace = workspace,
+            .call = .{ .name = call.name, .args = call.args },
+        });
+        switch (admitted) {
+            .stop => |msg| {
                 last.deinit(allocator);
-                return try allocator.dupe(u8, deny_body);
+                return msg;
             },
-        }
-        const asst_text = try allocator.dupe(u8, call.preamble);
-        const tool_name = try allocator.dupe(u8, call.name);
-        var start_activity_buf: [120]u8 = undefined;
-        const activity_label = sse.argStringInto(&start_activity_buf, call.args, "activity") orelse
-            sse.argStringInto(&start_activity_buf, call.args, "description") orelse "";
-        host.tool(call.name, activity_label, false);
-        const tool_args = try allocator.dupe(u8, call.args);
-        last.deinit(allocator);
-        if (trace) |t| t.setTool(tool_name, tool_args);
+            .allow => |ok| {
+                defer if (ok.one_shot) |k| allocator.free(k);
+                const asst_text = try allocator.dupe(u8, call.preamble);
+                const tool_name = try allocator.dupe(u8, call.name);
+                var start_activity_buf: [120]u8 = undefined;
+                const activity_label = sse.argStringInto(&start_activity_buf, call.args, "activity") orelse
+                    sse.argStringInto(&start_activity_buf, call.args, "description") orelse "";
+                host.tool(call.name, activity_label, false);
+                const tool_args = try allocator.dupe(u8, call.args);
+                last.deinit(allocator);
+                if (trace) |t| t.setTool(tool_name, tool_args);
 
-        // Exact-action re-check: live mode may have changed; a human clear
-        // covers only this frozen name+args. Prompt again if mode still wants it.
-        host.pollModeCycle();
-        const mode_run = liveMode(run);
-        var recheck = admitCall(mode_run, tool_name, tool_args, has_tty, cfg.rules, run.session_rules, always[0..always_n]);
-        if (one_shot) |k| {
-            if (permissions.exactKeyHit(&.{k}, tool_name, tool_args)) recheck = .allow;
-        }
-        if (recheck == .prompt) {
-            var detail_buf: [permissions.max_command]u8 = undefined;
-            const detail0 = toolDetail(&detail_buf, tool_args);
-            const ans = if (host.decide(tool_name, detail0, tool_args)) |a| a else if (permissions.askHuman(io, tool_name)) sink.Ask.allow else sink.Ask.deny;
-            recheck = if (ans == .deny) .deny else .allow;
-        }
-        if (recheck != .allow) {
-            var deny_detail_buf: [permissions.max_command]u8 = undefined;
-            const deny_detail = toolDetail(&deny_detail_buf, tool_args);
-            const deny_body = if (deny_detail.len != 0)
-                try std.fmt.allocPrint(allocator, "permission denied: {s}\n", .{deny_detail})
-            else
-                try allocator.dupe(u8, "permission denied\n");
-            defer allocator.free(deny_body);
-            host.toolOut(tool_name, deny_detail, true, deny_body);
-            allocator.free(asst_text);
-            allocator.free(tool_name);
-            allocator.free(tool_args);
-            return try allocator.dupe(u8, deny_body);
-        }
-
-        if (Tool.Name.fromSlice(tool_name)) |n| {
-            if (n.isExplore()) explored = true;
-        }
-        // Re-posting an unchanged task list is the tool working as intended,
-        // not a stuck model, so it must not feed the doom-loop counter.
-        if (Tool.Name.fromSlice(tool_name) == .todo) {
-            same = 0;
-        } else {
-            _ = bumpRepeat(&same, prev_name, prev_args, tool_name, tool_args);
-        }
-        if (!std.mem.eql(u8, prev_name, tool_name) or !std.mem.eql(u8, prev_args, tool_args)) {
-            allocator.free(prev_name);
-            allocator.free(prev_args);
-            prev_name = try allocator.dupe(u8, tool_name);
-            prev_args = try allocator.dupe(u8, tool_args);
-        }
-
-        const path = sse.argString(allocator, tool_args, "path");
-        var result: []u8 = undefined;
-        switch (hooks.pre(con, tool_name, tool_args)) {
-            .deny => |blocked| {
-                result = try allocator.dupe(u8, blocked);
-            },
-            .allow => switch (try executeAdmitted(.{
-                .allocator = allocator,
-                .io = io,
-                .dir = dir,
-                .workspace = workspace,
-                .endpoint = endpoint,
-                .home = home,
-                .mode = mode_run,
-                .has_tty = has_tty,
-                .reads = reads,
-                .depth = depth,
-                .depth_cap = depth_cap,
-                .allow_peer = allow_peer,
-                .host = host,
-                .trace = trace,
-                .plan = run.plan,
-                .cfg = cfg,
-                .lookup = run.lookup,
-                .auth_json = run.auth_json,
-                .explored = explored,
-                .same = same,
-                .asst_text = asst_text,
-                .tool_name = tool_name,
-                .tool_args = tool_args,
-                .path = path,
-                .thread = &thread,
-            })) {
-                .stop => |msg| return msg,
-                .result => |r| result = r,
-            },
-        }
-        // Archive before mask: put() must see secrets to write the placeholder.
-        const archive_src = try allocator.dupe(u8, result);
-        defer allocator.free(archive_src);
-        {
-            const hooked = try hooks.post(allocator, io, workspace, dir, con, tool_name, path, result);
-            allocator.free(result);
-            result = hooked;
-            if (Tool.Name.fromSlice(tool_name)) |n| {
-                if (n.needsVerify()) {
-                    recordVerify(allocator, io, workspace, trace, result);
+                host.pollModeCycle();
+                const mode_run = liveMode(run);
+                if (try turn_loop.recheckAdmitted(.{
+                    .allocator = allocator,
+                    .io = io,
+                    .mode = mode_run,
+                    .has_tty = has_tty,
+                    .rules = cfg.rules,
+                    .session_rules = run.session_rules,
+                    .always = always[0..always_n],
+                    .host = host,
+                    .one_shot = ok.one_shot,
+                    .tool_name = tool_name,
+                    .tool_args = tool_args,
+                })) |deny_body| {
+                    var deny_detail_buf: [permissions.max_command]u8 = undefined;
+                    const deny_detail = turn_loop.toolDetail(&deny_detail_buf, tool_args);
+                    host.toolOut(tool_name, deny_detail, true, deny_body);
+                    allocator.free(asst_text);
+                    allocator.free(tool_name);
+                    allocator.free(tool_args);
+                    return deny_body;
                 }
-            }
-        }
-        if (tool_blob.items.len + result.len > tool_blob_cap) {
-            const drop = tool_blob.items.len + result.len - tool_blob_cap;
-            if (drop < tool_blob.items.len) {
-                const keep = tool_blob.items[drop..];
-                std.mem.copyForwards(u8, tool_blob.items[0..keep.len], keep);
-                tool_blob.shrinkRetainingCapacity(keep.len);
-            } else {
-                tool_blob.clearRetainingCapacity();
-            }
-        }
-        try tool_blob.appendSlice(allocator, result);
-        var out_detail_buf: [permissions.max_command]u8 = undefined;
-        const detail = blk: {
-            const d = toolDetail(&out_detail_buf, tool_args);
-            break :blk if (d.len != 0) d else path orelse "";
-        };
-        host.toolOut(tool_name, detail, true, result);
-        for (extras) |ex| {
-            host.pollCancel();
-            host.pollModeCycle();
-            if (host.cancelled()) break;
-            var ex_detail_buf: [permissions.max_command]u8 = undefined;
-            const ex_path = toolDetail(&ex_detail_buf, ex.args);
-            host.tool(ex.name, ex_path, false);
-            const d = admitCall(liveMode(run), ex.name, ex.args, has_tty, cfg.rules, run.session_rules, always[0..always_n]);
-            if (d != .allow) {
-                const deny_msg = if (ex_path.len != 0)
-                    try std.fmt.allocPrint(allocator, "permission denied: {s}\n", .{ex_path})
-                else
-                    try allocator.dupe(u8, "permission denied\n");
-                defer allocator.free(deny_msg);
-                host.toolOut(ex.name, ex_path, true, deny_msg);
-                continue;
-            }
-            const extra_res = dispatch.run(dir, io, allocator, workspace, ex.name, ex.args, home) catch |err|
-                try std.fmt.allocPrint(allocator, "tool error: {s}", .{@errorName(err)});
-            host.toolOut(ex.name, ex_path, true, extra_res);
-            const joined = try std.fmt.allocPrint(allocator, "{s}\nTool {s} result:\n{s}", .{ result, ex.name, extra_res });
-            allocator.free(result);
-            allocator.free(extra_res);
-            result = joined;
-        }
 
-        // Harness circuit breaker: soft prompt lines do not stop re-plan thrash.
-        // Decide before asst_text is moved into the thread.
-        const round_orients = preambleReorients(asst_text) or toolLooksOrient(tool_name, tool_args);
-        if (round_orients) orient_streak += 1 else orient_streak = 0;
+                if (Tool.Name.fromSlice(tool_name)) |n| {
+                    if (n.isExplore()) explored = true;
+                }
+                if (Tool.Name.fromSlice(tool_name) == .todo) {
+                    same = 0;
+                } else {
+                    _ = bumpRepeat(&same, prev_name, prev_args, tool_name, tool_args);
+                }
+                if (!std.mem.eql(u8, prev_name, tool_name) or !std.mem.eql(u8, prev_args, tool_args)) {
+                    allocator.free(prev_name);
+                    allocator.free(prev_args);
+                    prev_name = try allocator.dupe(u8, tool_name);
+                    prev_args = try allocator.dupe(u8, tool_args);
+                }
 
-        // A tool round with no prose gets no assistant turn at all.
-        //
-        // This used to append "[tool <name>]" as the assistant's entire
-        // message. The model reads its own history, so a turn whose whole
-        // content was a bracket tag taught it that bracket tags are a thing
-        // to say -- and it started emitting "[tool list]" as prose. The tool
-        // result below already names the tool, so the placeholder was telling
-        // the model nothing it could not read one message later.
-        if (asst_text.len != 0) {
-            try thread.append(allocator, .{
-                .role = try allocator.dupe(u8, "assistant"),
-                .content = asst_text,
-            });
-        } else {
-            allocator.free(asst_text);
-        }
-
-        const result_nl = try ensureNl(allocator, result);
-        allocator.free(result);
-        var follow_raw = if (std.mem.startsWith(u8, result_nl, "Note "))
-            try allocator.dupe(u8, result_nl)
-        else
-            try std.fmt.allocPrint(allocator, "Tool {s} result:\n{s}Continue.", .{ tool_name, result_nl });
-        allocator.free(result_nl);
-
-        if (orient_streak >= orient_after) {
-            const nudged = try std.fmt.allocPrint(allocator, "{s}\n{s}\n", .{ follow_raw, orient_nudge });
-            allocator.free(follow_raw);
-            follow_raw = nudged;
-        }
-
-        if (Tool.Name.fromSlice(tool_name)) |n| {
-            if (n == .board or n == .peer) {
-                const tail_now = board.loadTail(allocator, io, workspace);
-                defer if (tail_now.len > 0) allocator.free(tail_now);
-                const now = try ssvp.summary(allocator, tail_now);
-                defer allocator.free(now);
-                if (n == .board) {
-                    switch (try ssvp.adopt(allocator, &last_summary, now, .self)) {
-                        .none => {},
-                        .merge => |msg| allocator.free(msg),
-                    }
-                } else switch (try ssvp.adopt(allocator, &last_summary, now, .peer)) {
-                    .none => {},
-                    .merge => |msg| {
-                        defer allocator.free(msg);
-                        const joined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ msg, follow_raw });
-                        allocator.free(follow_raw);
-                        follow_raw = joined;
+                const path = sse.argString(allocator, tool_args, "path");
+                var result: []u8 = undefined;
+                switch (hooks.pre(con, tool_name, tool_args)) {
+                    .deny => |blocked| {
+                        result = try allocator.dupe(u8, blocked);
+                    },
+                    .allow => switch (try executeAdmitted(.{
+                        .allocator = allocator,
+                        .io = io,
+                        .dir = dir,
+                        .workspace = workspace,
+                        .endpoint = endpoint,
+                        .home = home,
+                        .mode = mode_run,
+                        .has_tty = has_tty,
+                        .reads = reads,
+                        .depth = depth,
+                        .depth_cap = depth_cap,
+                        .allow_peer = allow_peer,
+                        .host = host,
+                        .trace = trace,
+                        .plan = run.plan,
+                        .cfg = cfg,
+                        .lookup = run.lookup,
+                        .auth_json = run.auth_json,
+                        .explored = explored,
+                        .same = same,
+                        .asst_text = asst_text,
+                        .tool_name = tool_name,
+                        .tool_args = tool_args,
+                        .path = path,
+                        .thread = &thread,
+                    })) {
+                        .stop => |msg| return msg,
+                        .result => |r| result = r,
                     },
                 }
-            }
+                const archive_src = try allocator.dupe(u8, result);
+                defer allocator.free(archive_src);
+                {
+                    const hooked = try hooks.post(allocator, io, workspace, dir, con, tool_name, path, result);
+                    allocator.free(result);
+                    result = hooked;
+                    if (Tool.Name.fromSlice(tool_name)) |n| {
+                        if (n.needsVerify()) {
+                            recordVerify(allocator, io, workspace, trace, result);
+                        }
+                    }
+                }
+                if (tool_blob.items.len + result.len > tool_blob_cap) {
+                    const drop = tool_blob.items.len + result.len - tool_blob_cap;
+                    if (drop < tool_blob.items.len) {
+                        const keep = tool_blob.items[drop..];
+                        std.mem.copyForwards(u8, tool_blob.items[0..keep.len], keep);
+                        tool_blob.shrinkRetainingCapacity(keep.len);
+                    } else {
+                        tool_blob.clearRetainingCapacity();
+                    }
+                }
+                try tool_blob.appendSlice(allocator, result);
+                var out_detail_buf: [permissions.max_command]u8 = undefined;
+                const detail = blk: {
+                    const d = turn_loop.toolDetail(&out_detail_buf, tool_args);
+                    break :blk if (d.len != 0) d else path orelse "";
+                };
+                host.toolOut(tool_name, detail, true, result);
+                for (extras) |ex| {
+                    host.pollCancel();
+                    host.pollModeCycle();
+                    if (host.cancelled()) break;
+                    var ex_detail_buf: [permissions.max_command]u8 = undefined;
+                    const ex_path = turn_loop.toolDetail(&ex_detail_buf, ex.args);
+                    host.tool(ex.name, ex_path, false);
+                    const d = turn_loop.admitCall(liveMode(run), ex.name, ex.args, has_tty, cfg.rules, run.session_rules, always[0..always_n]);
+                    if (d != .allow) {
+                        const deny_msg = if (ex_path.len != 0)
+                            try std.fmt.allocPrint(allocator, "permission denied: {s}\n", .{ex_path})
+                        else
+                            try allocator.dupe(u8, "permission denied\n");
+                        defer allocator.free(deny_msg);
+                        host.toolOut(ex.name, ex_path, true, deny_msg);
+                        continue;
+                    }
+                    const extra_res = dispatch.run(dir, io, allocator, workspace, ex.name, ex.args, home) catch |err|
+                        try std.fmt.allocPrint(allocator, "tool error: {s}", .{@errorName(err)});
+                    host.toolOut(ex.name, ex_path, true, extra_res);
+                    const joined = try std.fmt.allocPrint(allocator, "{s}\nTool {s} result:\n{s}", .{ result, ex.name, extra_res });
+                    allocator.free(result);
+                    allocator.free(extra_res);
+                    result = joined;
+                }
+
+                const round_orients = preambleReorients(asst_text) or toolLooksOrient(tool_name, tool_args);
+                if (round_orients) orient_streak += 1 else orient_streak = 0;
+
+                if (asst_text.len != 0) {
+                    try thread.append(allocator, .{
+                        .role = try allocator.dupe(u8, "assistant"),
+                        .content = asst_text,
+                    });
+                } else {
+                    allocator.free(asst_text);
+                }
+
+                const result_nl = try ensureNl(allocator, result);
+                allocator.free(result);
+                var follow_raw = if (std.mem.startsWith(u8, result_nl, "Note "))
+                    try allocator.dupe(u8, result_nl)
+                else
+                    try std.fmt.allocPrint(allocator, "Tool {s} result:\n{s}Continue.", .{ tool_name, result_nl });
+                allocator.free(result_nl);
+
+                if (orient_streak >= orient_after) {
+                    const nudged = try std.fmt.allocPrint(allocator, "{s}\n{s}\n", .{ follow_raw, orient_nudge });
+                    allocator.free(follow_raw);
+                    follow_raw = nudged;
+                }
+
+                if (Tool.Name.fromSlice(tool_name)) |n| {
+                    if (n == .board or n == .peer) {
+                        const tail_now = board.loadTail(allocator, io, workspace);
+                        defer if (tail_now.len > 0) allocator.free(tail_now);
+                        const now = try ssvp.summary(allocator, tail_now);
+                        defer allocator.free(now);
+                        if (n == .board) {
+                            switch (try ssvp.adopt(allocator, &last_summary, now, .self)) {
+                                .none => {},
+                                .merge => |msg| allocator.free(msg),
+                            }
+                        } else switch (try ssvp.adopt(allocator, &last_summary, now, .peer)) {
+                            .none => {},
+                            .merge => |msg| {
+                                defer allocator.free(msg);
+                                const joined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ msg, follow_raw });
+                                allocator.free(follow_raw);
+                                follow_raw = joined;
+                            },
+                        }
+                    }
+                }
+                const follow = try presentResult(allocator, dir, io, tool_name, path, follow_raw, archive_src);
+                allocator.free(follow_raw);
+                allocator.free(tool_name);
+                allocator.free(tool_args);
+                try thread.append(allocator, .{
+                    .role = try allocator.dupe(u8, "user"),
+                    .content = follow,
+                });
+                switch (try compactThread(allocator, &thread)) {
+                    .applied, .skipped => {},
+                }
+                host.pollCancel();
+                if (host.cancelled()) return allocator.dupe(u8, interrupted_text);
+                if (try turn_loop.checkTurnLimit(allocator, turns, max_tool_turns)) |stop| return stop;
+                last = (try postOrStop(allocator, io, endpoint, thread.items, sys, flags)) orelse
+                    return allocator.dupe(u8, interrupted_text);
+                turns += 1;
+            },
         }
-        const follow = try presentResult(allocator, dir, io, tool_name, path, follow_raw, archive_src);
-        allocator.free(follow_raw);
-        allocator.free(tool_name);
-        allocator.free(tool_args);
-        try thread.append(allocator, .{
-            .role = try allocator.dupe(u8, "user"),
-            .content = follow,
-        });
-        switch (try compactThread(allocator, &thread)) {
-            .applied, .skipped => {},
-        }
-        host.pollCancel();
-        if (host.cancelled()) return allocator.dupe(u8, interrupted_text);
-        if (turns >= max_tool_turns) {
-            return std.fmt.allocPrint(
-                allocator,
-                "stopped: max_tool_turns={d}, next would be {d}; not a clean verdict.\n",
-                .{ max_tool_turns, turns + 1 },
-            );
-        }
-        last = (try postOrStop(allocator, io, endpoint, thread.items, sys, flags)) orelse
-            return allocator.dupe(u8, interrupted_text);
-        turns += 1;
     }
 }
 
@@ -855,7 +784,7 @@ fn executeAdmitted(a: AdmitArgs) !AdmitOutcome {
             .{ a.same, doom_after },
         );
         var doom_detail_buf: [permissions.max_command]u8 = undefined;
-        a.host.toolOut(a.tool_name, toolDetail(&doom_detail_buf, a.tool_args), true, msg);
+        a.host.toolOut(a.tool_name, turn_loop.toolDetail(&doom_detail_buf, a.tool_args), true, msg);
         allocator.free(a.tool_name);
         allocator.free(a.tool_args);
         return .{ .stop = msg };
@@ -1176,19 +1105,6 @@ fn assembleSystem(
     return allocator.dupe(u8, sys_spec);
 }
 
-fn admitCall(
-    mode: config.PermissionMode,
-    name: []const u8,
-    args: []const u8,
-    has_tty: bool,
-    rules: []const permissions.Rule,
-    session: []const permissions.Rule,
-    always: []const []const u8,
-) permissions.Decision {
-    if (permissions.exactKeyHit(always, name, args)) return .allow;
-    return permissions.admitWithSession(mode, name, args, has_tty, rules, session);
-}
-
 fn exploreBlock(allocator: std.mem.Allocator, tool: []const u8) ![]u8 {
     return std.fmt.allocPrint(
         allocator,
@@ -1321,12 +1237,6 @@ fn fileExists(dir: Io.Dir, io: Io, allocator: std.mem.Allocator, rel: []const u8
 fn ensureNl(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
     if (s.len == 0 or s[s.len - 1] == '\n') return allocator.dupe(u8, s);
     return std.fmt.allocPrint(allocator, "{s}\n", .{s});
-}
-
-test "toolDetail unescapes a command tab" {
-    var buf: [64]u8 = undefined;
-    const d = toolDetail(&buf, "{\"command\":\"ls\\t-la\"}");
-    try std.testing.expectEqualStrings("ls\t-la", d);
 }
 
 test "seedThread keeps an interrupted turn in front of the follow-up" {

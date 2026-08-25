@@ -1,7 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const cli = @import("cli.zig");
-const progress = @import("../cli/progress.zig");
+const progress = @import("progress.zig");
 
 const log = std.log.scoped(.update);
 

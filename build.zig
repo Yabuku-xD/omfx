@@ -16,6 +16,24 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    const gen_models_exe = b.addExecutable(.{
+        .name = "gen_models",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/gen_models.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+        }),
+    });
+    const gen_models_run = b.addRunArtifact(gen_models_exe);
+    gen_models_run.setCwd(b.path("."));
+    gen_models_run.addArg("data/models.json");
+    gen_models_run.addArg("src/providers/models/table.zig");
+    gen_models_run.addFileInput(b.path("data/models.json"));
+
+    const gen_models_step = b.step("gen-models", "Regenerate src/providers/models/table.zig from data/models.json");
+    gen_models_step.dependOn(&gen_models_run.step);
+
     const exe = b.addExecutable(.{
         .name = "omfx",
         .root_module = b.createModule(.{
@@ -29,6 +47,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(exe);
+    exe.step.dependOn(&gen_models_run.step);
 
     const run_step = b.step("run", "Run omfx");
     const run_cmd = b.addRunArtifact(exe);
@@ -75,5 +94,5 @@ pub fn build(b: *std.Build) void {
     wasm_step.dependOn(&b.addInstallArtifact(wasm, .{}).step);
 
     const fmt_step = b.step("fmt", "Check formatting");
-    fmt_step.dependOn(&b.addFmt(.{ .paths = &.{ "src", "build.zig" }, .check = true }).step);
+    fmt_step.dependOn(&b.addFmt(.{ .paths = &.{ "src", "tools", "build.zig" }, .check = true }).step);
 }

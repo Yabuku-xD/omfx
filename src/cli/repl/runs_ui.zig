@@ -117,45 +117,65 @@ pub fn setExpanded(sess: *Session, want: ?bool) void {
 }
 
 pub fn clickRun(sess: *Session, term_row: u16) void {
-    const click = runs_mod.clickAtTermRow(
+    const Hooks = struct {
+        fn on_miss(ctx: ?*anyopaque) void {
+            blurScrollback(@ptrCast(@alignCast(ctx.?)));
+        }
+        fn before(ctx: ?*anyopaque, idx: usize, part: runs_mod.Part) void {
+            const s: *Session = @ptrCast(@alignCast(ctx.?));
+            if (s.focus == .scrollback and s.sel != idx) mark(s, s.sel, false);
+            s.focus = .scrollback;
+            s.sel = idx;
+            mark(s, idx, true);
+            switch (part) {
+                .summary => {
+                    s.child = 0;
+                    s.hunk_i = 0;
+                },
+                .child => |i| {
+                    s.child = i;
+                    s.hunk_i = 0;
+                },
+            }
+        }
+        fn after(ctx: ?*anyopaque, idx: usize, rec: *runs_mod.Store.Rec) void {
+            const s: *Session = @ptrCast(@alignCast(ctx.?));
+            syncHunkNav(s, rec);
+            showRun(s, idx);
+            s.dirty = true;
+        }
+    };
+    const focus: ?usize = if (sess.sel < sess.runs.items.items.len) blk: {
+        const rec = &sess.runs.items.items[sess.sel];
+        break :blk if (rec.childOpen(sess.child) and sess.hunk_n > 0) sess.hunk_i else null;
+    } else null;
+    if (!runs_mod.handleClickAtTermRow(
         sess.arena,
         sess.layout,
         &sess.runs,
         &sess.shown,
         sess.scroll,
         term_row,
-    ) catch return orelse {
-        blurScrollback(sess, );
-        return;
-    };
-    const idx = click.run_index;
-    const rec = &sess.runs.items.items[idx];
-
-    if (sess.focus == .scrollback and sess.sel != idx) mark(sess, sess.sel, false);
-    sess.focus = .scrollback;
-    sess.sel = idx;
-    mark(sess, idx, true);
-
-    switch (click.part) {
-        .summary => {
-            if (!rec.openable()) {
-                sess.dirty = true;
-                return;
-            }
-            _ = runs_mod.applyPartToggle(rec, click.part);
-            sess.child = 0;
-            sess.hunk_i = 0;
+        .{
+            .ctx = sess,
+            .focus_hunk = focus,
+            .before_toggle = Hooks.before,
+            .after_toggle = Hooks.after,
+            .on_miss = Hooks.on_miss,
         },
-        .child => |i| {
-            sess.child = i;
-            _ = runs_mod.applyPartToggle(rec, click.part);
-            sess.hunk_i = 0;
-        },
+    )) {
+        const click = runs_mod.clickAtTermRow(
+            sess.arena,
+            sess.layout,
+            &sess.runs,
+            &sess.shown,
+            sess.scroll,
+            term_row,
+        ) catch return orelse return;
+        if (click.part == .summary and !sess.runs.items.items[click.run_index].openable()) {
+            sess.dirty = true;
+        }
     }
-    syncHunkNav(sess, rec);
-    _ = redrawRun(sess, rec);
-    showRun(sess, idx);
-    sess.dirty = true;
 }
 
 pub fn expandAll(sess: *Session) void {
