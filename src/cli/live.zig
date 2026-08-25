@@ -11,6 +11,7 @@ const sink = @import("../core/sink.zig");
 const askprev = @import("askprev.zig");
 const width_mod = @import("width.zig");
 const todos = @import("../core/todos.zig");
+const slash = @import("../core/slash.zig");
 
 const log = std.log.scoped(.live);
 
@@ -28,8 +29,34 @@ fn pinTodoChrome(allocator: std.mem.Allocator, cols: u16, rows: [][]const u8) []
     return rows[0..n];
 }
 
-fn scrollRowsFor(layout: *const tui.Layout, scroll: usize, task_n: usize) u16 {
-    const tasks: u16 = @intCast(@min(task_n, @as(usize, std.math.maxInt(u16))));
+fn formatContextPeek(
+    allocator: std.mem.Allocator,
+    cols: u16,
+    state: activity.State,
+    window: u32,
+    rows: [][]const u8,
+) []const []const u8 {
+    _ = cols;
+    if (rows.len < 5) return &.{};
+    const used = if (state.tokens != 0) state.tokens else 0;
+    var n: usize = 0;
+    rows[n] = std.fmt.allocPrint(allocator, "{s}Context (live){s}", .{ ansi.accent_dim, ansi.reset }) catch return &.{};
+    n += 1;
+    rows[n] = std.fmt.allocPrint(allocator, "  used {d} / window {d}", .{ used, window }) catch return rows[0..n];
+    n += 1;
+    rows[n] = std.fmt.allocPrint(allocator, "  cache read {d}  write {d}  fresh {d}", .{
+        state.cache_read,
+        state.cache_write,
+        state.fresh_input,
+    }) catch return rows[0..n];
+    n += 1;
+    rows[n] = std.fmt.allocPrint(allocator, "{s}  click meter again to hide{s}", .{ ansi.muted, ansi.reset }) catch return rows[0..n];
+    n += 1;
+    return rows[0..n];
+}
+
+fn scrollRowsFor(layout: *const tui.Layout, scroll: usize, task_n: usize, peek_n: usize) u16 {
+    const tasks: u16 = @intCast(@min(task_n + peek_n, @as(usize, std.math.maxInt(u16))));
     const overlay = tasks + @as(u16, if (tui.jumpVisible(scroll, layout.transcript_rows)) 1 else 0);
     const full = layout.transcript_rows;
     return if (full > overlay) full - overlay else full;
@@ -269,7 +296,7 @@ pub const Live = union(enum) {
         const next = tui.stepScroll(
             self.scroll.*,
             self.shown.rowCount(),
-            scrollRowsFor(self.layout, self.scroll.*, footerTaskCount()),
+            scrollRowsFor(self.layout, self.scroll.*, footerTaskCount(), if (sink.contextPeekOn()) 5 else 0),
             up,
             step,
         );
@@ -282,10 +309,17 @@ pub const Live = union(enum) {
         if (tui.jumpVisible(self.scroll.*, self.layout.transcript_rows)) {
             if (tui.jumpHitBox(self.layout.*)) |box| {
                 sink.setJumpHit(true, box.row, box.col0, box.col1);
-                return;
+            } else {
+                sink.setJumpHit(false, 0, 0, 0);
             }
+        } else {
+            sink.setJumpHit(false, 0, 0, 0);
         }
-        sink.setJumpHit(false, 0, 0, 0);
+        if (tui.contextHitBox(self.layout.*)) |box| {
+            sink.setContextHit(true, box.row, box.col0, box.col1);
+        } else {
+            sink.setContextHit(false, 0, 0, 0);
+        }
     }
 
     fn paintTty(self: *Tty, extra: Extra) void {
@@ -320,8 +354,16 @@ pub const Live = union(enum) {
         var footer = self.footer;
         footer.status = self.act.render(now);
         footer.jump = tui.jumpVisible(self.scroll.*, self.layout.transcript_rows);
+        // Live token meter: usage events update Act mid-stream; keep the
+        // header in sync instead of freezing the turn-start snapshot.
+        if (self.act.state.tokens != 0) footer.context_used = self.act.state.tokens;
         var todo_rows: [todos.max_items][]const u8 = undefined;
         footer.tasks = pinTodoChrome(self.arena, self.layout.cols, &todo_rows);
+        var peek_rows: [6][]const u8 = undefined;
+        footer.peek = if (sink.contextPeekOn())
+            formatContextPeek(self.arena, self.layout.cols, self.act.state, footer.context_window, &peek_rows)
+        else
+            &.{};
         // Words typed during the turn go into the steer queue. They are drawn
         // as their own row rather than inside the composer: the composer is
         // where the next prompt is written, and a queued message is a message
@@ -343,6 +385,22 @@ pub const Live = union(enum) {
         defer self.shown.setQueued(&.{});
         footer.queued = q.typing;
         if (q.typing.len != 0) footer.caret = q.typing.len;
+
+        // Slash / settings picker while generating (Claude interactive mode).
+        var slash_buf: [tui.max_slash_hits]slash.Spec = undefined;
+        const slash_n = tui.matchSlash(q.typing, &slash_buf, &.{});
+        footer.slash = slash_buf[0..slash_n];
+        const sel = @min(sink.slashSel(), if (slash_n == 0) 0 else slash_n - 1);
+        footer.slash_sel = sel;
+        sink.setSlashPalette(sel, slash_n);
+        if (sink.takeSlashTab() and slash_n != 0) {
+            sink.completeSlashName(slash_buf[sel].name);
+            const q2 = sink.peekSteer();
+            footer.queued = q2.typing;
+            footer.caret = q2.typing.len;
+            footer.slash = &.{};
+        }
+
         tui.writePane(self.allocator, self.stdout, self.layout.*, footer, self.shown, self.scroll.*) catch |err| {
             log.debug("writePane: {s}", .{@errorName(err)});
             return;

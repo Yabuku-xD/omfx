@@ -1163,6 +1163,8 @@ fn editDraftExternally(sess: *Session) !void {
     const body = Io.Dir.cwd().readFileAlloc(sess.io, path, sess.arena, .limited(256 * 1024)) catch return;
     // A trailing newline is the editor's, not the prompt's.
     try sess.draft.replace(sess.gpa, std.mem.trimEnd(u8, body, "\n\r"));
+    // Scratch only — do not leave draft.txt polluting the workspace tree.
+    Io.Dir.cwd().deleteFile(sess.io, path) catch {};
 }
 
 /// Everything about this session, in one readable frame.
@@ -3020,6 +3022,9 @@ pub fn run(
         // Words aimed at a turn the user just stopped are not the next prompt.
         if (cancelled) sink.dropSteer();
         const partial = if (cancelled) try arena.dupe(u8, asst_hold.items) else "";
+        // Final prose that never streamed (common after tool rounds) must still
+        // land in the transcript even though tool cards already grew `shown`.
+        const streamed_asst = asst_hold.items.len != 0;
         live.flushAsst();
         live.flushGroups();
         live.flushTable();
@@ -3027,7 +3032,7 @@ pub fn run(
         live.stopSpin();
         if (!reply_owned) {
             try sess.shown.append(try arena.dupe(u8, reply));
-        } else if (sess.shown.bytes().len == kept and reply.len > 0) {
+        } else if (reply.len > 0 and (!streamed_asst or sess.shown.bytes().len == kept)) {
             try sess.shown.append(try chat.formatAssistant(arena, sess.layout.cols, reply));
         }
         if (diagram.save(gpa, Io.Dir.cwd(), io, reply)) |saved| {
@@ -3075,6 +3080,36 @@ pub fn run(
             continue;
         }
         takeSteering(&sess);
+        {
+            var cmd_buf: [64]u8 = undefined;
+            const pending = sink.takePendingCmd(&cmd_buf);
+            if (pending.len != 0) {
+                // Mid-turn Enter on `/settings` (etc.): run after the turn, do
+                // not send as a user message.
+                switch (try cmds.dispatch(&ctx, pending)) {
+                    .handled => {
+                        sess.takeMenuNote(&state.menu, nowMs(io));
+                        sess.dirty = true;
+                    },
+                    .quit => {},
+                    .panel => |kind| {
+                        switch (kind) {
+                            .help, .shortcuts => sess.openSearchPanel(kind),
+                            else => {
+                                sess.openPanel(buildPanel(&sess, kind));
+                                sess.panel_kind = kind;
+                            },
+                        }
+                        sess.dirty = true;
+                    },
+                    .fallthrough, .retry => {
+                        try sess.draft.replace(sess.gpa, pending);
+                        sess.steer_send = true;
+                        sess.dirty = true;
+                    },
+                }
+            }
+        }
         if (state.sound) sound_mod.play(io, lookup, .success);
         const outcome: []const u8 = if (trace.denied) "denied" else "continued";
         // The window is the thread resent each turn, so what it holds is the
