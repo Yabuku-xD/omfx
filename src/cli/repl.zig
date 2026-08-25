@@ -30,6 +30,7 @@ const config = @import("../core/config.zig");
 const env = @import("../core/env.zig");
 const cli = @import("../core/cli.zig");
 const catalog = @import("../providers/catalog.zig");
+const models = @import("../providers/models.zig");
 const auth = @import("../providers/auth.zig");
 const types = @import("../providers/types.zig");
 const pathing = @import("../tools/pathing.zig");
@@ -2029,14 +2030,13 @@ pub fn run(
         relay.ensure(gpa, io, settings.cdpPort(cfg));
         state.sound = settings.soundOn(cfg);
         if (cfg.effort.len > 0 and state.effort.len == 0) state.effort = try arena.dupe(u8, cfg.effort);
-        // Known before the first turn, so the header can say how much room
-        // there is from a cold start rather than appearing once you have
-        // already spent some of it.
+        // Builtin/cache only — `describeModel` hits /models and can stall the
+        // first paint for tens of seconds on a slow or flaky network. The live
+        // list loads when the user opens /model or the picker.
         {
-            var ec = sess.cmdCtx();
             const provider = if (state.resolved) |r| r.spec.id else "";
             const id = if (state.resolved) |r| r.model else model_name;
-            if (cmds.describeModel(&ec, provider, id)) |m| sess.ctx_window = m.context_window;
+            if (models.lookup(provider, id)) |m| sess.ctx_window = m.context_window;
         }
         if (cfg.editor.len > 0 and !std.mem.eql(u8, cfg.editor, "auto")) state.editor = try arena.dupe(u8, cfg.editor);
         deadline.setDefaultSecs(cfg.bash_timeout);
@@ -2055,6 +2055,17 @@ pub fn run(
     sess.skill_specs = skillSpecs(&sess);
     var raw = tty.Raw.enter();
     defer raw.leave();
+    // Registered before the restore defer so restore runs first (LIFO), then
+    // this message lands on the primary screen instead of vanishing with alt.
+    var exit_eof = false;
+    defer {
+        if (exit_eof) {
+            var err_buf: [256]u8 = undefined;
+            var err_w: Io.File.Writer = .init(.stderr(), io, &err_buf);
+            err_w.interface.writeAll("omfx: stdin closed — interactive mode needs a terminal\n") catch {};
+            err_w.interface.flush() catch {};
+        }
+    }
     const painted = try tui.paintSequence(arena, sess.layout, .{
         .model = model_name,
         .permission = cmds.footerPerm(state),
@@ -2708,7 +2719,10 @@ pub fn run(
                 continue;
             },
             .paste_end => continue,
-            .eof => break,
+            .eof => {
+                exit_eof = true;
+                break;
+            },
             .enter => {
                 try sess.hold.flush(gpa, &sess.draft);
                 const items = sess.draft.items();

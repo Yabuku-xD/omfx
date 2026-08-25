@@ -89,6 +89,7 @@ pub const Http = struct {
 
         const headers: std.http.Client.Request.Headers = .{
             .content_type = if (content_type.len > 0) .{ .override = content_type } else .omit,
+            .accept_encoding = .{ .override = "identity" },
         };
         const result = client.fetch(.{
             .location = .{ .url = url },

@@ -67,6 +67,7 @@ pub fn fetch(allocator: std.mem.Allocator, io: Io, url: []const u8) ![]u8 {
     const result = client.fetch(.{
         .location = .{ .url = url },
         .method = .GET,
+        .headers = .{ .accept_encoding = .{ .override = "identity" } },
         .response_writer = &aw.writer,
         .redirect_buffer = &loc_buf,
         .redirect_behavior = @enumFromInt(max_redirect_hops),
@@ -96,6 +97,7 @@ pub fn scrape(allocator: std.mem.Allocator, io: Io, url: []const u8) ![]u8 {
     const result = client.fetch(.{
         .location = .{ .url = url },
         .method = .GET,
+        .headers = .{ .accept_encoding = .{ .override = "identity" } },
         .response_writer = &aw.writer,
         .redirect_buffer = &loc_buf,
         .redirect_behavior = @enumFromInt(max_redirect_hops),
