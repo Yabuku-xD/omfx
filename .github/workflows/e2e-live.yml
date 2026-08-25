@@ -17,7 +17,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: zig build
-      - run: python3 scripts/e2e.py
+      - run: |
+          WS=$(mktemp -d)
+          git init -q "$WS"
+          python3 scripts/e2e.py --workspace "$WS"
         env:
           OMFX_PROVIDER: commandcode
           OMFX_MODEL: deepseek/deepseek-v4-flash

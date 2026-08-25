@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import pty
 import re
@@ -238,6 +239,15 @@ def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+@contextmanager
+def isolated_home_ctx():
+    home = tempfile.mkdtemp(prefix="omfx-e2e-")
+    try:
+        yield home
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def isolated_home() -> str:

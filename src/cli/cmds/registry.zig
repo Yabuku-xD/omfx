@@ -316,6 +316,7 @@ fn doPeers(ctx: *Ctx, rest: []const u8) !void {
         .auth_json = json,
         .session_rules = ctx.state.sessionRuleSlice(),
         .path_access = pathAccess(ctx),
+        .tasks = ctx.tasks,
     }) catch |err| blk: {
         reply_owned = false;
         break :blk try std.fmt.allocPrint(ctx.arena, "error: {s}\n", .{@errorName(err)});

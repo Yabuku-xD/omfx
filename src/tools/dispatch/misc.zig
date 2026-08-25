@@ -50,7 +50,8 @@ pub fn run(
             break :blk try b.run(allocator, io, workspace, action, line);
         },
         .todo => blk: {
-            break :blk try tasks.?.applyJson(allocator, args_json);
+            const list = tasks orelse return try allocator.dupe(u8, "todo: no task list in this context\n");
+            break :blk try list.applyJson(allocator, args_json);
         },
         .patch => blk: {
             const spec = args.str("patch") orelse args.str("spec") orelse return error.EmptyPatch;

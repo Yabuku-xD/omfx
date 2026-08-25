@@ -28,7 +28,7 @@ from e2e_lib import (
     PtySession,
     free_port,
     has_live_credentials,
-    isolated_home,
+    isolated_home_ctx,
     main_interrupt,
     mock_provider_env,
     omfx_bin,
@@ -91,9 +91,17 @@ class Runner:
         (case_dir / ".omfx-out").write_text(out, encoding="utf-8")
         return out
 
-    def run_cmd(self, argv: list[str], cwd: Path | None = None, timeout: float = 60) -> subprocess.CompletedProcess[str]:
+    def run_cmd(
+        self,
+        argv: list[str],
+        cwd: Path | None = None,
+        timeout: float = 60,
+        home: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         env = dict(os.environ)
-        if self.workspace:
+        if home:
+            env["HOME"] = home
+        elif self.workspace:
             env.setdefault("HOME", str(Path.home()))
         return subprocess.run(
             argv,
@@ -167,14 +175,14 @@ def case_interrupt_harness_unit(r: Runner) -> tuple[bool, str]:
 
 def case_mock_interrupt(r: Runner) -> tuple[bool, str]:
     port = free_port()
-    home = isolated_home()
     d = r.case_dir("mock-interrupt")
     server = start_mock_server(str(SCRIPT_DIR), port)
     try:
-        env = mock_provider_env(port, home=home)
-        result = run_interrupt_test(r.binary, str(d), env=env)
-        ok, msg = result.ok(require_notice=True)
-        return ok, msg if ok else msg + f"\n{plain_tui(result.raw)[-600:]}"
+        with isolated_home_ctx() as home:
+            env = mock_provider_env(port, home=home)
+            result = run_interrupt_test(r.binary, str(d), env=env)
+            ok, msg = result.ok(require_notice=True)
+            return ok, msg if ok else msg + f"\n{plain_tui(result.raw)[-600:]}"
     finally:
         server.terminate()
         try:
@@ -185,36 +193,36 @@ def case_mock_interrupt(r: Runner) -> tuple[bool, str]:
 
 def case_mock_steer(r: Runner) -> tuple[bool, str]:
     port = free_port()
-    home = isolated_home()
     d = r.case_dir("mock-steer")
     server = start_mock_server(str(SCRIPT_DIR), port)
     marker = "steer-queued-test"
     try:
-        env = mock_provider_env(port, home=home)
-        sess = PtySession.spawn(r.binary, str(d), env=env)
-        try:
-            sess.pump(3.5)
-            sess.write(b"count from 1 to 2000, one number per line, nothing else\r")
-            sess.pump(6)
-            from e2e_lib import highest_counting_line
+        with isolated_home_ctx() as home:
+            env = mock_provider_env(port, home=home)
+            sess = PtySession.spawn(r.binary, str(d), env=env)
+            try:
+                sess.pump(3.5)
+                sess.write(b"count from 1 to 2000, one number per line, nothing else\r")
+                sess.pump(6)
+                from e2e_lib import highest_counting_line
 
-            if highest_counting_line(sess.buf) < 3:
-                return False, "counting never started before steer"
-            sess.write(marker.encode())
-            sess.pump(1.5)
-            plain = plain_tui(sess.buf)
-            if marker not in plain:
-                return False, "steer text not visible during turn"
-            sess.write(b"\r")
-            sess.pump(2)
-            sess.write(b"\x1b")
-            sess.pump(4)
-            plain = plain_tui(sess.buf)
-            if marker not in plain:
-                return False, "steer text lost after Enter/Esc"
-            return True, "steer visible during turn and retained"
-        finally:
-            sess.close()
+                if highest_counting_line(sess.buf) < 3:
+                    return False, "counting never started before steer"
+                sess.write(marker.encode())
+                sess.pump(1.5)
+                plain = plain_tui(sess.buf)
+                if marker not in plain:
+                    return False, "steer text not visible during turn"
+                sess.write(b"\r")
+                sess.pump(2)
+                sess.write(b"\x1b")
+                sess.pump(4)
+                plain = plain_tui(sess.buf)
+                if marker not in plain:
+                    return False, "steer text lost after Enter/Esc"
+                return True, "steer visible during turn and retained"
+            finally:
+                sess.close()
     finally:
         server.terminate()
         try:
@@ -356,31 +364,31 @@ def case_slash_sys(r: Runner) -> tuple[bool, str]:
 
 
 def case_features(r: Runner) -> tuple[bool, str]:
-    ws = _ws(r)
-    home = Path(os.environ.get("HOME", Path.home()))
+    _ws(r)
     p = r.run_cmd(["zig", "test", "src/tools/fs.zig", "--test-filter", "directory"], cwd=REPO, timeout=90)
     if p.returncode != 0:
         return False, (p.stderr or p.stdout)[-600:]
-    settings = home / ".omfx" / "settings.json"
-    settings.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        data = json.loads(settings.read_text(encoding="utf-8")) if settings.is_file() else {}
-    except Exception:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    data.setdefault("web_search", {"order": [], "exclude": [], "searxng_endpoint": ""})
-    prov = os.environ.get("OMFX_PROVIDER", "commandcode")
-    model = os.environ.get("OMFX_MODEL", "deepseek/deepseek-v4-flash")
-    data["models"] = {prov: model}
-    settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    with isolated_home_ctx() as home:
+        settings = Path(home) / ".omfx" / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            data = json.loads(settings.read_text(encoding="utf-8")) if settings.is_file() else {}
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data.setdefault("web_search", {"order": [], "exclude": [], "searxng_endpoint": ""})
+        prov = os.environ.get("OMFX_PROVIDER", "commandcode")
+        model = os.environ.get("OMFX_MODEL", "deepseek/deepseek-v4-flash")
+        data["models"] = {prov: model}
+        settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return True, "features smoke ok"
 
 
-def _live_ask(r: Runner, prompt: str, timeout: float = 180) -> tuple[bool, str]:
+def _live_ask(r: Runner, prompt: str, timeout: float = 180, home: str | None = None) -> tuple[bool, str]:
     ws = _ws(r)
     argv = [r.binary, "ask", "--yolo", "--effort", "none"] + provider_cli_args() + [prompt]
-    p = r.run_cmd(argv, cwd=ws, timeout=timeout)
+    p = r.run_cmd(argv, cwd=ws, timeout=timeout, home=home)
     out = (p.stdout or "") + (p.stderr or "")
     return p.returncode == 0 and len(out.strip()) > 0, out
 
@@ -392,17 +400,17 @@ def case_models(r: Runner) -> tuple[bool, str]:
 
 
 def case_skills(r: Runner) -> tuple[bool, str]:
-    home = Path(os.environ.get("HOME", Path.home()))
-    skill = "e2e-ping"
-    skill_dir = home / ".omfx" / "skills" / skill
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "SKILL.md").write_text(
-        "---\nname: e2e-ping\ndescription: e2e harness skill\n---\n\nWhen invoked, reply with exactly: SKILL_OK\n",
-        encoding="utf-8",
-    )
-    _ws(r)
-    ok, out = _live_ask(r, f"/{skill} Follow the skill. One line only.", timeout=180)
-    return ok and ("skill_ok" in out.lower() or "e2e-ping" in out.lower()), out[-1200:]
+    with isolated_home_ctx() as home:
+        skill = "e2e-ping"
+        skill_dir = Path(home) / ".omfx" / "skills" / skill
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: e2e-ping\ndescription: e2e harness skill\n---\n\nWhen invoked, reply with exactly: SKILL_OK\n",
+            encoding="utf-8",
+        )
+        _ws(r)
+        ok, out = _live_ask(r, f"/{skill} Follow the skill. One line only.", timeout=180, home=home)
+        return ok and ("skill_ok" in out.lower() or "e2e-ping" in out.lower()), out[-1200:]
 
 
 CASES: list[Case] = [
