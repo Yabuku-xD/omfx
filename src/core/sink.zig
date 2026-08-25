@@ -17,7 +17,7 @@ pub const Host = struct {
     on_think: ?*const fn (ctx: ?*anyopaque, chunk: []const u8) void = null,
     on_tool: ?*const fn (ctx: ?*anyopaque, name: []const u8, detail: []const u8, done: bool, body: []const u8) void = null,
     on_json: ?*const fn (ctx: ?*anyopaque, line: []const u8) void = null,
-    ask: ?*const fn (ctx: ?*anyopaque, name: []const u8, detail: []const u8) Ask = null,
+    ask: ?*const fn (ctx: ?*anyopaque, name: []const u8, detail: []const u8, args: []const u8) Ask = null,
     /// Real token counts from the provider, as they arrive.
     on_usage: ?*const fn (ctx: ?*anyopaque, input: u32, output: u32, read: u32, write: u32) void = null,
     on_tick: ?*const fn (ctx: ?*anyopaque) void = null,
@@ -67,8 +67,8 @@ pub const Host = struct {
         if (self.on_usage) |f| f(self.ctx, input, output, read, write);
     }
 
-    pub fn decide(self: Host, name: []const u8, detail: []const u8) ?Ask {
-        if (self.ask) |f| return f(self.ctx, name, detail);
+    pub fn decide(self: Host, name: []const u8, detail: []const u8, args: []const u8) ?Ask {
+        if (self.ask) |f| return f(self.ctx, name, detail, args);
         return null;
     }
 

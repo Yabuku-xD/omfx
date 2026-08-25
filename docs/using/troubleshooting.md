@@ -40,7 +40,7 @@ Mouse support is press, release, and drag only — not any-event tracking — so
 
 ## Permission denied on tools
 
-Check `/permissions` and `/allowlist`. Plan mode blocks writes until `/plan go`. Yolo is session-only.
+Check `/permissions` and `/allowlist`. Plan mode looks first and waits until you choose go (`/plan go`). Yolo is session-only.
 
 ## Edits undone after write
 

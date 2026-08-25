@@ -56,9 +56,9 @@ pub const Surface = enum {
 
     pub fn hint(self: Surface) []const u8 {
         return switch (self) {
-            .normal => "normal  ask before tools",
-            .plan => "plan  read-only; /plan go to implement",
-            .yolo => "yolo  tools run without asking",
+            .normal => "normal  ask before changes",
+            .plan => "plan  look first; say go when ready",
+            .yolo => "yolo  changes without asking",
         };
     }
 

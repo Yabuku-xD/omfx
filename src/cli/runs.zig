@@ -11,6 +11,14 @@
 const std = @import("std");
 
 const chat = @import("chat.zig");
+const diffview = @import("diffview.zig");
+
+/// Whether a single call's body has more to show than the summary card.
+pub fn bodyOpenable(body: []const u8) bool {
+    if (chat.looksLikeDiff(body) and diffview.needsExpand(body)) return true;
+    const lines = if (body.len == 0) @as(usize, 0) else std.mem.count(u8, body, "\n") + 1;
+    return lines > chat.child_body_lines;
+}
 
 pub const Store = struct {
     allocator: std.mem.Allocator,
@@ -48,9 +56,14 @@ pub const Store = struct {
             self.open_bits ^= @as(u64, 1) << @intCast(i);
         }
 
-        /// Only a run of two or more has anything the summary row does not show.
+        /// Two-or-more calls always expand. A single call expands when its
+        /// body is a truncated diff or longer than the child preview so the
+        /// summary card is not the only view of the work.
         pub fn openable(self: Rec) bool {
-            return self.details.len >= 2;
+            if (self.details.len >= 2) return true;
+            if (self.details.len == 0) return false;
+            if (self.bodies.len == 0) return false;
+            return bodyOpenable(self.bodies[0]);
         }
     };
 
@@ -179,6 +192,10 @@ pub fn partAt(allocator: std.mem.Allocator, cols: u16, r: Store.Rec, at: usize) 
 
 /// The bytes a run occupies in its current state.
 pub fn render(allocator: std.mem.Allocator, cols: u16, r: Store.Rec) chat.FormatError![]u8 {
+    return renderFocus(allocator, cols, r, null);
+}
+
+pub fn renderFocus(allocator: std.mem.Allocator, cols: u16, r: Store.Rec, focus_hunk: ?usize) chat.FormatError![]u8 {
     const n = r.details.len;
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -198,7 +215,7 @@ pub fn render(allocator: std.mem.Allocator, cols: u16, r: Store.Rec) chat.Format
             defer allocator.free(child);
             try out.appendSlice(allocator, child);
             if (!open) continue;
-            const body = try chat.formatChildBody(allocator, cols, r.bodies[i], i + 1 == n);
+            const body = try chat.formatChildBodyFocus(allocator, cols, r.bodies[i], i + 1 == n, focus_hunk);
             defer allocator.free(body);
             try out.appendSlice(allocator, body);
         }
@@ -278,7 +295,7 @@ test "a store finds the run a row belongs to and moves the ones below it" {
     try std.testing.expectEqual(@as(usize, 70), s.items.items[1].off);
 }
 
-test "only a run of two or more has anything to open" {
+test "only a short single call has nothing to open" {
     const a = std.testing.allocator;
     var s = Store.init(a);
     defer s.deinit();
@@ -292,6 +309,24 @@ test "only a run of two or more has anything to open" {
     // Nothing to show, so opening it must not add a row.
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, collapsed, "\n"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, opened, "\n"));
+}
+
+test "a long single diff is openable for the full body" {
+    const a = std.testing.allocator;
+    var s = Store.init(a);
+    defer s.deinit();
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(a);
+    try body.appendSlice(a, "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,40 +1,40 @@\n");
+    var i: usize = 0;
+    while (i < 40) : (i += 1) try body.print(a, "+line {d}\n", .{i});
+    try s.add(0, 4, false, "edit", &.{"a.zig"}, &.{body.items});
+    try std.testing.expect(s.items.items[0].openable());
+    s.items.items[0].expanded = true;
+    s.items.items[0].toggleChildBit(0);
+    const open = try render(a, 80, s.items.items[0]);
+    defer a.free(open);
+    try std.testing.expect(std.mem.indexOf(u8, open, "+line 39") != null);
 }
 
 test "opening a run draws every call under it" {

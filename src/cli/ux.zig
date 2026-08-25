@@ -13,6 +13,14 @@ const pathing = @import("../tools/pathing.zig");
 const cmds = @import("cmds.zig");
 const menus = @import("menus.zig");
 const tui = @import("tui.zig");
+const modal = @import("modal.zig");
+const diffview = @import("diffview.zig");
+const askprev = @import("askprev.zig");
+const uxcopy = @import("uxcopy.zig");
+const progress = @import("progress.zig");
+const toast = @import("toast.zig");
+const panel = @import("panel.zig");
+const virt = @import("virt.zig");
 
 const Flow = cmds.Flow;
 const PanelKind = cmds.PanelKind;
@@ -220,6 +228,9 @@ test "ux: panel commands open the right surface" {
         .{ .line = "/background", .panel = .jobs },
         .{ .line = "/workspace", .panel = .workspace },
         .{ .line = "/rewind", .panel = .rewind },
+        .{ .line = "/plan", .panel = .plan },
+        .{ .line = "/files", .panel = .files },
+        .{ .line = "/peers", .panel = .peers },
     };
     var h: Harness = undefined;
     try Harness.initInPlace(&h, std.testing.allocator);
@@ -283,8 +294,8 @@ test "ux: inspect commands answer in scrollback" {
     _ = try h.dispatch("/effort low");
     try h.expectContains("Reasoning set to low.");
     h.resetOutput();
-    _ = try h.dispatch("/peers");
-    try h.expectContains("Give the teammate a goal");
+    const peers = try h.dispatch("/peers");
+    try std.testing.expectEqual(cmds.PanelKind.peers, peers.panel);
 }
 
 test "ux: session lifecycle commands" {
@@ -607,4 +618,136 @@ test "ux matrix covers every builtin at least once" {
     }
     for (covered) |ok| try std.testing.expect(ok);
     std.debug.print("BENCH ux_matrix={d}\n", .{slash.builtin.len + extras.len});
+}
+
+test "ux: plan go with nothing ready stays friendly" {
+    var h: Harness = undefined;
+    try Harness.initInPlace(&h, std.testing.allocator);
+    defer h.deinit();
+    h.resetOutput();
+    const flow = try h.dispatch("/plan go");
+    try std.testing.expect(flow == .handled);
+    try std.testing.expect(std.mem.indexOf(u8, h.out(), "no plan yet") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.out(), "implement") == null);
+}
+
+test "ux: plan on speaks plain language" {
+    var h: Harness = undefined;
+    try Harness.initInPlace(&h, std.testing.allocator);
+    defer h.deinit();
+    h.resetOutput();
+    _ = try h.dispatch("/plan on");
+    try std.testing.expect(std.mem.indexOf(u8, h.out(), "Planning mode is on") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.out(), "plan=on") == null);
+}
+
+test "ux: slash help for files and peers is plain" {
+    const files = slash.find("/files") orelse return error.TestUnexpectedResult;
+    const peers = slash.find("/peers") orelse return error.TestUnexpectedResult;
+    const plan = slash.find("/plan") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, files.help, "@mention") == null);
+    try std.testing.expect(std.mem.indexOf(u8, peers.help, "<goal>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plan.help, "read-only") == null);
+}
+
+// Offline e2e for the interactive surfaces: empty → filled → narrow → overflow.
+test "e2e ui: permission, confirm, panels, hints, and empty states flow" {
+    const a = std.testing.allocator;
+
+    // Permission: plain title + friendly action + painted diff preview.
+    const preview = try askprev.build(a, "edit",
+        \\{"path":"hi.zig","old_string":"a","new_string":"b"}
+    );
+    defer a.free(preview);
+    try std.testing.expect(std.mem.indexOf(u8, preview, "-a") != null);
+    try std.testing.expect(std.mem.indexOf(u8, preview, "+b") != null);
+
+    const head = try std.fmt.allocPrint(a, "{s}\n{s}", .{ uxcopy.actionTitle("edit"), "hi.zig" });
+    defer a.free(head);
+    try std.testing.expectEqualStrings("Change a file", uxcopy.actionTitle("edit"));
+
+    const painted = try diffview.render(a, 48, preview, true);
+    defer a.free(painted);
+    const body = try std.fmt.allocPrint(a, "{s}\n{s}", .{ head, std.mem.trimEnd(u8, painted, "\n") });
+    defer a.free(body);
+
+    const g = modal.geometry(24, 80, modal.bodyLineCount(body), modal.perm_buttons.len);
+    const frame = try modal.render(a, g, "Allow this?", body, &modal.perm_buttons, 0, true);
+    defer a.free(frame);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "Allow this?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "Allow once") != null);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "Don't allow") != null);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "Change a file") != null);
+
+    // Confirm: consequence-named buttons fit a tiny pane.
+    const leave = [_]modal.Button{
+        .{ .key = "1", .label = "Leave" },
+        .{ .key = "2", .label = "Stay" },
+    };
+    const tiny = modal.geometry(8, 24, 2, leave.len);
+    const leave_frame = try modal.render(a, tiny, "Leave omfx?", "Your chat is saved.", &leave, 1, false);
+    defer a.free(leave_frame);
+    try std.testing.expect(std.mem.indexOf(u8, leave_frame, "Stay") != null);
+
+    // Missing detail when the model forgot the path.
+    try std.testing.expectEqualStrings("No file was named.", uxcopy.missingDetail("write"));
+
+    // Collapsed long diff still offers the expand path.
+    var long: std.ArrayList(u8) = .empty;
+    defer long.deinit(a);
+    try long.appendSlice(a, "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n");
+    var i: usize = 0;
+    while (i < 40) : (i += 1) try long.print(a, "+line {d}\n", .{i});
+    const collapsed = try diffview.render(a, 60, long.items, false);
+    defer a.free(collapsed);
+    try std.testing.expect(std.mem.indexOf(u8, collapsed, "press e") != null);
+    try std.testing.expect(diffview.needsExpand(long.items));
+    try std.testing.expect(diffview.hunkCount(long.items) >= 1);
+
+    // Progress + toast survive narrow cols.
+    var bar_buf: [128]u8 = undefined;
+    const bar = progress.render(&bar_buf, 20, 1, 4, "working");
+    try std.testing.expect(std.mem.indexOf(u8, bar, "25%") != null);
+    var q: toast.Queue = .{};
+    q.push("saved", 0);
+    const toast_line = try q.line(a, 16, 0);
+    defer a.free(toast_line);
+    try std.testing.expect(std.mem.indexOf(u8, toast_line, "saved") != null);
+    q.tick(toast.hold_ms + 1);
+    try std.testing.expectEqual(@as(usize, 0), q.n);
+
+    // Panel empty state + footer hints.
+    var empty = panel.Panel{ .title = "Your plan" };
+    empty.add(.{ .key = "", .label = "No plan yet", .kind = .info, .help = "Start planning" });
+    const panel_frame = try panel.render(a, &empty, panel.geometry(20, 60, empty.n));
+    defer a.free(panel_frame);
+    try std.testing.expect(std.mem.indexOf(u8, panel_frame, "No plan yet") != null);
+    try std.testing.expect(std.mem.indexOf(u8, panel_frame, "Start planning") != null);
+
+    var hint_buf: [256]u8 = undefined;
+    const wide = tui.scrollbackHint(&hint_buf, 72);
+    try std.testing.expect(std.mem.indexOf(u8, wide, "see all") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wide, "esc back") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tui.welcome, "Type what you need") != null);
+
+    // Mode cycle copy matches the footer note language.
+    var reads = agent.Reads.init(a);
+    defer reads.deinit();
+    var st = State{ .mode = .ask, .reads = reads };
+    try std.testing.expect(std.mem.indexOf(u8, cmds.cycleSurface(&st), "look first") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cmds.cycleSurface(&st), "without asking") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cmds.cycleSurface(&st), "ask before") != null);
+
+    // Virtual window keeps the last row on screen.
+    try std.testing.expectEqual(@as(usize, 5), virt.windowStart(10, 9, 5));
+
+    // Slash surfaces that open panels still route.
+    var h: Harness = undefined;
+    try Harness.initInPlace(&h, a);
+    defer h.deinit();
+    for ([_][]const u8{ "/plan", "/files", "/peers", "/background", "/shortcuts" }) |line| {
+        h.resetOutput();
+        const flow = try h.dispatch(line);
+        try std.testing.expect(flow == .panel);
+    }
 }

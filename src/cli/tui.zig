@@ -6,6 +6,9 @@ const tty = @import("tty.zig");
 const slash = @import("../core/slash.zig");
 const cli = @import("../core/cli.zig");
 const activity = @import("activity.zig");
+const modal = @import("modal.zig");
+const diffview = @import("diffview.zig");
+const uxcopy = @import("uxcopy.zig");
 
 pub const enter_alt = tty.enter_seq;
 pub const leave_alt = tty.restore_seq;
@@ -162,6 +165,8 @@ pub const Footer = struct {
     /// Typed while the turn runs. Drawn in the composer row, muted, because it
     /// is a message already committed to this turn rather than a draft.
     queued: []const u8 = "",
+    /// Ephemeral confirmation above the footer. Empty means nothing to draw.
+    toast: []const u8 = "",
 
     fn hintLine(self: Footer, buf: []u8, cols: u16) []const u8 {
         return switch (self.hint) {
@@ -315,9 +320,9 @@ const composer_hints = [_]HintItem{
 
 const scrollback_hints = [_]HintItem{
     .{ .keys = "j/k", .label = "move", .pinned = true },
-    .{ .keys = "e", .label = "expand", .pinned = true },
-    .{ .keys = "E", .label = "all" },
+    .{ .keys = "e", .label = "see all", .pinned = true },
     .{ .keys = "y", .label = "copy" },
+    .{ .keys = "n/p", .label = "section" },
     .{ .keys = "esc", .label = "back", .pinned = true },
 };
 
@@ -481,6 +486,7 @@ pub const key_rows = [_]KeyRow{
     },
     .{ .name = "j k", .help = "scrollback: move between tool runs", .section = "Scrollback" },
     .{ .name = "e enter", .help = "scrollback: open / close the run", .section = "Scrollback" },
+    .{ .name = "n p", .help = "scrollback: next / previous section in a long change", .section = "Scrollback" },
     .{ .name = "h l", .help = "scrollback: close / open the run", .section = "Scrollback" },
     .{ .name = "E", .help = "scrollback: open or close every run", .section = "Scrollback" },
     .{ .name = "g G", .help = "scrollback: first / last run", .section = "Scrollback" },
@@ -508,14 +514,14 @@ pub const key_rows = [_]KeyRow{
         .detail = "Copies the selected run's commands, one per line, through the system clipboard tool. Nothing is copied when the host has none.",
     },
     .{ .name = "ctrl-p", .help = "command palette", .section = "Session" },
-    .{ .name = "ctrl-n", .help = "new session (press twice)", .section = "Session" },
-    .{ .name = "ctrl-q", .help = "quit (press twice); ctrl-d empty also", .section = "Session" },
-    .{ .name = "ctrl-c", .help = "quit", .section = "Session" },
+    .{ .name = "ctrl-n", .help = "start a fresh chat (asks first)", .section = "Session" },
+    .{ .name = "ctrl-q", .help = "leave omfx (asks first); ctrl-d on empty also", .section = "Session" },
+    .{ .name = "ctrl-c", .help = "leave right away", .section = "Session" },
     .{
         .name = "esc esc",
-        .help = "clear draft, or rewind if empty",
+        .help = "clear what you typed, or go back if empty",
         .section = "Session",
-        .detail = "Once clears the draft. Twice on an empty composer rewinds the last turn, which is how you undo a tool call you did not want.",
+        .detail = "First press clears what you are typing (after you confirm). On an empty box it asks to go back to an earlier message — useful if the last reply did something you did not want.",
     },
     .{
         .name = "ctrl-o",
@@ -552,45 +558,83 @@ fn permChoice(sel: usize) Perm {
     };
 }
 
-/// Blocking permission prompt, painted over the transcript as the same box the
-/// slash palette uses. Arrow keys or 1/2/3 pick; Esc denies without quitting,
-/// ctrl-c quits the turn.
+fn paintModalFrame(stdout: *Io.Writer, g: modal.Geometry, frame: []const u8) !void {
+    try stdout.writeAll(hide_cursor);
+    var clear_r: u16 = g.row0;
+    while (clear_r < g.row0 + g.rows) : (clear_r += 1) {
+        var cup: [32]u8 = undefined;
+        try stdout.writeAll(try moveTo(&cup, clear_r, 1));
+        try stdout.writeAll("\x1b[2K");
+    }
+    var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, frame, "\n"), '\n');
+    var r: u16 = g.row0;
+    while (it.next()) |line| {
+        var cup: [32]u8 = undefined;
+        try stdout.writeAll(try moveTo(&cup, r, g.col0));
+        try stdout.writeAll(line);
+        r +|= 1;
+    }
+    try stdout.flush();
+}
+
 pub fn askPerm(
     stdin: *Io.Reader,
     stdout: *Io.Writer,
     allocator: std.mem.Allocator,
     layout: *Layout,
-    model: []const u8,
     name: []const u8,
     detail: []const u8,
+    preview: []const u8,
 ) Perm {
     var sel: usize = 0;
-    var head_buf: [220]u8 = undefined;
-    const head = std.fmt.bufPrint(&head_buf, "{s} wants to run {s} {s}", .{ model, name, detail }) catch name;
+    const title = "Allow this?";
+    const action = uxcopy.actionTitle(name);
+    const detail_line: []const u8 = if (detail.len != 0) detail else uxcopy.missingDetail(name);
+    var head_buf: [320]u8 = undefined;
+    const head = std.fmt.bufPrint(&head_buf, "{s}\n{s}", .{ action, detail_line }) catch action;
+
+    const looks_diff = preview.len != 0 and (std.mem.indexOf(u8, preview, "\n+") != null or
+        std.mem.indexOf(u8, preview, "\n-") != null or
+        std.mem.startsWith(u8, preview, "@@") or
+        std.mem.startsWith(u8, preview, "---") or
+        std.mem.startsWith(u8, preview, "diff "));
+    const painted_preview = if (looks_diff)
+        diffview.render(allocator, @min(layout.cols, modal.max_cols) -| 4, preview, true) catch null
+    else
+        null;
+    defer if (painted_preview) |p| allocator.free(p);
+
+    const body = blk: {
+        if (painted_preview) |p| {
+            break :blk std.fmt.allocPrint(allocator, "{s}\n{s}", .{ head, std.mem.trimEnd(u8, p, "\n") }) catch head;
+        }
+        if (preview.len != 0) {
+            break :blk std.fmt.allocPrint(allocator, "{s}\n{s}", .{ head, preview }) catch head;
+        }
+        break :blk head;
+    };
+    defer if (body.ptr != head.ptr) allocator.free(body);
+    const painted = painted_preview != null;
+
     while (true) {
-        const menu = formatSlashMenu(allocator, layout.cols, &perm_sheet, sel, perm_sheet.len) catch return .deny;
-        defer allocator.free(menu);
-        const start_row = layout.footer_start_row -| @as(u16, perm_sheet.len + 3);
-        eraseRows(stdout, start_row, perm_sheet.len + 3) catch return .deny;
-        var cup: [32]u8 = undefined;
-        stdout.writeAll(moveTo(&cup, start_row, 1) catch return .deny) catch return .deny;
-        stdout.writeAll(paint.warn) catch return .deny;
-        stdout.writeAll(clipCells(head, layout.cols)) catch return .deny;
-        stdout.writeAll(paint.reset) catch return .deny;
-        writeLinesAt(stdout, start_row + 1, menu) catch return .deny;
-        stdout.flush() catch return .deny;
+        const sz = size(layout.rows, layout.cols);
+        layout.* = Layout.compute(sz.rows, sz.cols);
+        const lines = modal.bodyLineCount(body);
+        const g = modal.geometry(layout.rows, layout.cols, lines, modal.perm_buttons.len);
+        const frame = modal.render(allocator, g, title, body, &modal.perm_buttons, sel, painted) catch return .deny;
+        defer allocator.free(frame);
+        paintModalFrame(stdout, g, frame) catch return .deny;
 
         switch (nextEvent(stdin)) {
             .enter => return permChoice(sel),
-            .history_prev, .up => sel = if (sel == 0) perm_sheet.len - 1 else sel - 1,
-            .history_next, .down => sel = (sel + 1) % perm_sheet.len,
+            .history_prev, .up => sel = if (sel == 0) modal.perm_buttons.len - 1 else sel - 1,
+            .history_next, .down => sel = (sel + 1) % modal.perm_buttons.len,
             .byte => |b| switch (b) {
                 '1' => return .allow,
                 '2' => return .always,
                 '3' => return .deny,
                 else => {},
             },
-            // Esc declines this one call; ctrl-c abandons the whole turn.
             .esc => return .deny,
             .interrupt, .quit, .ctrl_d, .eof => return .quit,
             else => {},
@@ -598,10 +642,50 @@ pub fn askPerm(
     }
 }
 
+/// Blocking yes/no. Buttons name the consequence. Esc / 2 declines; 1 / enter confirms.
+pub fn askConfirm(
+    stdin: *Io.Reader,
+    stdout: *Io.Writer,
+    allocator: std.mem.Allocator,
+    layout: *Layout,
+    title: []const u8,
+    body: []const u8,
+    yes_label: []const u8,
+    no_label: []const u8,
+) bool {
+    var sel: usize = 0;
+    const buttons = [_]modal.Button{
+        .{ .key = "1", .label = yes_label },
+        .{ .key = "2", .label = no_label },
+    };
+    while (true) {
+        const sz = size(layout.rows, layout.cols);
+        layout.* = Layout.compute(sz.rows, sz.cols);
+        const lines = modal.bodyLineCount(body);
+        const g = modal.geometry(layout.rows, layout.cols, lines, buttons.len);
+        const frame = modal.render(allocator, g, title, body, &buttons, sel, false) catch return false;
+        defer allocator.free(frame);
+        paintModalFrame(stdout, g, frame) catch return false;
+
+        switch (nextEvent(stdin)) {
+            .enter => return sel == 0,
+            .history_prev, .up => sel = if (sel == 0) buttons.len - 1 else sel - 1,
+            .history_next, .down => sel = (sel + 1) % buttons.len,
+            .byte => |b| switch (b) {
+                '1', 'y', 'Y' => return true,
+                '2', 'n', 'N' => return false,
+                else => {},
+            },
+            .esc, .interrupt, .quit, .ctrl_d, .eof => return false,
+            else => {},
+        }
+    }
+}
+
 pub const perm_sheet = [_]slash.Spec{
-    .{ .name = "1", .help = "allow once" },
-    .{ .name = "2", .help = "always for this kind" },
-    .{ .name = "3", .help = "deny" },
+    .{ .name = "1", .help = "Allow once" },
+    .{ .name = "2", .help = "Always allow this" },
+    .{ .name = "3", .help = "Don't allow" },
 };
 
 pub const PickKind = enum { none, providers, models, efforts, sessions, mcp, login, web, commands };
@@ -789,24 +873,24 @@ pub fn hintFor(buf: []u8, cols: u16) []const u8 {
 }
 
 /// Printed once into the transcript pane: how to fill it, one next step.
-pub const welcome = paint.muted ++ "Type a prompt. " ++ paint.reset ++ paint.accent_dim ++ "?" ++ paint.reset ++ paint.muted ++ " keys, " ++ paint.reset ++ paint.accent_dim ++ "/help" ++ paint.reset ++ paint.muted ++ " commands." ++ paint.reset ++ "\n";
+pub const welcome = paint.muted ++ "Type what you need. " ++ paint.reset ++ paint.accent_dim ++ "?" ++ paint.reset ++ paint.muted ++ " shows keys, " ++ paint.reset ++ paint.accent_dim ++ "/help" ++ paint.reset ++ paint.muted ++ " shows commands." ++ paint.reset ++ "\n";
 
 /// Full command map. Shown from /help, not at startup.
 pub const feature_sheet =
-    \\tab on an empty prompt moves the keyboard into the scrollback
-    \\  j k move  e open  E all  g G ends  y copy  esc back
-    \\ctrl-q twice quits
+    \\On an empty prompt, Tab moves into the chat history
+    \\  j/k move  e see everything  n/p jump sections  E open all  y copy  esc back
+    \\ctrl-q asks before leaving
     \\slash
     \\  /help /login /logout /models /model /fast /effort /plan /yolo
     \\  /permissions /allowlist /sandbox /status /stats /usage /settings /thinking
     \\  /web /browser /reload /mcp /init /workspace /undo /copy /diagram
     \\  /session /resume /clear /reset /rename /compact /rewind /fork
-    \\  /peers /background /trace /feedback /quit
+    \\  /peers /files /background /trace /feedback /quit
     \\tools (via the model, or !cmd for bash)
     \\  read write edit bash glob grep list copy mkdir delete rename
     \\  file_info open_file semantic_search web_fetch web_scrape web_search
     \\  ask_user memory browser peer board mcp patch compact
-    \\keys  Enter:send  Shift+Tab:mode  Ctrl+:shortcuts  ctrl-q quit  ?:keys
+    \\keys  Enter:send  Shift+Tab:mode  Ctrl+:shortcuts  ctrl-q leave  ?:keys
     \\
 ;
 
@@ -880,7 +964,7 @@ fn boxEdge(allocator: std.mem.Allocator, cols: u16, left: []const u8, right: []c
 pub fn formatHeader(allocator: std.mem.Allocator, layout: Layout, footer: Footer) ![]u8 {
     if (layout.header_rows == 0) return allocator.dupe(u8, "");
     const inner: u16 = if (layout.cols > 3) layout.cols - 3 else 0;
-    var ctx_buf: [32]u8 = undefined;
+    var ctx_buf: [160]u8 = undefined;
     const ctx = contextRow(&ctx_buf, footer.context_used, footer.context_window);
     const room: u16 = if (inner > cellsTo(ctx)) inner - cellsTo(ctx) else 0;
     const padded = try padCells(allocator, clipCells(footer.place, room), room);
@@ -892,17 +976,25 @@ pub fn formatHeader(allocator: std.mem.Allocator, layout: Layout, footer: Footer
     );
 }
 
-/// "325K / 500K", or "" until the provider has reported a count.
-///
-/// Both halves are shown rather than a percentage: a percentage of a number
-/// you cannot see is not actionable, and the window differs per model and per
-/// login route.
+/// " [████░░░░] 325K / 500K", or "" until the provider has reported a count.
 pub fn contextRow(buf: []u8, used: u32, window: u32) []const u8 {
     if (window == 0) return "";
+    const tw: u16 = 8;
+    const filled: u16 = @intCast(@min(@as(u64, tw), (@as(u64, used) * tw) / window));
     var w: Io.Writer = .fixed(buf);
+    w.writeAll(paint.accent_dim) catch return "";
+    w.writeAll("[") catch return "";
+    var i: u16 = 0;
+    while (i < tw) : (i += 1) {
+        w.writeAll(if (i < filled) "█" else "░") catch return "";
+    }
+    w.writeAll("]") catch return "";
+    w.writeAll(paint.muted) catch return "";
+    w.writeAll(" ") catch return "";
     writeTokens(&w, used) catch return "";
     w.writeAll(" / ") catch return "";
     writeTokens(&w, window) catch return "";
+    w.writeAll(paint.reset) catch return "";
     return w.buffered();
 }
 
@@ -1305,6 +1397,15 @@ pub fn writeChrome(
     try stdout.writeAll(sync_begin);
     try stdout.writeAll(hide_cursor);
     try stdout.writeAll(head);
+    if (footer.toast.len != 0) {
+        const toast_row = layout.footer_start_row -| 1;
+        if (toast_row >= layout.transcript_start_row) {
+            var cup: [32]u8 = undefined;
+            try stdout.writeAll(try moveTo(&cup, toast_row, 1));
+            try stdout.writeAll(footer.toast);
+            try stdout.writeAll("\x1b[K");
+        }
+    }
     switch (overlayFor(layout, footer.slash.len)) {
         .none => {},
         .menu => |overlay_h| {
@@ -1906,9 +2007,10 @@ test "the hint bar drops unpinned hints before it clips" {
 
 test "the way out is the last hint to go" {
     var buf: [256]u8 = undefined;
-    const wide = scrollbackHint(&buf, 60);
+    const wide = scrollbackHint(&buf, 72);
     try std.testing.expect(std.mem.indexOf(u8, wide, "j/k move") != null);
     try std.testing.expect(std.mem.indexOf(u8, wide, "y copy") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wide, "n/p section") != null);
 
     // Too narrow for all three pinned hints: the escape hatch survives.
     var buf2: [256]u8 = undefined;
@@ -1925,7 +2027,7 @@ test "the way out is the last hint to go" {
 test "a bare letter is only ever a scrollback binding" {
     // In the composer a letter is text, never a command; the vim keys exist
     // only while the keyboard is in the scrollback, and the sheet must say so.
-    const letters = [_][]const u8{ "j k", "e enter", "h l", "E", "g G", "y" };
+    const letters = [_][]const u8{ "j k", "e enter", "n p", "h l", "E", "g G", "y" };
     for (keys_sheet) |row| {
         for (letters) |l| {
             if (!std.mem.eql(u8, row.name, l)) continue;
@@ -1937,7 +2039,7 @@ test "a bare letter is only ever a scrollback binding" {
 
 test "welcome is one empty-state line" {
     try std.testing.expect(std.mem.indexOf(u8, welcome, "/help") != null);
-    try std.testing.expect(std.mem.indexOf(u8, welcome, "Type a prompt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, welcome, "Type what you need") != null);
 }
 
 test "stepScroll does not move when content fits" {
@@ -2178,11 +2280,11 @@ test "slash menu windows past the first page" {
     try std.testing.expectEqual(@as(usize, 4), slashWindowStart(9, 12, 6));
 }
 
-test "ctrl-c is quit in the keys sheet" {
+test "ctrl-c leaves right away in the keys sheet" {
     var found = false;
     for (keys_sheet) |row| {
         if (std.mem.eql(u8, row.name, "ctrl-c")) {
-            try std.testing.expectEqualStrings("quit", row.help);
+            try std.testing.expectEqualStrings("leave right away", row.help);
             found = true;
         }
     }
@@ -2254,11 +2356,13 @@ test "the header carries the window, and only once there is a count" {
 }
 
 test "token counts read at a glance at every size" {
-    var buf: [32]u8 = undefined;
-    try std.testing.expectEqualStrings("0K / 8K", contextRow(&buf, 940, 8_000));
-    try std.testing.expectEqualStrings("0K / 500K", contextRow(&buf, 0, 500_000));
-    try std.testing.expectEqualStrings("325K / 500K", contextRow(&buf, 325_000, 500_000));
-    try std.testing.expectEqualStrings("199K / 1.0M", contextRow(&buf, 199_000, 1_000_000));
+    var buf: [160]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, contextRow(&buf, 940, 8_000), "0K / 8K") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contextRow(&buf, 0, 500_000), "0K / 500K") != null);
+    const mid = contextRow(&buf, 325_000, 500_000);
+    try std.testing.expect(std.mem.indexOf(u8, mid, "325K / 500K") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mid, "█") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contextRow(&buf, 199_000, 1_000_000), "199K / 1.0M") != null);
     try std.testing.expectEqualStrings("", contextRow(&buf, 100, 0));
 }
 
@@ -2304,11 +2408,13 @@ test "perm choice maps rows to decisions" {
     try std.testing.expectEqual(Perm.deny, permChoice(99));
 }
 
-test "perm sheet offers exactly allow, always, deny" {
+test "perm sheet offers allow once, always, and don't allow" {
     try std.testing.expectEqual(@as(usize, 3), perm_sheet.len);
     try std.testing.expectEqualStrings("1", perm_sheet[0].name);
     try std.testing.expectEqualStrings("3", perm_sheet[2].name);
-    try std.testing.expect(std.mem.indexOf(u8, perm_sheet[2].help, "deny") != null);
+    try std.testing.expect(std.mem.indexOf(u8, perm_sheet[0].help, "Allow once") != null);
+    try std.testing.expect(std.mem.indexOf(u8, perm_sheet[1].help, "Always") != null);
+    try std.testing.expect(std.mem.indexOf(u8, perm_sheet[2].help, "Don't allow") != null);
 }
 
 test "CJK caret uses two cells" {

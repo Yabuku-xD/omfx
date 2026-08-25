@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const cli = @import("cli.zig");
+const progress = @import("../cli/progress.zig");
 
 const log = std.log.scoped(.update);
 
@@ -144,6 +145,14 @@ fn runInstall(allocator: std.mem.Allocator, io: Io, bin_dir: ?[]const u8) Error!
     }
 }
 
+fn writeStage(stdout: *Io.Writer, cols: u16, done: u64, total: u64, label: []const u8) void {
+    var buf: [192]u8 = undefined;
+    const line = progress.render(&buf, cols, done, total, label);
+    if (line.len == 0) return;
+    stdout.print("\r{s}\x1b[K", .{line}) catch {};
+    stdout.flush() catch {};
+}
+
 /// Check GitHub for a newer release and optionally install it.
 pub fn run(
     allocator: std.mem.Allocator,
@@ -151,31 +160,42 @@ pub fn run(
     stdout: *Io.Writer,
     opts: Opts,
 ) Error!void {
+    const cols: u16 = 80;
     try stdout.print("omfx {s}\n", .{cli.version});
+    writeStage(stdout, cols, 1, 4, "check");
     const body = fetchLatestBody(allocator, io) catch |err| {
         log.warn("latest release: {s}", .{@errorName(err)});
         return err;
     };
     defer allocator.free(body);
+    writeStage(stdout, cols, 2, 4, "compare");
     const tag = tagFromReleaseJson(body) orelse return error.BadRelease;
     const remote = SemVer.parse(tag);
     const local = SemVer.parse(cli.version);
     const cmp = SemVer.order(remote, local);
 
     if (cmp == .lt or (cmp == .eq and !opts.force)) {
-        try stdout.writeAll("Already up to date.\n");
+        writeStage(stdout, cols, 4, 4, "done");
+        try stdout.writeAll("\nAlready up to date.\n");
         return;
     }
     if (cmp == .gt) {
-        try stdout.print("New version available: {s}\n", .{tag});
+        try stdout.print("\nNew version available: {s}\n", .{tag});
     } else {
-        try stdout.print("Forcing reinstall of {s}\n", .{tag});
+        try stdout.print("\nForcing reinstall of {s}\n", .{tag});
     }
-    if (opts.check) return;
+    if (opts.check) {
+        writeStage(stdout, cols, 4, 4, "done");
+        try stdout.writeAll("\n");
+        return;
+    }
 
+    writeStage(stdout, cols, 3, 4, "install");
     const hint = binDirHint(allocator, io);
     defer if (hint) |h| allocator.free(h);
     try runInstall(allocator, io, hint);
+    writeStage(stdout, cols, 4, 4, "done");
+    try stdout.writeAll("\n");
 }
 
 test "semver orders patches" {

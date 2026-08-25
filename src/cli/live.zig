@@ -8,6 +8,7 @@ const chat = @import("chat.zig");
 const ansi = @import("../core/ansi.zig");
 const runs_mod = @import("runs.zig");
 const sink = @import("../core/sink.zig");
+const askprev = @import("askprev.zig");
 
 const log = std.log.scoped(.live);
 
@@ -343,7 +344,8 @@ pub const Live = union(enum) {
         }) catch return;
         defer self.allocator.free(row);
         writeShown(self, row);
-        if (self.group.expanded and n >= 2) {
+        const can_open = n >= 2 or (n == 1 and self.group.bodies.items.len != 0 and runs_mod.bodyOpenable(self.group.bodies.items[0]));
+        if (self.group.expanded and can_open) {
             for (self.group.details.items, 0..) |d, i| {
                 const child = chat.formatGroupChild(self.allocator, self.layout.cols, self.group.name, d, i + 1 == n, false) catch continue;
                 defer self.allocator.free(child);
@@ -571,7 +573,7 @@ pub const Live = union(enum) {
         }
     }
 
-    fn onAsk(ctx: ?*anyopaque, name: []const u8, detail: []const u8) sink.Ask {
+    fn onAsk(ctx: ?*anyopaque, name: []const u8, detail: []const u8, args: []const u8) sink.Ask {
         const self = asLive(ctx) orelse return .deny;
         const t = switch (self.*) {
             .json => |j| {
@@ -583,7 +585,9 @@ pub const Live = union(enum) {
             .stream => return .deny,
             .tui => |*tty_live| tty_live,
         };
-        return switch (tui.askPerm(t.stdin, t.stdout, t.allocator, t.layout, t.footer.model, name, detail)) {
+        const preview = askprev.build(t.allocator, name, args) catch "";
+        defer if (preview.len != 0) t.allocator.free(preview);
+        return switch (tui.askPerm(t.stdin, t.stdout, t.allocator, t.layout, name, detail, preview)) {
             .allow => .allow,
             .always => .always,
             .deny => .deny,
@@ -766,7 +770,7 @@ test "json host deny is the ask result" {
     defer aw.deinit();
     var cancel: std.atomic.Value(bool) = .init(false);
     var live = json(&aw.writer, &cancel);
-    try std.testing.expectEqual(sink.Ask.deny, live.host().decide("bash", "rm").?);
+    try std.testing.expectEqual(sink.Ask.deny, live.host().decide("bash", "rm", "{}").?);
 }
 
 const TtyCase = struct {

@@ -38,6 +38,10 @@ const relay = @import("../tools/relay.zig");
 const sound_mod = @import("sound.zig");
 const diagram = @import("../core/diagram.zig");
 const sink = @import("../core/sink.zig");
+const toast_mod = @import("toast.zig");
+const diffview = @import("diffview.zig");
+const board = @import("../core/board.zig");
+const progress = @import("progress.zig");
 const runlog = @import("../core/runlog.zig");
 const menus = @import("menus.zig");
 
@@ -111,6 +115,14 @@ const Session = struct {
     /// then gets out of the way: a confirmation that never leaves stops being
     /// a confirmation and becomes a label on the wrong thing.
     mode_note_at: i64 = 0,
+    /// Toast queue: confirmations sit above the footer so they do not steal
+    /// the hint row from keys / generating status.
+    toasts: toast_mod.Queue = .{},
+    /// Last painted toast line (owned by `gpa`). Empty when nothing is showing.
+    toast_paint: []u8 = &.{},
+    /// Hunk focus inside an opened diff (scrollback n/p).
+    hunk_i: usize = 0,
+    hunk_n: usize = 0,
 
     /// Palette rows currently offered, and which one is highlighted.
     palette: []const slash.Spec = &.{},
@@ -203,6 +215,7 @@ const Session = struct {
     }
 
     fn footer(self: *Session, turn: tui.Turn) tui.Footer {
+        self.refreshToast();
         return .{
             .model = self.model(),
             .permission = cmds.footerPerm(&self.state),
@@ -223,7 +236,17 @@ const Session = struct {
                 .{ .text = tui.scrollbackHint(&self.hint_buf, self.layout.cols) }
             else
                 .auto,
+            .toast = self.toast_paint,
         };
+    }
+
+    fn refreshToast(self: *Session) void {
+        if (self.toast_paint.len != 0) {
+            self.gpa.free(self.toast_paint);
+            self.toast_paint = &.{};
+        }
+        const line = self.toasts.line(self.gpa, self.layout.cols, nowMs(self.io)) catch return;
+        self.toast_paint = line;
     }
 
     /// Name the tab for the window it is, now that nothing is running in it.
@@ -243,7 +266,8 @@ const Session = struct {
     fn redrawRun(self: *Session, rec: *runs_mod.Store.Rec) bool {
         // A cleared transcript leaves records pointing at bytes that are gone.
         if (rec.off + rec.len > self.shown.bytes().len) return false;
-        const next = runs_mod.render(self.gpa, self.layout.cols, rec.*) catch return false;
+        const focus: ?usize = if (rec.childOpen(self.child) and self.hunk_n > 0) self.hunk_i else null;
+        const next = runs_mod.renderFocus(self.gpa, self.layout.cols, rec.*, focus) catch return false;
         defer self.gpa.free(next);
         const was = rec.len;
         self.shown.replace(rec.off, was, next) catch return false;
@@ -251,6 +275,39 @@ const Session = struct {
         self.runs.shift(rec.off, @as(isize, @intCast(next.len)) - @as(isize, @intCast(was)));
         self.dirty = true;
         return true;
+    }
+
+    fn syncHunkNav(self: *Session, rec: *const runs_mod.Store.Rec) void {
+        if (!rec.expanded or !rec.childOpen(self.child) or self.child >= rec.bodies.len) {
+            self.hunk_i = 0;
+            self.hunk_n = 0;
+            return;
+        }
+        const body = rec.bodies[self.child];
+        if (!chat.looksLikeDiff(body)) {
+            self.hunk_i = 0;
+            self.hunk_n = 0;
+            return;
+        }
+        self.hunk_n = diffview.hunkCount(body);
+        if (self.hunk_n == 0) {
+            self.hunk_i = 0;
+            return;
+        }
+        if (self.hunk_i >= self.hunk_n) self.hunk_i = self.hunk_n - 1;
+    }
+
+    fn stepHunk(self: *Session, forward: bool) bool {
+        if (self.focus != .scrollback or self.sel >= self.runs.items.items.len) return false;
+        const rec = &self.runs.items.items[self.sel];
+        self.syncHunkNav(rec);
+        if (self.hunk_n == 0) return false;
+        if (forward) {
+            self.hunk_i = (self.hunk_i + 1) % self.hunk_n;
+        } else {
+            self.hunk_i = if (self.hunk_i == 0) self.hunk_n - 1 else self.hunk_i - 1;
+        }
+        return self.redrawRun(rec);
     }
 
     fn mark(self: *Session, i: usize, on: bool) void {
@@ -491,12 +548,15 @@ const Session = struct {
                 rec.expanded = !rec.expanded;
                 if (!rec.expanded) rec.open_bits = 0;
                 self.child = 0;
+                self.hunk_i = 0;
             },
             .child => |i| {
                 self.child = i;
                 rec.toggleChildBit(i);
+                self.hunk_i = 0;
             },
         }
+        self.syncHunkNav(rec);
         _ = self.redrawRun(rec);
         self.showRun(idx);
         self.dirty = true;
@@ -746,6 +806,7 @@ const Session = struct {
     fn note(self: *Session, text: []const u8, now_ms: i64) void {
         self.mode_note = text;
         self.mode_note_at = now_ms;
+        self.toasts.push(text, now_ms);
         self.dirty = true;
     }
 
@@ -761,6 +822,11 @@ const Session = struct {
     fn noteClear(self: *Session) void {
         self.mode_note = "";
         self.mode_note_at = 0;
+        self.toasts = .{};
+        if (self.toast_paint.len != 0) {
+            self.gpa.free(self.toast_paint);
+            self.toast_paint = &.{};
+        }
     }
 
     fn noteExpired(self: *const Session, now_ms: i64) bool {
@@ -836,6 +902,9 @@ fn buildPanel(sess: *Session, kind: cmds.PanelKind) panel_mod.Panel {
         .context => contextPanel(sess),
         .jobs => jobsPanel(sess),
         .workspace => workspacePanel(sess),
+        .plan => planPanel(sess),
+        .files => filesPanel(sess),
+        .peers => peersPanel(sess),
     };
 }
 
@@ -855,21 +924,21 @@ fn settingsPanel(sess: *Session) panel_mod.Panel {
         .label = "Show thinking",
         .kind = .toggle,
         .value = if (sess.state.thinking) "on" else "off",
-        .help = "stream reasoning into the transcript",
+        .help = "show the assistant's thinking while it works",
     });
     p.add(.{
         .key = "telemetry",
         .label = "Name omfx to providers",
         .kind = .toggle,
         .value = if (sess.state.telemetry) "on" else "off",
-        .help = "sends attribution headers only; off means nothing identifies the client",
+        .help = "only says which app is talking; off keeps you anonymous",
     });
     p.add(.{
         .key = "peer",
-        .label = "Auto peers",
+        .label = "Auto teammates",
         .kind = .toggle,
         .value = if (settings.peerAutoOn(cfg)) "on" else "off",
-        .help = "model may invoke peer; manual /peers always works",
+        .help = "lets the assistant ask a teammate on its own; /peers still works anytime",
     });
     p.add(.{
         .key = "statusline",
@@ -1107,21 +1176,162 @@ fn statusPanel(sess: *Session) panel_mod.Panel {
     return p;
 }
 
-/// Background commands, with the log each one streams to.
+/// Background commands, with log size as soft progress.
 fn jobsPanel(sess: *Session) panel_mod.Panel {
-    var p = panel_mod.Panel{ .title = "Background jobs" };
+    var p = panel_mod.Panel{ .title = "Background work" };
     var snap: [jobs.max_jobs]jobs.Job = undefined;
     for (jobs.snapshot(&snap)) |j| {
         const rel = jobs.logRel(sess.arena, j.id) catch "";
+        const bytes = jobs.logBytes(sess.io, sess.workspace, j.id);
+        const cap: u64 = @max(bytes, 64 * 1024);
+        var bar_buf: [128]u8 = undefined;
+        const bar = progress.render(&bar_buf, 48, bytes, cap, if (jobs.running(j)) "working" else "finished");
         p.add(.{
             .key = std.fmt.allocPrint(sess.arena, "/background kill {d}", .{j.id}) catch "",
-            .label = std.fmt.allocPrint(sess.arena, "{d}  {s}", .{ j.id, if (jobs.running(j)) "running" else "done" }) catch "",
+            .label = std.fmt.allocPrint(sess.arena, "{d}  {s}", .{ j.id, if (jobs.running(j)) "still working" else "finished" }) catch "",
             .kind = .pick,
             .value = j.command(),
-            .help = std.fmt.allocPrint(sess.arena, "enter kills it; output is in {s}", .{rel}) catch "",
+            .help = std.fmt.allocPrint(sess.arena, "{s} · {s} · enter stops it", .{ bar, rel }) catch "",
         });
     }
-    if (p.n == 0) p.add(.{ .key = "", .label = "no background jobs", .kind = .info });
+    if (p.n == 0) p.add(.{
+        .key = "",
+        .label = "Nothing running in the background",
+        .kind = .info,
+        .help = "Long commands can keep going while you chat",
+    });
+    p.selectFirst();
+    return p;
+}
+
+/// Review the last plan: approve runs /plan go; lines are read-only checklist.
+fn planPanel(sess: *Session) panel_mod.Panel {
+    var p = panel_mod.Panel{ .title = "Your plan" };
+    const plan = if (sess.state.last_plan.len != 0) sess.state.last_plan else sess.state.last_reply;
+    if (plan.len == 0) {
+        p.add(.{
+            .key = "",
+            .label = "No plan yet",
+            .kind = .info,
+            .help = "Start plan mode, ask what you want, then come back here",
+        });
+        p.add(.{
+            .key = "/plan on",
+            .label = "Start planning",
+            .kind = .pick,
+            .help = "Looks around and drafts a plan — no changes until you say go",
+        });
+    } else {
+        p.add(.{
+            .key = "/plan go",
+            .label = "Looks good — do it",
+            .kind = .pick,
+            .help = "Leaves plan mode and carries out the steps below",
+        });
+        p.add(.{
+            .key = "/plan off",
+            .label = "Keep planning",
+            .kind = .pick,
+            .help = "Stay in plan mode and keep refining",
+        });
+        p.add(.{ .key = "", .label = "Steps", .kind = .heading });
+        var n: usize = 0;
+        var it = std.mem.splitScalar(u8, plan, '\n');
+        while (it.next()) |line| {
+            const t = std.mem.trim(u8, line, " \t\r");
+            if (t.len == 0) continue;
+            if (n >= 40) {
+                p.add(.{
+                    .key = "",
+                    .label = "…and more",
+                    .kind = .info,
+                    .help = "Only the first steps fit here",
+                });
+                break;
+            }
+            p.add(.{ .key = "", .label = t, .kind = .info });
+            n += 1;
+        }
+    }
+    p.selectFirst();
+    return p;
+}
+
+/// Workspace file picker — picking inserts @path into the draft via the key.
+fn filesPanel(sess: *Session) panel_mod.Panel {
+    var p = panel_mod.Panel{ .title = "Pick a file", .search = true };
+    var store: [64][96]u8 = undefined;
+    var rows: [64]slash.Spec = undefined;
+    const n = tui.matchAt(Io.Dir.cwd(), sess.io, sess.arena, "", &store, rows[0..]);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const name = rows[i].name;
+        p.add(.{
+            .key = std.fmt.allocPrint(sess.arena, "@{s} ", .{name}) catch "",
+            .label = name,
+            .kind = .pick,
+            .help = "enter adds this file to what you are typing",
+        });
+    }
+    if (p.n == 0) p.add(.{
+        .key = "",
+        .label = "No files found here",
+        .kind = .info,
+        .help = "Type to search, or check you are in the right folder",
+    });
+    p.selectFirst();
+    return p;
+}
+
+/// Peer / board status — goals and recent board notes.
+fn peersPanel(sess: *Session) panel_mod.Panel {
+    var p = panel_mod.Panel{ .title = "Teammates" };
+    p.add(.{
+        .key = "",
+        .label = "How it works",
+        .kind = .info,
+        .help = "A teammate works on a goal in the background. Turn Auto teammates on in Settings if you want that by default.",
+    });
+    if (sess.state.last_goal.len != 0) {
+        p.add(.{ .key = "", .label = "Last goal", .kind = .info, .value = sess.state.last_goal });
+    }
+    p.add(.{
+        .key = "/peers ",
+        .label = "Ask a teammate…",
+        .kind = .pick,
+        .help = "Then type what you want them to do",
+    });
+    p.add(.{ .key = "", .label = "Shared notes", .kind = .heading });
+    const raw = board.loadTail(sess.arena, sess.io, sess.workspace);
+    var notes: [board.max_notes]board.Note = undefined;
+    const nn = board.parseAll(raw, &notes);
+    if (nn == 0) {
+        p.add(.{
+            .key = "",
+            .label = "No shared notes yet",
+            .kind = .info,
+            .help = "Notes appear here when teammates leave updates",
+        });
+    } else {
+        var i: usize = nn;
+        var shown: usize = 0;
+        while (i > 0 and shown < 12) {
+            i -= 1;
+            const note = notes[i];
+            const kind_label: []const u8 = switch (note.kind) {
+                .fact => "Note",
+                .fail => "Problem",
+                .path => "File",
+            };
+            p.add(.{
+                .key = "",
+                .label = kind_label,
+                .kind = .info,
+                .value = note.text,
+            });
+            shown += 1;
+        }
+    }
     p.selectFirst();
     return p;
 }
@@ -1131,7 +1341,7 @@ fn workspacePanel(sess: *Session) panel_mod.Panel {
     var p = panel_mod.Panel{ .title = "Workspace" };
     p.add(.{ .key = "", .label = "Root", .kind = .info, .value = sess.workspace });
     if (sess.state.extraSlice().len == 0) {
-        p.add(.{ .key = "", .label = "no extra dirs", .kind = .info, .help = "add one with /workspace add <dir>" });
+        p.add(.{ .key = "", .label = "No extra folders", .kind = .info, .help = "Add one with /workspace add <folder>" });
     } else {
         p.add(.{ .key = "", .label = "Extra", .kind = .heading });
         for (sess.state.extraSlice()) |d| p.add(.{ .key = "", .label = d, .kind = .info });
@@ -1211,7 +1421,7 @@ fn keysPanel(sess: *Session) panel_mod.Panel {
             .detail = row.detail,
         });
     }
-    if (p.n == 0) p.add(.{ .key = "", .label = "no binding matches", .kind = .info });
+    if (p.n == 0) p.add(.{ .key = "", .label = "Nothing matches what you typed", .kind = .info });
     p.selectFirst();
     return p;
 }
@@ -1265,7 +1475,7 @@ fn helpPanel(sess: *Session) panel_mod.Panel {
             p.add(.{ .key = spec.name, .label = spec.name, .kind = .pick, .value = spec.help });
         }
     }
-    if (p.n == 0) p.add(.{ .key = "", .label = "no command matches", .kind = .info });
+    if (p.n == 0) p.add(.{ .key = "", .label = "Nothing matches what you typed", .kind = .info });
     p.selectFirst();
     return p;
 }
@@ -1384,10 +1594,15 @@ fn contextRow(sess: *Session, tokens: u32, window: u32) []const u8 {
 /// A list you pick from rather than a number you count out: what you remember
 /// is what you asked, not how many turns ago you asked it.
 fn rewindPanel(sess: *Session) panel_mod.Panel {
-    var p = panel_mod.Panel{ .title = "Rewind to a prompt" };
+    var p = panel_mod.Panel{ .title = "Go back to a message" };
     const state = &sess.state;
     if (state.marks_n == 0) {
-        p.add(.{ .key = "", .label = "nothing to rewind to yet", .kind = .info });
+        p.add(.{
+            .key = "",
+            .label = "Nothing to go back to yet",
+            .kind = .info,
+            .help = "Messages you send will show up here",
+        });
         return p;
     }
     var i: usize = state.marks_n;
@@ -1565,6 +1780,14 @@ fn scrollbackKey(sess: *Session, ev: tui.Event) bool {
             'E' => {
                 sess.expandAll();
                 return true;
+            },
+            'n' => {
+                if (sess.stepHunk(true)) return true;
+                return false;
+            },
+            'p' => {
+                if (sess.stepHunk(false)) return true;
+                return false;
             },
             'y' => {
                 sess.copyRun();
@@ -1835,14 +2058,14 @@ pub fn run(
                 const armed = sess.arm.note(nowMs(io));
                 const hint: tui.Hint = if (armed.len > 0)
                     .{ .text = armed }
-                else if (sess.mode_note.len > 0)
-                    .{ .text = sess.mode_note }
                 else if (sess.focus == .scrollback)
                     .{ .text = tui.scrollbackHint(&hint_buf, sess.layout.cols) }
                 else if (sess.multiline)
                     .{ .text = "multiline on   shift-enter send" }
                 else
                     .auto;
+                const toast_line = sess.toasts.line(gpa, sess.layout.cols, nowMs(io)) catch "";
+                defer if (toast_line.len != 0) gpa.free(toast_line);
                 try tui.writePane(gpa, stdout, sess.layout, .{
                     .model = model,
                     .permission = cmds.footerPerm(state),
@@ -1857,6 +2080,7 @@ pub fn run(
                     .slash_sel = sess.palette_sel,
                     .hint = hint,
                     .sel = sess.marked,
+                    .toast = toast_line,
                 }, &sess.shown, sess.scroll);
             } else {
                 try stdout.writeAll(tui.sync_begin);
@@ -1998,8 +2222,18 @@ pub fn run(
                     continue;
                 }
                 const now_ms = nowMs(io);
+                _ = now_ms;
                 if (sess.draft.items().len != 0) {
-                    if (sess.arm.confirm(.clear, tui.arm_esc_ms, now_ms)) {
+                    if (tui.askConfirm(
+                        stdin,
+                        stdout,
+                        gpa,
+                        &sess.layout,
+                        "Clear what you typed?",
+                        "This only clears the box you are typing in. Your chat stays.",
+                        "Clear",
+                        "Keep typing",
+                    )) {
                         sess.draft.clear();
                         sess.palette = slash_buf[0..(0)];
                         sess.palette_sel = 0;
@@ -2008,7 +2242,16 @@ pub fn run(
                     continue;
                 }
                 if (sess.shown.rowCount() != 0) {
-                    if (sess.arm.confirm(.rewind, tui.arm_esc_ms, now_ms)) {
+                    if (tui.askConfirm(
+                        stdin,
+                        stdout,
+                        gpa,
+                        &sess.layout,
+                        "Go back to an earlier message?",
+                        "Removes the latest turn from this chat. You can keep typing afterward.",
+                        "Go back",
+                        "Stay here",
+                    )) {
                         var ctx = sess.cmdCtx();
                         _ = try cmds.dispatch(&ctx, "/rewind");
                         sess.paintTranscript();
@@ -2094,8 +2337,16 @@ pub fn run(
                     sess.dirty = true;
                     continue;
                 }
-                const now_ms = nowMs(io);
-                if (sess.arm.confirm(.quit, tui.arm_quit_ms, now_ms)) break;
+                if (tui.askConfirm(
+                    stdin,
+                    stdout,
+                    gpa,
+                    &sess.layout,
+                    "Leave omfx?",
+                    "Your chat is saved. You can open it again later.",
+                    "Leave",
+                    "Stay",
+                )) break;
                 sess.dirty = true;
                 continue;
             },
@@ -2116,8 +2367,16 @@ pub fn run(
                 continue;
             },
             .new_session => {
-                const now_ms = nowMs(io);
-                if (sess.arm.confirm(.new_session, tui.arm_quit_ms, now_ms)) {
+                if (tui.askConfirm(
+                    stdin,
+                    stdout,
+                    gpa,
+                    &sess.layout,
+                    "Start a fresh chat?",
+                    "This chat is saved. You will see a blank screen to begin again.",
+                    "Start fresh",
+                    "Keep this chat",
+                )) {
                     var ctx = sess.cmdCtx();
                     _ = try cmds.dispatch(&ctx, "/clear");
                     sess.shown.clear();
@@ -2139,8 +2398,16 @@ pub fn run(
                 continue;
             },
             .quit => {
-                const now_ms = nowMs(io);
-                if (sess.arm.confirm(.quit, tui.arm_quit_ms, now_ms)) break;
+                if (tui.askConfirm(
+                    stdin,
+                    stdout,
+                    gpa,
+                    &sess.layout,
+                    "Leave omfx?",
+                    "Your chat is saved. You can open it again later.",
+                    "Leave",
+                    "Stay",
+                )) break;
                 sess.dirty = true;
                 continue;
             },

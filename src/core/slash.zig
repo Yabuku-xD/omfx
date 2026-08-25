@@ -52,6 +52,7 @@ pub const Name = enum {
     wake,
     ide,
     plugin,
+    files,
 
     pub fn fromToken(token: []const u8) ?Name {
         if (token.len < 2 or token[0] != '/') return null;
@@ -97,13 +98,13 @@ pub fn argsFor(name: []const u8) []const u8 {
 pub const builtin = [_]Spec{
     .{ .name = "/help", .help = "list slash commands" },
     .{ .name = "/shortcuts", .help = "every keyboard shortcut, searchable" },
-    .{ .name = "/clear", .help = "fresh session; keep background jobs (/new)" },
-    .{ .name = "/reset", .help = "fresh session; stop background jobs" },
-    .{ .name = "/resume", .help = "pick a saved session to resume" },
-    .{ .name = "/continue", .help = "pick a session to carry on, or retry the last turn" },
-    .{ .name = "/rename", .help = "rename the current session", .args = "[title]" },
-    .{ .name = "/compact", .help = "compact older conversation turns now", .args = "[focus]" },
-    .{ .name = "/rewind", .help = "go back to an earlier prompt, or compress from one", .args = "[list|<n>|<n> from|<n> upto]" },
+    .{ .name = "/clear", .help = "start a fresh chat; keeps background work (/new)" },
+    .{ .name = "/reset", .help = "start a fresh chat and stop background work" },
+    .{ .name = "/resume", .help = "open a saved chat" },
+    .{ .name = "/continue", .help = "pick a chat to continue, or retry the last turn" },
+    .{ .name = "/rename", .help = "rename this chat", .args = "[title]" },
+    .{ .name = "/compact", .help = "shorten older parts of this chat", .args = "[focus]" },
+    .{ .name = "/rewind", .help = "go back to an earlier message, or trim from one", .args = "[list|<n>|<n> from|<n> upto]" },
     .{ .name = "/fork", .help = "copy this session to a new id; keep working here" },
     .{ .name = "/handoff", .help = "new session from a thin packet (no transcript dump)", .args = "[goal]" },
     .{ .name = "/spec", .help = "spec-first: disk docs + phase postcard; next/run", .args = "[new <name>|<name>|next|run|list]" },
@@ -120,7 +121,7 @@ pub const builtin = [_]Spec{
     .{ .name = "/sandbox", .help = "inspect or set command sandbox on|off", .args = "[on|off]" },
     .{ .name = "/yolo", .help = "allow writes this session" },
     .{ .name = "/effort", .help = "reasoning level; auto picks one per prompt", .args = "[auto|<level>]  ctrl-t cycles" },
-    .{ .name = "/plan", .help = "enter read-only plan mode; /plan go implements", .args = "[go|off|<goal>]" },
+    .{ .name = "/plan", .help = "plan first (no changes); /plan go carries it out", .args = "[go|off|<goal>]" },
     .{ .name = "/status", .help = "model, workspace, permissions, session" },
     .{ .name = "/stats", .help = "current-session statistics" },
     .{ .name = "/context", .help = "where the context window has gone" },
@@ -134,7 +135,7 @@ pub const builtin = [_]Spec{
     .{ .name = "/web", .help = "web search backends and order", .args = "" },
     .{ .name = "/browser", .help = "install Chrome relay extension (existing tabs)" },
     .{ .name = "/reload", .help = "reload settings, auth, reads, relay" },
-    .{ .name = "/background", .help = "list background commands", .args = "[id]" },
+    .{ .name = "/background", .help = "see work running in the background", .args = "[id]" },
     .{ .name = "/mcp", .help = "list MCP servers", .args = "[name]" },
     .{ .name = "/ide", .help = "open workspace in your IDE", .args = "[open|<ide>]" },
     .{ .name = "/plugin", .help = "plugin marketplaces (.claude-plugin / .omfx-plugin)", .args = "[list|marketplace add|install]" },
@@ -145,7 +146,8 @@ pub const builtin = [_]Spec{
     .{ .name = "/diagram", .help = "save mermaid fences from the last reply", .args = "[path]" },
     .{ .name = "/feedback", .help = "where to send a bug report" },
     .{ .name = "/trace", .help = "write a private diagnostic trace" },
-    .{ .name = "/peers", .help = "run a teammate: /peers <goal>", .args = "[goal]" },
+    .{ .name = "/peers", .help = "ask a teammate to work on a goal", .args = "[goal]" },
+    .{ .name = "/files", .help = "pick a file to mention in what you type" },
 };
 
 const rank_count: usize = 3;
@@ -194,7 +196,7 @@ pub const groups = [_]Group{
     .{ .title = "Session", .names = &.{ "/help", "/clear", "/reset", "/resume", "/continue", "/rename", "/compact", "/rewind", "/fork", "/handoff", "/spec", "/checkpoint", "/sleep", "/wake", "/quit" } },
     .{ .title = "Account / model", .names = &.{ "/login", "/logout", "/models", "/fast", "/permissions", "/allowlist", "/sandbox", "/yolo", "/effort", "/plan" } },
     .{ .title = "Inspect", .names = &.{ "/status", "/stats", "/usage", "/context", "/shortcuts", "/settings", "/appearance", "/statusline", "/sound", "/thinking", "/version" } },
-    .{ .title = "Tools", .names = &.{ "/web", "/browser", "/reload", "/background", "/mcp", "/ide", "/plugin", "/init", "/workspace", "/undo", "/copy", "/diagram", "/feedback", "/trace", "/peers" } },
+    .{ .title = "Tools", .names = &.{ "/web", "/browser", "/reload", "/background", "/mcp", "/ide", "/plugin", "/init", "/workspace", "/undo", "/copy", "/diagram", "/feedback", "/trace", "/peers", "/files" } },
 };
 
 fn specNamed(specs: []const Spec, name: []const u8) ?Spec {

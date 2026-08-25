@@ -537,7 +537,7 @@ fn chatTurn(
         if (decision == .prompt) {
             var detail_buf: [permissions.max_command]u8 = undefined;
             const detail0 = toolDetail(&detail_buf, call.args);
-            const ans = if (host.decide(call.name, detail0)) |a| a else if (permissions.askHuman(io, call.name)) sink.Ask.allow else sink.Ask.deny;
+            const ans = if (host.decide(call.name, detail0, call.args)) |a| a else if (permissions.askHuman(io, call.name)) sink.Ask.allow else sink.Ask.deny;
             switch (ans) {
                 .allow => {
                     // One-shot allow: exact action only, re-checked before run.
@@ -600,7 +600,7 @@ fn chatTurn(
         if (recheck == .prompt) {
             var detail_buf: [permissions.max_command]u8 = undefined;
             const detail0 = toolDetail(&detail_buf, tool_args);
-            const ans = if (host.decide(tool_name, detail0)) |a| a else if (permissions.askHuman(io, tool_name)) sink.Ask.allow else sink.Ask.deny;
+            const ans = if (host.decide(tool_name, detail0, tool_args)) |a| a else if (permissions.askHuman(io, tool_name)) sink.Ask.allow else sink.Ask.deny;
             recheck = if (ans == .deny) .deny else .allow;
         }
         if (recheck != .allow) {
