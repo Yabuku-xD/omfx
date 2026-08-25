@@ -61,7 +61,7 @@ In an interactive session, type `/` for commands. See [Slash commands](using/sla
 - **ARC compact + recall**: dropped context lands in inspectable recall files, not a rewrite pass from another model.
 - **Deterministic handoff**: `/handoff` packets are path/board/cite stubs — no last-reply dump.
 - **Thin specs**: `/spec` keeps requirements→design→tasks on disk; only the active task pointer enters orientation.
-- **Permissions**: symbolic allowlist DSL; session rules may only shrink privilege.
+- **Permissions**: symbolic allowlist DSL; exact-action allow/always; session rules may only shrink privilege; Shift-Tab mid-turn cycles ask→auto→yolo.
 - **Hybrid semantic search**: repo rank, symbols, and tokens fused; no embeddings required.
 - **Memory + playbook**: workspace and user facts, plus verified lessons that can graduate into skills.
 - **Shared board**: structured notes for facts, failures, and paths for peers and coordination.

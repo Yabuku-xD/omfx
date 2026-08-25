@@ -42,7 +42,7 @@ Bare `/resume` opens the sessions panel. Outside the TUI: `omfx session resume l
 
 ## Compact and recall
 
-`/compact` runs local ARC compaction. Dropped tool bodies become cites under `.omfx/recall/` — inspectable files, not an LLM rewrite of your history. Compaction never encrypts and never stops the agent loop.
+`/compact` runs local ARC compaction. Dropped tool bodies become cites under `.omfx/recall/` — inspectable files, not an LLM rewrite of your history. Compaction never encrypts and never stops the agent loop. Secret-shaped tool bodies are stored as `(sensitive; not saved)` so resume cannot replay them.
 
 Memory (workspace and user) is reinjected every turn and survives compaction.
 

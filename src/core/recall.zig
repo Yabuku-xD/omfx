@@ -1,5 +1,6 @@
 const std = @import("std");
 const Io = std.Io;
+const hooks = @import("hooks.zig");
 
 /// Addressable Recall Compaction (arXiv:2607.25066). Bodies live on disk;
 /// the live thread keeps a cite. 32 * 32k = 1 MiB workspace scratch (mention.max_bytes).
@@ -68,12 +69,18 @@ pub fn put(
     defer file.close(io);
     var wbuf: [1024]u8 = undefined;
     var w = file.writer(io, &wbuf);
-    const clip = if (body.len > body_max) body[0..body_max] else body;
-    const clipped = clip.len != body.len;
     const path = switch (target) {
         .none => "",
         .path => |p| p,
     };
+    // Sensitive bodies are not archived: resume must not replay secrets.
+    if (hooks.hasSecret(body)) {
+        w.interface.print("tool={s} path={s} chars={d}\n(sensitive; not saved)\n", .{ tool_name, path, body.len }) catch return error.ArchiveFailed;
+        w.interface.flush() catch return error.ArchiveFailed;
+        return id;
+    }
+    const clip = if (body.len > body_max) body[0..body_max] else body;
+    const clipped = clip.len != body.len;
     w.interface.print("tool={s} path={s} chars={d}\n", .{ tool_name, path, body.len }) catch return error.ArchiveFailed;
     w.interface.writeAll(clip) catch return error.ArchiveFailed;
     if (clipped) {
@@ -81,6 +88,25 @@ pub fn put(
     }
     w.interface.flush() catch return error.ArchiveFailed;
     return id;
+}
+
+/// Load a previously archived tool body (after the header line).
+pub fn load(
+    allocator: std.mem.Allocator,
+    dir: Io.Dir,
+    io: Io,
+    id: Id,
+) ![]u8 {
+    var name_buf: [40]u8 = undefined;
+    const name = fileName(&name_buf, id);
+    const raw = dir.readFileAlloc(io, name, allocator, .limited(body_max + 256)) catch return error.ArchiveFailed;
+    errdefer allocator.free(raw);
+    if (std.mem.indexOfScalar(u8, raw, '\n')) |nl| {
+        const body = try allocator.dupe(u8, raw[nl + 1 ..]);
+        allocator.free(raw);
+        return body;
+    }
+    return raw;
 }
 
 pub fn cite(allocator: std.mem.Allocator, item: Cite) std.mem.Allocator.Error![]u8 {
@@ -154,4 +180,20 @@ test "put then collectIds round trip" {
     var ids: [max_items]Id = undefined;
     try std.testing.expectEqual(@as(usize, 1), collectIds(s, &ids));
     try std.testing.expectEqual(id, ids[0]);
+}
+
+test "put redacts secret-shaped bodies" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const id = try put(
+        tmp.dir,
+        std.testing.io,
+        "bash",
+        .none,
+        "api_key=sk-secret-e2e-not-for-disk\n",
+    );
+    const body = try load(std.testing.allocator, tmp.dir, std.testing.io, id);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "sensitive") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "sk-secret-e2e") == null);
 }

@@ -56,7 +56,7 @@ Install the editor's shell command (`code`, `cursor`, `zed`, …) so it appears 
 
 ## MCP server missing
 
-Confirm the entry under `mcp` in `~/.omfx/settings.json` and that the `command` is on `PATH`. `/mcp` lists configured servers.
+Confirm the entry under `mcp` in `~/.omfx/settings.json`. Stdio servers need `command` on `PATH`; HTTP servers need a reachable `url`. `/mcp` lists configured servers; `/mcp add` persists new ones.
 
 ## Still stuck
 

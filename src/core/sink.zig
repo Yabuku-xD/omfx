@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("../providers/types.zig");
+const config = @import("config.zig");
+const permissions = @import("permissions.zig");
 
 const log = std.log.scoped(.sink);
 
@@ -19,6 +21,9 @@ pub const Host = struct {
     /// Real token counts from the provider, as they arrive.
     on_usage: ?*const fn (ctx: ?*anyopaque, input: u32, output: u32, read: u32, write: u32) void = null,
     on_tick: ?*const fn (ctx: ?*anyopaque) void = null,
+    /// Shift+Tab mid-turn: cycle ask→auto→yolo for later tool calls.
+    mode_live: ?*config.PermissionMode = null,
+    on_mode: ?*const fn (ctx: ?*anyopaque, label: []const u8) void = null,
     cancel: ?*std.atomic.Value(bool) = null,
 
     pub fn cancelled(self: Host) bool {
@@ -69,8 +74,19 @@ pub const Host = struct {
 
     /// Called wherever a turn can pause: every SSE line, every tool boundary.
     pub fn pollCancel(self: Host) void {
-        const flag = self.cancel orelse return;
-        if (pollCancelKey()) flag.store(true, .release);
+        const flag = self.cancel orelse {
+            _ = drainKeys();
+            return;
+        };
+        if (drainKeys()) flag.store(true, .release);
+    }
+
+    /// Apply a pending Shift+Tab permission cycle to `mode_live`.
+    pub fn pollModeCycle(self: Host) void {
+        if (!mode_cycle_pending.swap(false, .acq_rel)) return;
+        const slot = self.mode_live orelse return;
+        slot.* = permissions.cycleMode(slot.*);
+        if (self.on_mode) |f| f(self.ctx, @tagName(slot.*));
     }
 
     pub fn stream(self: Host) types.Stream {
@@ -341,12 +357,22 @@ pub fn dropSteer() void {
 /// This cannot peek. `recv(MSG_PEEK)` fails with ENOTSOCK on a TTY, which is
 /// what made the previous version of this function never fire.
 fn pollCancelKey() bool {
-    return pollCancelKeyTimeout(0);
+    return drainKeys();
 }
 
-/// `wait_ms` 0 polls and returns; a positive value blocks that long, which is
-/// what lets the watcher thread idle instead of spinning.
-fn pollCancelKeyTimeout(wait_ms: i32) bool {
+var mode_cycle_pending: std.atomic.Value(bool) = .init(false);
+
+fn wantsModeCycle(bytes: []const u8) bool {
+    // Shift+Tab is CSI Z (`\x1b[Z`).
+    return std.mem.indexOf(u8, bytes, "\x1b[Z") != null;
+}
+
+/// Drain stdin: stop keys cancel, Shift+Tab queues a permission cycle, else steer.
+fn drainKeys() bool {
+    return drainKeysTimeout(0);
+}
+
+fn drainKeysTimeout(wait_ms: i32) bool {
     if (builtin.os.tag == .windows) return false;
     var stop = false;
     while (true) {
@@ -360,12 +386,22 @@ fn pollCancelKeyTimeout(wait_ms: i32) bool {
         var buf: [cancel_drain_bytes]u8 = undefined;
         const got = std.posix.read(std.posix.STDIN_FILENO, &buf) catch return stop;
         if (got == 0) return stop;
+        if (wantsModeCycle(buf[0..got])) {
+            mode_cycle_pending.store(true, .release);
+            continue;
+        }
         if (wantsStop(buf[0..got])) {
             stop = true;
             continue;
         }
         steerPush(buf[0..got]);
     }
+}
+
+/// `wait_ms` 0 polls and returns; a positive value blocks that long, which is
+/// what lets the watcher thread idle instead of spinning.
+fn pollCancelKeyTimeout(wait_ms: i32) bool {
+    return drainKeysTimeout(wait_ms);
 }
 
 /// Watches the keyboard while the main thread is blocked reading the socket.

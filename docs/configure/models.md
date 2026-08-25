@@ -34,4 +34,15 @@ Ctrl-t cycles levels for the current model. `auto` is offered by omfx and resolv
 
 ## Persistence
 
-Last provider and model are stored in `~/.omfx/settings.json`. Launching omfx does not reset them. Subscription and API-key logins for the same model may see different context ceilings (`authCap`).
+Last provider and model are stored in `~/.omfx/settings.json`. Launching omfx does not reset them. An optional `models` map keeps a preferred model per provider so switching providers does not clobber the other:
+
+```json
+{
+  "models": {
+    "xai-oauth": "grok-build-0.1",
+    "commandcode": "deepseek/deepseek-v4-flash"
+  }
+}
+```
+
+Subscription and API-key logins for the same model may see different context ceilings (`authCap`).

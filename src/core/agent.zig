@@ -75,7 +75,7 @@ fn postOrStop(
     };
 }
 
-const detail_keys = [_][]const u8{ "path", "command", "pattern", "query", "url", "name", "goal", "question" };
+const detail_keys = [_][]const u8{ "path", "command", "pattern", "query", "url", "name", "goal", "question", "id" };
 
 /// What to show next to the verb. Tools name their subject differently, so try
 /// each key rather than leaving grep/glob/web cards with a bare verb.
@@ -263,6 +263,9 @@ pub const Plan = enum {
 
 pub const Run = struct {
     mode: config.PermissionMode,
+    /// When set, each admit re-reads this so Shift+Tab mid-turn applies to
+    /// later tool calls; in-flight work keeps the mode it was admitted under.
+    mode_live: ?*config.PermissionMode = null,
     has_tty: bool,
     home: []const u8,
     reads: *Reads,
@@ -281,6 +284,10 @@ pub const Run = struct {
     /// Consecutive unclean turns; same counter autoeffort uses for Hard.
     failures: usize = 0,
 };
+
+fn liveMode(run: Run) config.PermissionMode {
+    return if (run.mode_live) |p| p.* else run.mode;
+}
 
 /// HTTP failures collapse here. A peer re-enters `chatOnce` from `chatTurn`, so
 /// this set is named rather than inferred.
@@ -395,7 +402,6 @@ fn chatTurn(
     user: []const u8,
     run: Run,
 ) ![]u8 {
-    const mode = run.mode;
     const has_tty = run.has_tty;
     const home = run.home;
     const reads = run.reads;
@@ -409,6 +415,11 @@ fn chatTurn(
     const peer_denied = (permissions.matchLast(cfg.rules, "peer", "{}") orelse .allow) == .deny;
     var always: [8][]const u8 = undefined;
     var always_n: usize = 0;
+    // Prior tool bodies for "copied from untrusted output" checks. Capped so a
+    // long turn cannot unbounded-grow the ring.
+    var tool_blob: std.ArrayList(u8) = .empty;
+    defer tool_blob.deinit(allocator);
+    const tool_blob_cap: usize = 64 * 1024;
     var con = try contract_mod.load(allocator, dir, io, home);
     defer con.deinit(allocator);
     const board_tail0 = board.loadTail(allocator, io, workspace);
@@ -465,7 +476,6 @@ fn chatTurn(
     var last = (try postOrStop(allocator, io, endpoint, thread.items, sys, flags)) orelse
         return allocator.dupe(u8, interrupted_text);
     var turns: usize = 0;
-    var auto_denials: usize = 0;
     var explored = false;
     var prev_name: []u8 = try allocator.dupe(u8, "");
     var prev_args: []u8 = try allocator.dupe(u8, "");
@@ -475,6 +485,7 @@ fn chatTurn(
         // A tool boundary is the other place a turn can pause; the SSE reader
         // covers the streaming half.
         host.pollCancel();
+        host.pollModeCycle();
         if (host.cancelled()) {
             last.deinit(allocator);
             return allocator.dupe(u8, interrupted_text);
@@ -511,31 +522,40 @@ fn chatTurn(
             last.deinit(allocator);
             return std.fmt.allocPrint(allocator, "plan mode: {s} blocked. /plan go to implement.\n", .{call.name});
         }
+        const mode = liveMode(run);
         var decision = admitCall(mode, call.name, call.args, has_tty, cfg.rules, run.session_rules, always[0..always_n]);
-        if (mode == .auto and decision == .prompt and auto_denials < 2 and !permissions.isRoutine(call.name, call.args)) {
-            auto_denials += 1;
+        // Commands copied out of tool output stay blocked unless the user asked.
+        if (decision == .allow or decision == .prompt) {
+            var cmd_buf: [permissions.max_command]u8 = undefined;
+            const cmd = permissions.shellCommand(&cmd_buf, call.args) orelse
+                sse.argStringInto(&cmd_buf, call.args, "path") orelse "";
+            if (permissions.derivedFromToolOutput(cmd, user, tool_blob.items)) {
+                decision = if (has_tty) .prompt else .deny;
+            }
         }
+        var one_shot: ?[]u8 = null;
         if (decision == .prompt) {
-            var path0_buf: [permissions.max_command]u8 = undefined;
-            const path0 = sse.argStringInto(&path0_buf, call.args, "path") orelse
-                sse.argStringInto(&path0_buf, call.args, "command") orelse "";
-            const ans = if (host.decide(call.name, path0)) |a| a else if (permissions.askHuman(io, call.name)) sink.Ask.allow else sink.Ask.deny;
+            var detail_buf: [permissions.max_command]u8 = undefined;
+            const detail0 = toolDetail(&detail_buf, call.args);
+            const ans = if (host.decide(call.name, detail0)) |a| a else if (permissions.askHuman(io, call.name)) sink.Ask.allow else sink.Ask.deny;
             switch (ans) {
                 .allow => {
+                    // One-shot allow: exact action only, re-checked before run.
                     decision = .allow;
-                    auto_denials = 0;
+                    one_shot = try permissions.exactKey(allocator, call.name, call.args);
                 },
                 .always => {
                     decision = .allow;
-                    auto_denials = 0;
                     if (always_n < always.len) {
-                        always[always_n] = try allocator.dupe(u8, call.name);
+                        always[always_n] = try permissions.exactKey(allocator, call.name, call.args);
                         always_n += 1;
                     }
+                    one_shot = try permissions.exactKey(allocator, call.name, call.args);
                 },
                 .deny => decision = .deny,
             }
         }
+        defer if (one_shot) |k| allocator.free(k);
         switch (decision) {
             .allow => {},
             .prompt => {},
@@ -547,12 +567,16 @@ fn chatTurn(
                 var deny_buf: [48]u8 = undefined;
                 const deny_line = std.fmt.bufPrint(&deny_buf, "denied {s}", .{call.name}) catch "denied tool";
                 playbook.noteHarmful(allocator, io, workspace, deny_line);
-                var deny_buf_path: [permissions.max_command]u8 = undefined;
-                const deny_detail = sse.argStringInto(&deny_buf_path, call.args, "path") orelse
-                    sse.argStringInto(&deny_buf_path, call.args, "command") orelse "";
-                host.toolOut(call.name, deny_detail, true, "permission denied\n");
+                var deny_detail_buf: [permissions.max_command]u8 = undefined;
+                const deny_detail = toolDetail(&deny_detail_buf, call.args);
+                const deny_body = if (deny_detail.len != 0)
+                    try std.fmt.allocPrint(allocator, "permission denied: {s}\n", .{deny_detail})
+                else
+                    try allocator.dupe(u8, "permission denied\n");
+                defer allocator.free(deny_body);
+                host.toolOut(call.name, deny_detail, true, deny_body);
                 last.deinit(allocator);
-                return allocator.dupe(u8, "permission denied\n");
+                return try allocator.dupe(u8, deny_body);
             },
         }
         const asst_text = try allocator.dupe(u8, call.preamble);
@@ -564,6 +588,35 @@ fn chatTurn(
         const tool_args = try allocator.dupe(u8, call.args);
         last.deinit(allocator);
         if (trace) |t| t.setTool(tool_name, tool_args);
+
+        // Exact-action re-check: live mode may have changed; a human clear
+        // covers only this frozen name+args. Prompt again if mode still wants it.
+        host.pollModeCycle();
+        const mode_run = liveMode(run);
+        var recheck = admitCall(mode_run, tool_name, tool_args, has_tty, cfg.rules, run.session_rules, always[0..always_n]);
+        if (one_shot) |k| {
+            if (permissions.exactKeyHit(&.{k}, tool_name, tool_args)) recheck = .allow;
+        }
+        if (recheck == .prompt) {
+            var detail_buf: [permissions.max_command]u8 = undefined;
+            const detail0 = toolDetail(&detail_buf, tool_args);
+            const ans = if (host.decide(tool_name, detail0)) |a| a else if (permissions.askHuman(io, tool_name)) sink.Ask.allow else sink.Ask.deny;
+            recheck = if (ans == .deny) .deny else .allow;
+        }
+        if (recheck != .allow) {
+            var deny_detail_buf: [permissions.max_command]u8 = undefined;
+            const deny_detail = toolDetail(&deny_detail_buf, tool_args);
+            const deny_body = if (deny_detail.len != 0)
+                try std.fmt.allocPrint(allocator, "permission denied: {s}\n", .{deny_detail})
+            else
+                try allocator.dupe(u8, "permission denied\n");
+            defer allocator.free(deny_body);
+            host.toolOut(tool_name, deny_detail, true, deny_body);
+            allocator.free(asst_text);
+            allocator.free(tool_name);
+            allocator.free(tool_args);
+            return try allocator.dupe(u8, deny_body);
+        }
 
         if (Tool.Name.fromSlice(tool_name)) |n| {
             if (n.isExplore()) explored = true;
@@ -595,7 +648,7 @@ fn chatTurn(
                 .workspace = workspace,
                 .endpoint = endpoint,
                 .home = home,
-                .mode = mode,
+                .mode = mode_run,
                 .has_tty = has_tty,
                 .reads = reads,
                 .depth = depth,
@@ -619,6 +672,9 @@ fn chatTurn(
                 .result => |r| result = r,
             },
         }
+        // Archive before mask: put() must see secrets to write the placeholder.
+        const archive_src = try allocator.dupe(u8, result);
+        defer allocator.free(archive_src);
         {
             const hooked = try hooks.post(allocator, io, workspace, dir, con, tool_name, path, result);
             allocator.free(result);
@@ -629,6 +685,17 @@ fn chatTurn(
                 }
             }
         }
+        if (tool_blob.items.len + result.len > tool_blob_cap) {
+            const drop = tool_blob.items.len + result.len - tool_blob_cap;
+            if (drop < tool_blob.items.len) {
+                const keep = tool_blob.items[drop..];
+                std.mem.copyForwards(u8, tool_blob.items[0..keep.len], keep);
+                tool_blob.shrinkRetainingCapacity(keep.len);
+            } else {
+                tool_blob.clearRetainingCapacity();
+            }
+        }
+        try tool_blob.appendSlice(allocator, result);
         var out_detail_buf: [permissions.max_command]u8 = undefined;
         const detail = blk: {
             const d = toolDetail(&out_detail_buf, tool_args);
@@ -637,13 +704,19 @@ fn chatTurn(
         host.toolOut(tool_name, detail, true, result);
         for (extras) |ex| {
             host.pollCancel();
+            host.pollModeCycle();
             if (host.cancelled()) break;
             var ex_detail_buf: [permissions.max_command]u8 = undefined;
             const ex_path = toolDetail(&ex_detail_buf, ex.args);
             host.tool(ex.name, ex_path, false);
-            const d = admitCall(mode, ex.name, ex.args, has_tty, cfg.rules, run.session_rules, always[0..always_n]);
+            const d = admitCall(liveMode(run), ex.name, ex.args, has_tty, cfg.rules, run.session_rules, always[0..always_n]);
             if (d != .allow) {
-                host.toolOut(ex.name, ex_path, true, "permission denied\n");
+                const deny_msg = if (ex_path.len != 0)
+                    try std.fmt.allocPrint(allocator, "permission denied: {s}\n", .{ex_path})
+                else
+                    try allocator.dupe(u8, "permission denied\n");
+                defer allocator.free(deny_msg);
+                host.toolOut(ex.name, ex_path, true, deny_msg);
                 continue;
             }
             const extra_res = dispatch.run(dir, io, allocator, workspace, ex.name, ex.args, home) catch |err|
@@ -701,7 +774,7 @@ fn chatTurn(
                 }
             }
         }
-        const follow = try presentResult(allocator, dir, io, tool_name, path, follow_raw);
+        const follow = try presentResult(allocator, dir, io, tool_name, path, follow_raw, archive_src);
         allocator.free(follow_raw);
         allocator.free(tool_name);
         allocator.free(tool_args);
@@ -1036,9 +1109,7 @@ fn admitCall(
     session: []const permissions.Rule,
     always: []const []const u8,
 ) permissions.Decision {
-    for (always) |a| {
-        if (std.mem.eql(u8, a, name)) return .allow;
-    }
+    if (permissions.exactKeyHit(always, name, args)) return .allow;
     return permissions.admitWithSession(mode, name, args, has_tty, rules, session);
 }
 
@@ -1057,24 +1128,45 @@ fn presentResult(
     tool_name: []const u8,
     path: ?[]const u8,
     follow_raw: []const u8,
+    /// Unmasked tool body; secrets archive as placeholder even when short.
+    archive_src: []const u8,
 ) ![]u8 {
     const trimmed = try trim.apply(allocator, follow_raw);
-    if (follow_raw.len <= compact.result_budget) return trimmed;
+    const secret = hooks.hasSecret(archive_src);
+    if (follow_raw.len <= compact.result_budget and !secret) return trimmed;
     defer allocator.free(trimmed);
     const target: recall.Target = if (path) |p| .{ .path = p } else .none;
-    const id = recall.put(dir, io, tool_name, target, follow_raw) catch {
+    const body = if (secret) archive_src else follow_raw;
+    const id = recall.put(dir, io, tool_name, target, body) catch {
         return compact.capResult(allocator, trimmed);
     };
     const stub = try recall.cite(allocator, .{
         .id = id,
         .tool = tool_name,
         .target = target,
-        .chars = follow_raw.len,
+        .chars = body.len,
     });
     defer allocator.free(stub);
     const joined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ stub, trimmed });
     defer allocator.free(joined);
     return compact.capResult(allocator, joined);
+}
+
+test "presentResult archives secret-shaped bodies as placeholder" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const raw = "api_key=sk-secret-e2e-not-for-disk\n";
+    const follow = "Tool bash result:\napi_key***\nContinue.";
+    const out = try presentResult(a, tmp.dir, io, "bash", null, follow, raw);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "cite r") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "sk-secret-e2e") == null);
+    const body = try recall.load(a, tmp.dir, io, @enumFromInt(1));
+    defer a.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "(sensitive; not saved)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "sk-secret-e2e") == null);
 }
 
 fn billedReview(

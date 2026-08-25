@@ -104,7 +104,14 @@ pub fn reloadFromDisk(ctx: *Ctx) void {
     defer prefs.deinit(ctx.gpa);
     const json = readAuth(ctx.arena, ctx.io, ctx.home);
     const provider = ctx.flag_provider orelse (if (prefs.last_provider.len > 0) prefs.last_provider else null);
-    const model = ctx.flag_model orelse (if (prefs.last_model.len > 0) prefs.last_model else null);
+    const model = ctx.flag_model orelse blk: {
+        if (provider) |p| {
+            const pref = settings.modelForProvider(prefs, p);
+            if (pref.len > 0) break :blk pref;
+        }
+        if (prefs.last_model.len > 0) break :blk prefs.last_model;
+        break :blk null;
+    };
     var resolved = auth.resolveStored(ctx.lookup, json, provider, model);
     if (ctx.state.model_override) |override| {
         if (resolved) |*r| r.model = override;
@@ -766,6 +773,44 @@ fn doSettings(ctx: *Ctx, rest: []const u8) !void {
 fn doMcp(ctx: *Ctx, rest: []const u8) !void {
     var it = std.mem.tokenizeScalar(u8, rest, ' ');
     const action = it.next() orelse "list";
+    if (std.mem.eql(u8, action, "add")) {
+        const first = it.next() orelse {
+            try emit(ctx, "usage: /mcp add <name> <command> [args...] | /mcp add --transport http <name> <url>\n");
+            return;
+        };
+        if (std.mem.eql(u8, first, "--transport")) {
+            const transport = it.next() orelse "";
+            const name = it.next() orelse "";
+            const url = it.next() orelse "";
+            if (!std.mem.eql(u8, transport, "http") or name.len == 0 or url.len == 0) {
+                try emit(ctx, "usage: /mcp add --transport http <name> <url>\n");
+                return;
+            }
+            settings.upsertMcp(ctx.gpa, ctx.io, ctx.home, .{ .name = name, .url = url }) catch |err| {
+                try emit(ctx, try std.fmt.allocPrint(ctx.arena, "mcp add failed: {s}\n", .{@errorName(err)}));
+                return;
+            };
+            try emit(ctx, try std.fmt.allocPrint(ctx.arena, "mcp: saved http server {s}\n", .{name}));
+            return;
+        }
+        const name = first;
+        const command = it.next() orelse {
+            try emit(ctx, "usage: /mcp add <name> <command> [args...]\n");
+            return;
+        };
+        var server: settings.McpServer = .{ .name = name, .command = command };
+        while (it.next()) |arg| {
+            if (server.argv_n >= settings.max_mcp_args) break;
+            server.argv[server.argv_n] = arg;
+            server.argv_n += 1;
+        }
+        settings.upsertMcp(ctx.gpa, ctx.io, ctx.home, server) catch |err| {
+            try emit(ctx, try std.fmt.allocPrint(ctx.arena, "mcp add failed: {s}\n", .{@errorName(err)}));
+            return;
+        };
+        try emit(ctx, try std.fmt.allocPrint(ctx.arena, "mcp: saved stdio server {s}\n", .{name}));
+        return;
+    }
     const name = it.next() orelse "";
     const arguments = std.mem.trim(u8, it.rest(), " \t");
     if ((std.mem.eql(u8, action, "list") or action.len == 0) and name.len == 0) {
@@ -778,7 +823,10 @@ fn doMcp(ctx: *Ctx, rest: []const u8) !void {
             return;
         }
         ctx.state.pick.open(.mcp);
-        for (cfg.mcp) |s| ctx.state.pick.push(s.name, if (s.command.len > 0) s.command else "mcp");
+        for (cfg.mcp) |s| {
+            const help = if (s.url.len > 0) s.url else if (s.command.len > 0) s.command else "mcp";
+            ctx.state.pick.push(s.name, help);
+        }
         return;
     }
     const msg = try mcp.run(ctx.gpa, ctx.io, ctx.home, action, name, if (arguments.len == 0) "{}" else arguments);

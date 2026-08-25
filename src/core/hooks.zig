@@ -32,6 +32,10 @@ pub fn mask(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
+pub fn hasSecret(s: []const u8) bool {
+    return secretAt(s) != null;
+}
+
 const Hit = struct { from: usize, name_end: usize, skip: usize };
 
 fn isIdent(c: u8) bool {
@@ -76,6 +80,7 @@ pub fn pre(contract: contract_mod.Contract, name: []const u8, args_json: []const
         },
         .todo,
         .job,
+        .read_result,
         .read,
         .write,
         .edit,

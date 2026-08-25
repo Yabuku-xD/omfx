@@ -13,6 +13,8 @@ const cdp = @import("cdp.zig");
 const tool = @import("../core/tool.zig");
 const deadline = @import("deadline.zig");
 const jobs = @import("jobs.zig");
+const recall = @import("../core/recall.zig");
+const hooks = @import("../core/hooks.zig");
 
 /// Tool arguments arrive as JSON *string values*: after the provider layer
 /// decodes the arguments-as-a-string envelope, `\n` inside a value is still two
@@ -157,6 +159,35 @@ pub fn run(
                 });
             }
             break :blk try jobs.poll(allocator, io, workspace, id);
+        },
+        .read_result => blk: {
+            // id forms: "r3" / "3" (recall), "job:5" (background log).
+            const id_s = args.str("id") orelse return error.MissingPath;
+            if (std.mem.startsWith(u8, id_s, "job:")) {
+                const n = std.fmt.parseInt(usize, id_s["job:".len..], 10) catch
+                    break :blk try allocator.dupe(u8, "read_result: bad job id\n");
+                const path = try jobs.logRel(allocator, n);
+                defer allocator.free(path);
+                const raw = fs.read(dir, io, allocator, workspace, path) catch
+                    break :blk try std.fmt.allocPrint(allocator, "read_result: no job log for {d}\n", .{n});
+                defer allocator.free(raw);
+                if (hooks.hasSecret(raw)) {
+                    break :blk try allocator.dupe(u8, "read_result: sensitive; not shown\n");
+                }
+                break :blk try hooks.mask(allocator, raw);
+            }
+            var digits = id_s;
+            if (digits.len > 0 and (digits[0] == 'r' or digits[0] == 'R')) digits = digits[1..];
+            const n = std.fmt.parseInt(u16, digits, 10) catch
+                break :blk try allocator.dupe(u8, "read_result: id is rN or job:N\n");
+            const body = recall.load(allocator, dir, io, @enumFromInt(n)) catch
+                break :blk try std.fmt.allocPrint(allocator, "read_result: no archive r{d}\n", .{n});
+            defer allocator.free(body);
+            // Hand-edited archives can still hold secrets; never replay them.
+            if (hooks.hasSecret(body)) {
+                break :blk try allocator.dupe(u8, "read_result: sensitive; not shown\n");
+            }
+            break :blk try hooks.mask(allocator, body);
         },
         .glob => search.glob(
             dir,
@@ -342,6 +373,45 @@ test "dispatch read" {
     const out = try run(tmp.dir, io, std.testing.allocator, "ws", "read", "{\"path\":\"a.txt\"}", "");
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings("     1\thello\n", out);
+}
+
+test "read_result redacts secret-shaped recall bodies" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    try tmp.dir.createDirPath(io, ".omfx/recall");
+    {
+        var f = try tmp.dir.createFile(io, ".omfx/recall/r1.txt", .{ .truncate = true });
+        defer f.close(io);
+        var buf: [128]u8 = undefined;
+        var w = f.writer(io, &buf);
+        try w.interface.writeAll("tool=bash path= chars=40\napi_key=sk-secret-e2e-not-for-disk\n");
+        try w.interface.flush();
+    }
+    const out = try run(tmp.dir, io, a, "ws", "read_result", "{\"id\":\"r1\"}", "");
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "sensitive") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "sk-secret-e2e") == null);
+}
+
+test "read_result returns a non-secret recall body" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    try tmp.dir.createDirPath(io, ".omfx/recall");
+    {
+        var f = try tmp.dir.createFile(io, ".omfx/recall/r1.txt", .{ .truncate = true });
+        defer f.close(io);
+        var buf: [128]u8 = undefined;
+        var w = f.writer(io, &buf);
+        try w.interface.writeAll("tool=bash path= chars=12\nE2E_RECALL_OK\n");
+        try w.interface.flush();
+    }
+    const out = try run(tmp.dir, io, a, "ws", "read_result", "{\"id\":\"r1\"}", "");
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "E2E_RECALL_OK") != null);
 }
 
 test "dispatch read pages with offset and limit" {

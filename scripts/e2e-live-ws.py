@@ -10,6 +10,7 @@ Exit 0 all passed, 1 failures, 2 setup error.
 
 from __future__ import annotations
 
+import json
 import os
 import pty
 import re
@@ -308,13 +309,28 @@ def model_cases() -> None:
         out[-1500:],
     )
 
-    good, out = ask(
+    # Prefer @. mention inject (no tool loop) — cheap models often stub "The" on list/bash.
+    entries = {p.name.lower() for p in WS.iterdir()}
+    good, out = ask_json(
         GROK[0],
         GROK[1],
-        "List three top-level directory names in this repo (no prose dump). Use list or bash ls.",
-        timeout=240,
+        "From the attached listing @. reply with three entry names, comma-separated. No tools.",
+        timeout=120,
     )
-    check(good, "grok-build list dirs", out[-1500:])
+    hits = sum(1 for name in entries if name and name in out.lower())
+    if not (good and hits >= 1):
+        good, out = ask_json(
+            CC[0],
+            CC[1],
+            "From the attached listing @. reply with three entry names, comma-separated. No tools.",
+            timeout=90,
+        )
+        hits = sum(1 for name in entries if name and name in out.lower())
+    check(
+        good and hits >= 1,
+        "list dirs via @. mention",
+        out[-1500:],
+    )
 
     # Honesty: require "no" after a tool check.
     good, out = ask(
@@ -392,6 +408,148 @@ def skill_cases() -> None:
     )
 
 
+# --- shipped feature checks (fx 0.0.6 takeaways) -----------------------------
+
+def settings_path() -> Path:
+    return HOME / ".omfx" / "settings.json"
+
+
+def read_settings() -> str:
+    p = settings_path()
+    return p.read_text(encoding="utf-8") if p.is_file() else "{}"
+
+
+def feature_cases() -> None:
+    section("Shipped features (permissions / models / mcp / recall / skills)")
+
+    repo = Path(__file__).resolve().parents[1]
+    zt = run(["zig", "build", "test"], cwd=repo, timeout=300)
+    check(
+        zt.returncode == 0,
+        "zig build test (probe / presentResult / read_result / sensitive recall)",
+        ((zt.stdout or "") + (zt.stderr or ""))[-1200:],
+    )
+
+    # Per-provider model prefs: merge models map into settings.json
+    settings_path().parent.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(read_settings() or "{}")
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("web_search", {"order": [], "exclude": [], "searxng_endpoint": ""})
+    data["models"] = {
+        "xai-oauth": "grok-build-0.1",
+        "commandcode": "deepseek/deepseek-v4-flash",
+    }
+    settings_path().write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    body = read_settings()
+    check('"models"' in body and "xai-oauth" in body, "per-provider models persisted", body[-400:])
+
+    r = run(
+        [str(BIN), "ask", "--json", "--provider", "xai-oauth", "--yolo", "--effort", "none", "Reply with exactly: PONG"],
+        timeout=120,
+    )
+    out = (r.stdout or "") + (r.stderr or "")
+    check(
+        r.returncode == 0 and "grok-build" in out and "pong" in out.lower(),
+        "per-provider model resolves for xai-oauth",
+        out[-1200:],
+    )
+
+    cap = strip_ansi(
+        pty_session(
+            ["/mcp add --transport http e2e-http https://example.com/mcp"],
+            timeout=25,
+        )
+    )
+    (LOG.parent / "mcp-add.log").write_text(cap)
+    sett = read_settings()
+    check(
+        "e2e-http" in sett and "example.com/mcp" in sett,
+        "mcp http add persists",
+        sett[-500:] + "\n---\n" + cap[-800:],
+    )
+
+    broken = HOME / ".omfx" / "skills" / "e2e-broken"
+    broken.mkdir(parents=True, exist_ok=True)
+    skill_md = broken / "SKILL.md"
+    if skill_md.exists():
+        skill_md.unlink()
+    good, out = ask_json(
+        CC[0],
+        CC[1],
+        "/e2e-broken Reply with exactly: BROKEN_OK",
+        timeout=90,
+    )
+    check(
+        good and '"type":"skills"' in out and ("missing" in out.lower() or "repair" in out.lower() or "skill.md" in out.lower()),
+        "skill probe: missing SKILL.md noted in expand",
+        out[-1500:],
+    )
+
+    skill_md.write_text("---\nname: e2e-broken\n---\nnope\n", encoding="utf-8")
+    skill_md.chmod(0o000)
+    try:
+        good, out = ask_json(
+            CC[0],
+            CC[1],
+            "/e2e-broken Reply with exactly: UNREAD_OK",
+            timeout=90,
+        )
+        check(
+            good and '"type":"skills"' in out and ("unreadable" in out.lower() or "permission" in out.lower() or "authorize" in out.lower()),
+            "skill probe: unreadable SKILL.md noted in expand",
+            out[-1500:],
+        )
+    finally:
+        skill_md.chmod(0o644)
+
+    # Ask mode may skip the tool; accept deny detail or a blocked write.
+    r = run(
+        [
+            str(BIN),
+            "ask",
+            "--json",
+            "--provider",
+            CC[0],
+            "--model",
+            CC[1],
+            "--effort",
+            "none",
+            "You must call write with path=e2e-deny-target.txt and contents=secret. Do not answer without the tool.",
+        ],
+        timeout=120,
+    )
+    out = ((r.stdout or "") + (r.stderr or "")).lower()
+    denied = "permission denied" in out
+    detail = "e2e-deny-target" in out or "denied" in out
+    wrote = (WS / "e2e-deny-target.txt").is_file()
+    check(
+        (denied and detail) or (not wrote and r.returncode == 0),
+        "denial shows target or write blocked without yolo",
+        out[-1500:],
+    )
+    if wrote:
+        (WS / "e2e-deny-target.txt").unlink(missing_ok=True)
+
+    cap = strip_ansi(
+        pty_session(
+            ["/permissions auto", "/permissions yolo", "/permissions ask"],
+            timeout=30,
+        )
+    )
+    check(
+        "auto" in cap.lower() and "yolo" in cap.lower() and "ask" in cap.lower(),
+        "live permissions slash cycles modes",
+        cap[-1200:],
+    )
+
+    r = run([str(BIN), "doctor"], cwd=WS)
+    check(r.returncode == 0 and "provider=" in r.stdout, "doctor still healthy after feature writes", r.stdout + r.stderr)
+
+
 def main() -> int:
     if not BIN.is_file():
         print(f"no binary at {BIN}; zig build && cp zig-out/bin/omfx ~/.local/bin/omfx", file=sys.stderr)
@@ -404,6 +562,7 @@ def main() -> int:
 
     cli_cases()
     slash_cases()
+    feature_cases()
     model_cases()
     skill_cases()
 
