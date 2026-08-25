@@ -36,11 +36,12 @@ pub const text =
     \\Prefer patch for existing files. write is for new files only.
     \\edit: unique old_string/new_string, or symbol+action (before|after|inside|replace|delete).
     \\After write/edit, diagnostics and verify labels appear in the same result. unavailable, timeout, and degraded are not a clean verdict.
-    \\bash is OS-sandboxed with network denied; use web_fetch, web_scrape, or web_search for the net.
+    \\When sandbox is on, bash is OS-sandboxed with network denied; use web_fetch, web_scrape, or web_search for the net.
     \\bash: set timeout for a slow build. Dev servers and watchers detach by default; poll them with job, do not wait on them.
     \\Dropped tool bodies become cite rN at .omfx/recall/rN.txt; compact never encrypts and never stops the loop.
     \\Call compact when a sub-task is done (verify clean) or you are stuck repeating; do not compact mid-derivation. compact is local ARC: cites, not an LLM rewrite.
     \\peer: auto-routed teammates; plain words like "sonnet 5 from anthropic" pin the model. Reasoning stays auto unless the goal names a level for that model. Isolated worktree when git exists. Board FACT/FAIL/PATH. User may /peers <goal>.
+    \\After tools return, continue from their results. The harness will stop you if you keep re-orienting.
     \\Diagrams: mermaid in fenced ```mermaid blocks. The harness saves them under .omfx/diagrams/ (svg if mmdc is on PATH). Markdown tables stay as text.
     \\
 ;

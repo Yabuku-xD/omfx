@@ -144,7 +144,15 @@ pub fn list(
     const path = if (rel.len == 0 or std.mem.eql(u8, rel, ".") or std.mem.eql(u8, rel, "./")) "." else rel;
     if (!std.mem.eql(u8, path, ".")) try pathing.assertReadable(workspace, path);
     const open_dir = if (std.fs.path.isAbsolute(path)) Io.Dir.cwd() else dir;
-    var child = try open_dir.openDir(io, path, .{ .iterate = true });
+    var child = open_dir.openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
+        // Models often `list` a file; NotDir alone reads as a crash, not a hint.
+        error.NotDir => return std.fmt.allocPrint(
+            allocator,
+            "{s} is a file, not a folder. Use read for its contents (or list its parent directory).",
+            .{path},
+        ),
+        else => return err,
+    };
     defer child.close(io);
     var it = child.iterate();
     var out: std.ArrayList(u8) = .empty;
@@ -257,6 +265,21 @@ test "list copy mkdir info" {
     const nested = try list(tmp.dir, io, std.testing.allocator, "ws", "sub");
     defer std.testing.allocator.free(nested);
     try std.testing.expect(std.mem.indexOf(u8, nested, "b.txt") != null);
+    const on_file = try list(tmp.dir, io, std.testing.allocator, "ws", "a.txt");
+    defer std.testing.allocator.free(on_file);
+    try std.testing.expect(std.mem.indexOf(u8, on_file, "is a file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, on_file, "read") != null);
+}
+
+test "list on a file explains to use read" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try write(tmp.dir, io, std.testing.allocator, "ws", "a.txt", "hello");
+    const msg = try list(tmp.dir, io, std.testing.allocator, "ws", "a.txt");
+    defer std.testing.allocator.free(msg);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "is a file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "read") != null);
 }
 
 test "write creates missing parent directories" {

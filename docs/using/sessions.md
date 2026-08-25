@@ -14,7 +14,13 @@ Session files are under `~/.omfx/sessions/`. The live thread is `last.jsonl`. Wo
 /resume <id>
 ```
 
-Bare `/resume` opens the sessions panel. Outside the TUI: `omfx session resume last`.
+Bare `/resume` opens the sessions panel. Each row shows when the session last
+changed. `del` permanently deletes the selected session (no confirmation): the
+transcript, its handoff packet, and any recall/run files it names. After that,
+recall and run entries that nothing left on disk still cites are swept too —
+so clearing the list also clears orphaned workspace residue.
+
+Outside the TUI: `omfx session resume last`.
 
 ## Clear and reset
 

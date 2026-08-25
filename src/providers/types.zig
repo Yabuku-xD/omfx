@@ -231,6 +231,8 @@ pub const Stream = struct {
     on_tick: ?*const fn (ctx: ?*anyopaque) void = null,
     cancel: ?*std.atomic.Value(bool) = null,
     poll_key: ?*const fn () bool = null,
+    /// Transcript pane height for PageUp/Down while a turn owns stdin.
+    page_rows: u16 = 20,
 
     pub fn cancelled(self: Stream) bool {
         return if (self.cancel) |c| c.load(.acquire) else false;

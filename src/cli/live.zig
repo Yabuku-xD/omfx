@@ -9,8 +9,39 @@ const ansi = @import("../core/ansi.zig");
 const runs_mod = @import("runs.zig");
 const sink = @import("../core/sink.zig");
 const askprev = @import("askprev.zig");
+const width_mod = @import("width.zig");
+const todos = @import("../core/todos.zig");
 
 const log = std.log.scoped(.live);
+
+fn pinTodoChrome(allocator: std.mem.Allocator, cols: u16, rows: [][]const u8) []const []const u8 {
+    const list = todos.get();
+    if (list.n == 0) return &.{};
+    const c = list.counts();
+    if (c.done == c.total) return &.{};
+    var n: usize = 0;
+    for (list.items[0..list.n]) |item| {
+        if (n == rows.len) break;
+        rows[n] = chat.formatTodo(allocator, cols, item.slice(), item.status == .in_progress, item.status == .done) catch continue;
+        n += 1;
+    }
+    return rows[0..n];
+}
+
+fn scrollRowsFor(layout: *const tui.Layout, scroll: usize, task_n: usize) u16 {
+    const tasks: u16 = @intCast(@min(task_n, @as(usize, std.math.maxInt(u16))));
+    const overlay = tasks + @as(u16, if (tui.jumpVisible(scroll, layout.transcript_rows)) 1 else 0);
+    const full = layout.transcript_rows;
+    return if (full > overlay) full - overlay else full;
+}
+
+fn footerTaskCount() usize {
+    const list = todos.get();
+    if (list.n == 0) return 0;
+    const c = list.counts();
+    if (c.done == c.total) return 0;
+    return list.n;
+}
 
 comptime {
     if (sink.stopping_phrase.len > activity.max_phrase)
@@ -220,13 +251,51 @@ pub const Live = union(enum) {
         self.paint_lock.store(0, .release);
     }
 
+    /// Apply wheel/page deltas from the cancel watcher. Returns true when the
+    /// view moved, so the next paint is not throttled away.
+    fn applyScrollNudge(self: *Tty) bool {
+        if (sink.takeJumpToBottom()) {
+            if (self.scroll.* != 0) {
+                self.scroll.* = 0;
+                return true;
+            }
+            return false;
+        }
+        const delta = sink.takeScrollDelta();
+        if (delta == 0) return false;
+        const up = delta > 0;
+        const mag: u32 = @intCast(if (delta > 0) delta else -delta);
+        const step: u16 = @intCast(@min(mag, std.math.maxInt(u16)));
+        const next = tui.stepScroll(
+            self.scroll.*,
+            self.shown.rowCount(),
+            scrollRowsFor(self.layout, self.scroll.*, footerTaskCount()),
+            up,
+            step,
+        );
+        if (next == self.scroll.*) return false;
+        self.scroll.* = next;
+        return true;
+    }
+
+    fn publishJumpHit(self: *Tty) void {
+        if (tui.jumpVisible(self.scroll.*, self.layout.transcript_rows)) {
+            if (tui.jumpHitBox(self.layout.*)) |box| {
+                sink.setJumpHit(true, box.row, box.col0, box.col1);
+                return;
+            }
+        }
+        sink.setJumpHit(false, 0, 0, 0);
+    }
+
     fn paintTty(self: *Tty, extra: Extra) void {
         // A stopping spinner must not paint a generating frame over idle.
         if (self.spin_thread != null and self.spin_stop.load(.acquire)) return;
         lockPaint(self);
         defer unlockPaint(self);
         const now = wallMs();
-        if (extra == .none and !self.cancel.load(.acquire)) {
+        const scrolled = applyScrollNudge(self);
+        if (extra == .none and !self.cancel.load(.acquire) and !scrolled) {
             if (self.last_status_ms) |prev| {
                 if (now - prev < activity.spin_ms) return;
             }
@@ -250,6 +319,9 @@ pub const Live = union(enum) {
         }
         var footer = self.footer;
         footer.status = self.act.render(now);
+        footer.jump = tui.jumpVisible(self.scroll.*, self.layout.transcript_rows);
+        var todo_rows: [todos.max_items][]const u8 = undefined;
+        footer.tasks = pinTodoChrome(self.arena, self.layout.cols, &todo_rows);
         // Words typed during the turn go into the steer queue. They are drawn
         // as their own row rather than inside the composer: the composer is
         // where the next prompt is written, and a queued message is a message
@@ -275,6 +347,7 @@ pub const Live = union(enum) {
             log.debug("writePane: {s}", .{@errorName(err)});
             return;
         };
+        publishJumpHit(self);
         var head_buf: [activity.max_phrase]u8 = undefined;
         var title_buf: [96]u8 = undefined;
         const title = tui.tabTitleSeq(
@@ -298,8 +371,12 @@ pub const Live = union(enum) {
     fn previewAsst(self: *Tty) void {
         if (self.asst_hold.items.len == 0) return;
         self.md.cols = self.layout.cols;
-        const painted = self.md.peek(self.allocator, self.asst_hold.items) catch {
-            paintTty(self, .{ .line = self.asst_hold.items });
+        // Hold back a trailing incomplete rune so the preview never paints
+        // replacement glyphs while the next chunk is still in flight.
+        const src = width_mod.utf8CompletePrefix(self.asst_hold.items);
+        if (src.len == 0) return;
+        const painted = self.md.peek(self.allocator, src) catch {
+            paintTty(self, .{ .line = src });
             return;
         };
         defer self.allocator.free(painted);
@@ -670,6 +747,10 @@ pub const Live = union(enum) {
             .stream => |*s| s.cancel,
             .tui => |*t| t.cancel,
         };
+        const page_rows: u16 = switch (self.*) {
+            .tui => |*t| t.layout.transcript_rows,
+            .json, .stream => 20,
+        };
         return .{
             .ctx = self,
             .on_text = onText,
@@ -679,6 +760,7 @@ pub const Live = union(enum) {
             .on_tool = onTool,
             .ask = onAsk,
             .cancel = cancel,
+            .page_rows = page_rows,
         };
     }
 };

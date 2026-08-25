@@ -16,11 +16,14 @@
 //!   OpenAI     /v1/models          id only
 //!   Groq       /openai/v1/models   id, context_window, max_completion_tokens
 //!   Copilot    /models             id, capabilities.limits.max_context_window_tokens
+//!   Command Code /provider/v1/models  id, name, context_length only —
+//!                                  vision/reasoning/protocol are fetched from
+//!                                  their published model docs and cached under
+//!                                  `cache/caps-{provider}.json`.
 //!
-//! Only Anthropic publishes effort levels. For the rest the built-in table
-//! stays the source for that one field, because a level the model does not
-//! take is a request the provider rejects, and guessing is worse than the
-//! documented value. Everything a provider does publish wins over the table.
+//! Only Anthropic publishes effort levels on /models. For the rest the built-in
+//! table seeds the cache once, then the cache (and docs fetch) win. Everything
+//! a provider does publish wins over the table.
 //!
 //! One thing a provider will not tell you: the same model gives a
 //! subscription and an API key different context windows. GPT-5.5 is 1M on an
@@ -45,9 +48,16 @@ pub const file_name = "models.json";
 /// Receipt: Anthropic returns ~40 models with capability blocks at ~1.5 KB
 /// each, so 512 KB is a tripwire for a response nobody meant to send.
 pub const max_body: usize = 512 * 1024;
+/// Command Code's model docs page is ~400 KB of HTML; leave headroom.
+pub const max_docs_body: usize = 2 * 1024 * 1024;
 pub const max_models: usize = 128;
 /// Longest effort vocabulary seen: none,low,medium,high,xhigh,max.
 pub const max_efforts: usize = 64;
+
+pub const commandcode_caps_url = "https://commandcode.ai/docs/reference/cli/models";
+
+/// A capability the /models route may omit. Cached once known.
+pub const Tri = enum { unknown, no, yes };
 
 comptime {
     // `anthropicEfforts` writes the joined level names into a buffer of this
@@ -66,6 +76,10 @@ pub const Entry = struct {
     efforts_len: usize = 0,
     context_window: u32 = 0,
     max_tokens: u32 = 0,
+    vision: Tri = .unknown,
+    reasoning: Tri = .unknown,
+    has_protocol: bool = false,
+    protocol: types.Protocol = .openai_compat,
 
     pub fn id(self: *const Entry) []const u8 {
         return self.id_buf[0..self.id_len];
@@ -89,6 +103,19 @@ pub const Entry = struct {
 
     fn setEfforts(self: *Entry, s: []const u8) void {
         self.efforts_len = copyInto(&self.efforts_buf, s);
+    }
+
+    fn setVision(self: *Entry, yes: bool) void {
+        self.vision = if (yes) .yes else .no;
+    }
+
+    fn setReasoning(self: *Entry, yes: bool) void {
+        self.reasoning = if (yes) .yes else .no;
+    }
+
+    fn setProtocol(self: *Entry, p: types.Protocol) void {
+        self.has_protocol = true;
+        self.protocol = p;
     }
 };
 
@@ -304,13 +331,18 @@ pub fn readCache(allocator: std.mem.Allocator, io: Io, home: []const u8, provide
 pub fn writeCache(allocator: std.mem.Allocator, io: Io, home: []const u8, provider: []const u8, body: []const u8) void {
     const p = cachePath(allocator, home, provider) catch return;
     defer allocator.free(p);
-    const dir = std.fs.path.dirname(p) orelse return;
+    writeFile(allocator, io, p, body);
+}
+
+fn writeFile(allocator: std.mem.Allocator, io: Io, path: []const u8, body: []const u8) void {
+    _ = allocator;
+    const dir = std.fs.path.dirname(path) orelse return;
     Io.Dir.cwd().createDirPath(io, dir) catch |err| {
         log.debug("mkdir {s}: {s}", .{ dir, @errorName(err) });
         return;
     };
-    var f = Io.Dir.cwd().createFile(io, p, .{ .truncate = true }) catch |err| {
-        log.debug("open {s}: {s}", .{ p, @errorName(err) });
+    var f = Io.Dir.cwd().createFile(io, path, .{ .truncate = true }) catch |err| {
+        log.debug("open {s}: {s}", .{ path, @errorName(err) });
         return;
     };
     defer f.close(io);
@@ -318,6 +350,233 @@ pub fn writeCache(allocator: std.mem.Allocator, io: Io, home: []const u8, provid
     var w = f.writer(io, &buf);
     w.interface.writeAll(body) catch {};
     w.interface.flush() catch {};
+}
+
+fn capsPath(allocator: std.mem.Allocator, home: []const u8, provider: []const u8) ![]u8 {
+    const root = try config.profileRoot(allocator, home);
+    defer allocator.free(root);
+    const name = try std.fmt.allocPrint(allocator, "caps-{s}.json", .{provider});
+    defer allocator.free(name);
+    return std.fs.path.join(allocator, &.{ root, "cache", name });
+}
+
+pub fn readCapsCache(allocator: std.mem.Allocator, io: Io, home: []const u8, provider: []const u8) []u8 {
+    const p = capsPath(allocator, home, provider) catch return "";
+    defer allocator.free(p);
+    return Io.Dir.cwd().readFileAlloc(io, p, allocator, .limited(max_body)) catch "";
+}
+
+fn protocolName(p: types.Protocol) []const u8 {
+    return switch (p) {
+        .openai_compat => "openai_compat",
+        .anthropic => "anthropic",
+        .openai_responses => "openai_responses",
+    };
+}
+
+fn protocolFromName(s: []const u8) ?types.Protocol {
+    if (std.mem.eql(u8, s, "openai_compat")) return .openai_compat;
+    if (std.mem.eql(u8, s, "anthropic")) return .anthropic;
+    if (std.mem.eql(u8, s, "openai_responses")) return .openai_responses;
+    return null;
+}
+
+/// Persist vision/reasoning/protocol for models whose /models route omits them.
+pub fn writeCapsCache(allocator: std.mem.Allocator, io: Io, home: []const u8, provider: []const u8, list: *const List) void {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    out.appendSlice(allocator, "{\"models\":{") catch return;
+    var first = true;
+    for (list.slice()) |e| {
+        if (e.vision == .unknown and e.reasoning == .unknown and !e.has_protocol) continue;
+        if (!first) out.append(allocator, ',') catch return;
+        first = false;
+        out.append(allocator, '"') catch return;
+        out.appendSlice(allocator, e.id()) catch return;
+        out.appendSlice(allocator, "\":{") catch return;
+        var field = false;
+        if (e.vision != .unknown) {
+            out.appendSlice(allocator, "\"vision\":") catch return;
+            out.appendSlice(allocator, if (e.vision == .yes) "true" else "false") catch return;
+            field = true;
+        }
+        if (e.reasoning != .unknown) {
+            if (field) out.append(allocator, ',') catch return;
+            out.appendSlice(allocator, "\"reasoning\":") catch return;
+            out.appendSlice(allocator, if (e.reasoning == .yes) "true" else "false") catch return;
+            field = true;
+        }
+        if (e.has_protocol) {
+            if (field) out.append(allocator, ',') catch return;
+            out.appendSlice(allocator, "\"protocol\":\"") catch return;
+            out.appendSlice(allocator, protocolName(e.protocol)) catch return;
+            out.append(allocator, '"') catch return;
+        }
+        out.append(allocator, '}') catch return;
+    }
+    out.appendSlice(allocator, "}}") catch return;
+    const p = capsPath(allocator, home, provider) catch return;
+    defer allocator.free(p);
+    writeFile(allocator, io, p, out.items);
+}
+
+/// Apply a previously cached caps file onto `list` without clobbering fields
+/// already known from this session's fetch.
+pub fn applyCapsCache(body: []const u8, list: *List) void {
+    for (list.items[0..list.n]) |*e| {
+        const id = e.id();
+        var needle_buf: [128]u8 = undefined;
+        const needle = std.fmt.bufPrint(&needle_buf, "\"{s}\":{{", .{id}) catch continue;
+        const at = std.mem.indexOf(u8, body, needle) orelse continue;
+        const obj_start = at + needle.len - 1;
+        const obj = objectAt(body, obj_start) orelse continue;
+        const o = body[obj.start..obj.end];
+        if (e.vision == .unknown) {
+            if (std.mem.indexOf(u8, o, "\"vision\":true") != null) e.setVision(true) else if (std.mem.indexOf(u8, o, "\"vision\":false") != null) e.setVision(false);
+        }
+        if (e.reasoning == .unknown) {
+            if (std.mem.indexOf(u8, o, "\"reasoning\":true") != null) e.setReasoning(true) else if (std.mem.indexOf(u8, o, "\"reasoning\":false") != null) e.setReasoning(false);
+        }
+        if (!e.has_protocol) {
+            const pname = stringField(o, "protocol");
+            if (pname.len != 0) {
+                if (protocolFromName(pname)) |p| e.setProtocol(p);
+            }
+        }
+    }
+}
+
+/// Fill gaps from the offline table — only fields still unknown.
+pub fn seedFromBuiltin(provider: []const u8, list: *List) void {
+    for (list.items[0..list.n]) |*e| {
+        const m = models.lookup(provider, e.id()) orelse
+            models.lookup("commandcode-anthropic", e.id()) orelse continue;
+        if (e.vision == .unknown) e.setVision(m.vision);
+        if (e.reasoning == .unknown) e.setReasoning(m.reasoning);
+        if (!e.has_protocol) e.setProtocol(m.protocol);
+        if (e.max_tokens == 0 and m.max_tokens != 0) e.max_tokens = m.max_tokens;
+        if (e.efforts().len == 0 and m.efforts.len != 0) e.setEfforts(m.efforts);
+    }
+}
+
+/// Deterministic wire shape when the catalog and docs are silent.
+pub fn inferProtocols(provider: []const u8, list: *List) void {
+    const cc = std.mem.startsWith(u8, provider, "commandcode");
+    for (list.items[0..list.n]) |*e| {
+        if (e.has_protocol) continue;
+        if (cc and std.mem.startsWith(u8, e.id(), "claude")) {
+            e.setProtocol(.anthropic);
+        } else if (cc) {
+            e.setProtocol(.openai_compat);
+        }
+    }
+}
+
+/// Parse Command Code's model docs: each row carries
+/// `aria-label="Capabilities: Text input, Vision, Reasoning"`.
+pub fn applyCommandCodeDocs(html: []const u8, list: *List) void {
+    for (list.items[0..list.n]) |*e| {
+        const label = findCapabilitiesLabel(html, e.id()) orelse continue;
+        e.setVision(std.mem.indexOf(u8, label, "Vision") != null);
+        e.setReasoning(std.mem.indexOf(u8, label, "Reasoning") != null);
+        if (!e.has_protocol) {
+            if (std.mem.startsWith(u8, e.id(), "claude")) e.setProtocol(.anthropic) else e.setProtocol(.openai_compat);
+        }
+    }
+}
+
+fn findCapabilitiesLabel(html: []const u8, id: []const u8) ?[]const u8 {
+    var aliases: [2][]const u8 = .{ id, id };
+    var n: usize = 1;
+    // Docs list `claude-haiku-4-5`; the API may append a date suffix.
+    if (std.mem.startsWith(u8, id, "claude-haiku-") and id.len > 18) {
+        aliases[n] = id[0 .. id.len - 9];
+        n += 1;
+    }
+    for (aliases[0..n]) |alias| {
+        var from: usize = 0;
+        while (from < html.len) {
+            const at = std.mem.indexOfPos(u8, html, from, alias) orelse break;
+            const window_end = @min(html.len, at + 3500);
+            const window = html[at..window_end];
+            if (std.mem.indexOf(u8, window, "Capabilities:")) |cap_at| {
+                const rest = window[cap_at + "Capabilities:".len ..];
+                const end = std.mem.indexOfScalar(u8, rest, '"') orelse break;
+                return rest[0..end];
+            }
+            from = at + alias.len;
+        }
+    }
+    return null;
+}
+
+fn fetchUrl(allocator: std.mem.Allocator, io: Io, url: []const u8, limit: usize) []u8 {
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+    var extra = [_]std.http.Header{
+        .{ .name = "Accept", .value = "text/html,application/json" },
+        .{ .name = "user-agent", .value = "omfx/0.0.1" },
+    };
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    const result = client.fetch(.{
+        .location = .{ .url = url },
+        .method = .GET,
+        .extra_headers = &extra,
+        .response_writer = &aw.writer,
+    }) catch |err| {
+        log.debug("fetch {s}: {s}", .{ url, @errorName(err) });
+        return "";
+    };
+    if (@intFromEnum(result.status) != 200) {
+        log.debug("fetch {s}: http {d}", .{ url, @intFromEnum(result.status) });
+        return "";
+    }
+    if (aw.written().len > limit) return "";
+    return aw.toOwnedSlice() catch "";
+}
+
+/// When /models omits vision/reasoning, ask the provider's published docs and
+/// cache the answer. Command Code is the only router that needs this today.
+pub fn fetchMissingCaps(
+    allocator: std.mem.Allocator,
+    io: Io,
+    provider: []const u8,
+    list: *List,
+) void {
+    if (!std.mem.startsWith(u8, provider, "commandcode")) return;
+    var need = false;
+    for (list.slice()) |e| {
+        if (e.vision == .unknown or e.reasoning == .unknown) {
+            need = true;
+            break;
+        }
+    }
+    if (!need) return;
+    const html = fetchUrl(allocator, io, commandcode_caps_url, max_docs_body);
+    if (html.len == 0) return;
+    defer allocator.free(html);
+    applyCommandCodeDocs(html, list);
+}
+
+/// Fill every gap: disk cache → live docs fetch → builtin seed → inference.
+pub fn enrich(
+    allocator: std.mem.Allocator,
+    io: Io,
+    home: []const u8,
+    provider: []const u8,
+    list: *List,
+) void {
+    if (list.n == 0) return;
+    const cached = readCapsCache(allocator, io, home, provider);
+    if (cached.len != 0) {
+        defer allocator.free(cached);
+        applyCapsCache(cached, list);
+    }
+    fetchMissingCaps(allocator, io, provider, list);
+    seedFromBuiltin(provider, list);
+    inferProtocols(provider, list);
+    writeCapsCache(allocator, io, home, provider, list);
 }
 
 // -- merge -------------------------------------------------------------------
@@ -347,8 +606,8 @@ pub fn authCap(provider: []const u8) u32 {
 /// `built` with every field the provider published written over it.
 ///
 /// The table stays authoritative for effort on providers that publish none,
-/// and for anything the response omitted: a zero from a provider means "not
-/// said", never "zero".
+/// and for anything the response omitted: a zero / unknown from a provider
+/// means "not said", never "zero" or "false".
 pub fn merge(built: models.Model, e: *const Entry) models.Model {
     var out = built;
     if (e.name().len != 0) out.name = e.name();
@@ -360,6 +619,9 @@ pub fn merge(built: models.Model, e: *const Entry) models.Model {
         out.efforts = e.efforts();
         out.reasoning = true;
     }
+    if (e.vision != .unknown) out.vision = e.vision == .yes;
+    if (e.reasoning != .unknown) out.reasoning = e.reasoning == .yes;
+    if (e.has_protocol) out.protocol = e.protocol;
     return out;
 }
 
@@ -504,6 +766,81 @@ test "codex has no model list to ask for" {
     try std.testing.expectEqual(Shape.openai_like, shapeFor("xai-oauth"));
 }
 
+test "command code docs aria-label sets vision and reasoning" {
+    const html =
+        \\<td>deepseek/deepseek-v4-flash</td>
+        \\<button aria-label="Capabilities: Text input, Reasoning"></button>
+        \\<td>deepseek/deepseek-v4-flash-vision-exp</td>
+        \\<button aria-label="Capabilities: Text input, Vision, Reasoning"></button>
+        \\<td>claude-sonnet-5</td>
+        \\<button aria-label="Capabilities: Text input, Vision, Reasoning"></button>
+    ;
+    var list = List{};
+    const a = list.push().?;
+    a.setId("deepseek/deepseek-v4-flash");
+    const b = list.push().?;
+    b.setId("deepseek/deepseek-v4-flash-vision-exp");
+    const c = list.push().?;
+    c.setId("claude-sonnet-5");
+    applyCommandCodeDocs(html, &list);
+    try std.testing.expectEqual(Tri.no, list.find("deepseek/deepseek-v4-flash").?.vision);
+    try std.testing.expectEqual(Tri.yes, list.find("deepseek/deepseek-v4-flash").?.reasoning);
+    try std.testing.expectEqual(Tri.yes, list.find("deepseek/deepseek-v4-flash-vision-exp").?.vision);
+    try std.testing.expect(list.find("claude-sonnet-5").?.has_protocol);
+    try std.testing.expectEqual(types.Protocol.anthropic, list.find("claude-sonnet-5").?.protocol);
+}
+
+test "inferProtocols routes commandcode claude to anthropic" {
+    var list = List{};
+    const a = list.push().?;
+    a.setId("claude-opus-5");
+    const b = list.push().?;
+    b.setId("deepseek/deepseek-v4-flash");
+    inferProtocols("commandcode", &list);
+    try std.testing.expectEqual(types.Protocol.anthropic, list.find("claude-opus-5").?.protocol);
+    try std.testing.expectEqual(types.Protocol.openai_compat, list.find("deepseek/deepseek-v4-flash").?.protocol);
+}
+
+test "caps cache round-trips vision and protocol" {
+    const body =
+        \\{"models":{"deepseek/deepseek-v4-flash":{"vision":false,"reasoning":true,"protocol":"openai_compat"},
+        \\"claude-sonnet-5":{"vision":true,"reasoning":true,"protocol":"anthropic"}}}
+    ;
+    var list = List{};
+    const a = list.push().?;
+    a.setId("deepseek/deepseek-v4-flash");
+    const b = list.push().?;
+    b.setId("claude-sonnet-5");
+    applyCapsCache(body, &list);
+    try std.testing.expectEqual(Tri.no, list.find("deepseek/deepseek-v4-flash").?.vision);
+    try std.testing.expectEqual(Tri.yes, list.find("deepseek/deepseek-v4-flash").?.reasoning);
+    try std.testing.expectEqual(types.Protocol.anthropic, list.find("claude-sonnet-5").?.protocol);
+}
+
+test "merge takes vision and protocol from the live entry" {
+    const built = models.Model{
+        .id = "m",
+        .name = "Built In",
+        .provider = "commandcode",
+        .protocol = .openai_compat,
+        .base_url = "https://api.commandcode.ai/provider/v1",
+        .reasoning = false,
+        .context_window = 1000,
+        .max_tokens = 0,
+        .efforts = "",
+        .vision = false,
+    };
+    var e = Entry{};
+    e.setId("m");
+    e.setVision(true);
+    e.setReasoning(true);
+    e.setProtocol(.anthropic);
+    const out = merge(built, &e);
+    try std.testing.expect(out.vision);
+    try std.testing.expect(out.reasoning);
+    try std.testing.expectEqual(types.Protocol.anthropic, out.protocol);
+}
+
 // -- live fetch --------------------------------------------------------------
 
 /// GET a provider's model list. Returns the raw body, which the caller parses
@@ -574,7 +911,8 @@ pub fn fetch(
 }
 
 /// The provider's list: asked for once, then served from the cache when the
-/// ask fails.
+/// ask fails. Caps the list omits (vision, reasoning, protocol) are filled
+/// from a sidecar cache, a docs fetch, the builtin seed, then inference.
 ///
 /// Once per session rather than on a timer, because `Io.Clock` here has no
 /// wall clock to compare a file mtime against, and because a session is short
@@ -598,12 +936,15 @@ pub fn load(
         defer allocator.free(body);
         writeCache(allocator, io, home, provider, body);
         parse(shape, body, out);
-        if (out.n != 0) return;
     }
-    // Offline, unauthenticated, or a body we could not read: the last good
-    // list is still better than a table that predates the binary.
-    const cached = readCache(allocator, io, home, provider);
-    if (cached.len == 0) return;
-    defer allocator.free(cached);
-    parse(shape, cached, out);
+    if (out.n == 0) {
+        // Offline, unauthenticated, or a body we could not read: the last good
+        // list is still better than a table that predates the binary.
+        const cached = readCache(allocator, io, home, provider);
+        if (cached.len == 0) return;
+        defer allocator.free(cached);
+        parse(shape, cached, out);
+    }
+    if (out.n == 0) return;
+    enrich(allocator, io, home, provider, out);
 }

@@ -25,6 +25,8 @@ pub const Host = struct {
     mode_live: ?*config.PermissionMode = null,
     on_mode: ?*const fn (ctx: ?*anyopaque, label: []const u8) void = null,
     cancel: ?*std.atomic.Value(bool) = null,
+    /// Transcript pane height for PageUp/Down while the turn owns stdin.
+    page_rows: u16 = 20,
 
     pub fn cancelled(self: Host) bool {
         return if (self.cancel) |c| c.load(.acquire) else false;
@@ -98,6 +100,7 @@ pub const Host = struct {
             .on_tick = self.on_tick,
             .cancel = self.cancel,
             .poll_key = pollCancelKey,
+            .page_rows = self.page_rows,
         };
     }
 };
@@ -362,17 +365,112 @@ fn pollCancelKey() bool {
 
 var mode_cycle_pending: std.atomic.Value(bool) = .init(false);
 
+/// Wheel / PageUp deltas queued by the cancel watcher while a turn owns stdin.
+/// Positive = older transcript (scroll up); negative = toward the live tail.
+var scroll_delta: std.atomic.Value(i32) = .init(0);
+
+/// Rows one mouse-wheel notch moves. Kept here (not in the TUI module) so the
+/// watcher thread can apply the same step without importing the CLI layer.
+pub const wheel_step: i32 = 3;
+
+pub fn takeScrollDelta() i32 {
+    return scroll_delta.swap(0, .acq_rel);
+}
+
+fn noteScroll(delta: i32) void {
+    if (delta == 0) return;
+    _ = scroll_delta.fetchAdd(delta, .monotonic);
+}
+
+/// Hit box for the jump-to-bottom pill while a turn owns stdin (1-based cells).
+var jump_active: std.atomic.Value(bool) = .init(false);
+var jump_row: std.atomic.Value(u32) = .init(0);
+var jump_col0: std.atomic.Value(u32) = .init(0);
+var jump_col1: std.atomic.Value(u32) = .init(0);
+var jump_pending: std.atomic.Value(bool) = .init(false);
+
+pub fn setJumpHit(active: bool, row: u16, col0: u16, col1: u16) void {
+    jump_active.store(active, .release);
+    jump_row.store(row, .release);
+    jump_col0.store(col0, .release);
+    jump_col1.store(col1, .release);
+    if (!active) jump_pending.store(false, .release);
+}
+
+pub fn takeJumpToBottom() bool {
+    return jump_pending.swap(false, .acq_rel);
+}
+
+fn noteJumpIfHit(row: u16, col: u16) void {
+    if (!jump_active.load(.acquire)) return;
+    if (row != @as(u16, @truncate(jump_row.load(.acquire)))) return;
+    const c0: u16 = @truncate(jump_col0.load(.acquire));
+    const c1: u16 = @truncate(jump_col1.load(.acquire));
+    if (col >= c0 and col <= c1) jump_pending.store(true, .release);
+}
+
 fn wantsModeCycle(bytes: []const u8) bool {
     // Shift+Tab is CSI Z (`\x1b[Z`).
     return std.mem.indexOf(u8, bytes, "\x1b[Z") != null;
 }
 
-/// Drain stdin: stop keys cancel, Shift+Tab queues a permission cycle, else steer.
-fn drainKeys() bool {
-    return drainKeysTimeout(0);
+/// End of an SGR mouse report (`…M` or `…m`), or null if the CSI is incomplete.
+fn sgrMouseEnd(bytes: []const u8) ?usize {
+    if (!std.mem.startsWith(u8, bytes, "\x1b[<")) return null;
+    var j: usize = 3;
+    while (j < bytes.len) : (j += 1) {
+        if (bytes[j] == 'M' or bytes[j] == 'm') return j + 1;
+    }
+    return null;
 }
 
-fn drainKeysTimeout(wait_ms: i32) bool {
+/// Consume one mouse / page-scroll sequence. Returns how many bytes to skip and
+/// a scroll delta (0 for clicks that should not enter the steer queue).
+fn takeScrollSeq(bytes: []const u8, page_rows: u16) ?struct { n: usize, delta: i32 } {
+    if (bytes.len == 0) return null;
+    if (std.mem.startsWith(u8, bytes, "\x1b[5~")) {
+        return .{ .n = 4, .delta = @as(i32, @intCast(@max(page_rows, 1))) };
+    }
+    if (std.mem.startsWith(u8, bytes, "\x1b[6~")) {
+        return .{ .n = 4, .delta = -@as(i32, @intCast(@max(page_rows, 1))) };
+    }
+    // Ctrl-Up / Ctrl-Down (CSI 1;5A / 1;5B) — same as page in the idle loop.
+    if (std.mem.startsWith(u8, bytes, "\x1b[1;5A")) {
+        return .{ .n = 6, .delta = @as(i32, @intCast(@max(page_rows, 1))) };
+    }
+    if (std.mem.startsWith(u8, bytes, "\x1b[1;5B")) {
+        return .{ .n = 6, .delta = -@as(i32, @intCast(@max(page_rows, 1))) };
+    }
+    const end = sgrMouseEnd(bytes) orelse return null;
+    const params = bytes[3 .. end - 1];
+    const semi = std.mem.indexOfScalar(u8, params, ';') orelse return .{ .n = end, .delta = 0 };
+    const btn = std.fmt.parseInt(u32, params[0..semi], 10) catch return .{ .n = end, .delta = 0 };
+    if (btn & 64 != 0) {
+        // Release reports and tilt wheels do nothing.
+        if (bytes[end - 1] == 'm') return .{ .n = end, .delta = 0 };
+        if ((btn & 3) == 2 or (btn & 3) == 3) return .{ .n = end, .delta = 0 };
+        return .{ .n = end, .delta = if ((btn & 1) == 0) wheel_step else -wheel_step };
+    }
+    // Left release on the jump pill re-pins to the live tail.
+    if ((btn & 3) == 0 and (btn & 32) == 0 and bytes[end - 1] == 'm') {
+        const rest = params[semi + 1 ..];
+        if (std.mem.indexOfScalar(u8, rest, ';')) |semi2| {
+            const col = std.fmt.parseInt(u16, rest[0..semi2], 10) catch 0;
+            const row = std.fmt.parseInt(u16, rest[semi2 + 1 ..], 10) catch 0;
+            if (row != 0 and col != 0) noteJumpIfHit(row, col);
+        }
+    }
+    // Clicks / drags must not become steer text.
+    return .{ .n = end, .delta = 0 };
+}
+
+/// Drain stdin: stop keys cancel, Shift+Tab queues a permission cycle, wheel
+/// and page keys scroll the transcript, else steer.
+fn drainKeys() bool {
+    return drainKeysTimeout(0, 20);
+}
+
+fn drainKeysTimeout(wait_ms: i32, page_rows: u16) bool {
     if (builtin.os.tag == .windows) return false;
     var stop = false;
     while (true) {
@@ -390,18 +488,48 @@ fn drainKeysTimeout(wait_ms: i32) bool {
             mode_cycle_pending.store(true, .release);
             continue;
         }
-        if (wantsStop(buf[0..got])) {
-            stop = true;
+        if (routeTurnKeys(buf[0..got], page_rows)) stop = true;
+    }
+}
+
+/// Split a stdin chunk into scroll deltas vs steer/stop. Returns true when a
+/// stop key was present.
+fn routeTurnKeys(bytes: []const u8, page_rows: u16) bool {
+    var stop = false;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        if (takeScrollSeq(bytes[i..], page_rows)) |s| {
+            noteScroll(s.delta);
+            i += s.n;
             continue;
         }
-        steerPush(buf[0..got]);
+        if (std.mem.startsWith(u8, bytes[i..], "\x1b[<") and sgrMouseEnd(bytes[i..]) == null) break;
+        // Next mouse/page CSI, or the end of the buffer.
+        const next = findScrollAt(bytes, i + 1) orelse bytes.len;
+        const chunk = bytes[i..next];
+        if (chunk.len != 0) {
+            if (wantsStop(chunk)) stop = true else steerPush(chunk);
+        }
+        i = next;
     }
+    return stop;
+}
+
+fn findScrollAt(bytes: []const u8, from: usize) ?usize {
+    var i = from;
+    while (i < bytes.len) : (i += 1) {
+        if (bytes[i] != 0x1b) continue;
+        if (takeScrollSeq(bytes[i..], 1) != null) return i;
+        if (std.mem.startsWith(u8, bytes[i..], "\x1b[<")) return i;
+        if (std.mem.startsWith(u8, bytes[i..], "\x1b[5~") or std.mem.startsWith(u8, bytes[i..], "\x1b[6~")) return i;
+    }
+    return null;
 }
 
 /// `wait_ms` 0 polls and returns; a positive value blocks that long, which is
 /// what lets the watcher thread idle instead of spinning.
-fn pollCancelKeyTimeout(wait_ms: i32) bool {
-    return drainKeysTimeout(wait_ms);
+fn pollCancelKeyTimeout(wait_ms: i32, page_rows: u16) bool {
+    return drainKeysTimeout(wait_ms, page_rows);
 }
 
 /// Watches the keyboard while the main thread is blocked reading the socket.
@@ -423,6 +551,8 @@ pub const Watch = struct {
     ack: []const u8 = "",
     tick: ?*const fn (ctx: ?*anyopaque) void = null,
     tick_ctx: ?*anyopaque = null,
+    /// PageUp/Down step while the turn owns stdin (transcript pane height).
+    page_rows: u16 = 20,
 
     pub fn start(self: *Watch) void {
         if (builtin.os.tag == .windows) return;
@@ -442,7 +572,7 @@ pub const Watch = struct {
     fn loop(self: *Watch) void {
         var told = false;
         while (!self.stop.load(.acquire)) {
-            const hit = pollCancelKeyTimeout(60);
+            const hit = pollCancelKeyTimeout(60, self.page_rows);
             if (hit) self.cancel.store(true, .release);
             if (self.tick) |f| f(self.tick_ctx);
             if (!hit) continue;
@@ -532,6 +662,37 @@ test "wantsStop treats kitty CSI-u Esc as a stop" {
     try std.testing.expect(wantsStop("\x1b[27"));
     try std.testing.expect(!wantsStop("\x1b[13u"));
     try std.testing.expect(!wantsStop("\x1b[<64;1;1M"));
+}
+
+test "wheel and page sequences become scroll deltas" {
+    _ = takeScrollDelta();
+    try std.testing.expect(!routeTurnKeys("\x1b[<64;10;5M", 20));
+    try std.testing.expectEqual(@as(i32, wheel_step), takeScrollDelta());
+    try std.testing.expect(!routeTurnKeys("\x1b[<65;10;5M", 20));
+    try std.testing.expectEqual(@as(i32, -wheel_step), takeScrollDelta());
+    try std.testing.expect(!routeTurnKeys("\x1b[5~", 12));
+    try std.testing.expectEqual(@as(i32, 12), takeScrollDelta());
+    try std.testing.expect(!routeTurnKeys("\x1b[6~", 12));
+    try std.testing.expectEqual(@as(i32, -12), takeScrollDelta());
+}
+
+test "mouse clicks during a turn are not steered" {
+    dropSteer();
+    try std.testing.expect(!routeTurnKeys("\x1b[<0;10;5M", 20));
+    var buf: [max_steer]u8 = undefined;
+    const got = takeSteer(&buf);
+    try std.testing.expectEqual(@as(usize, 0), got.text.len);
+}
+
+test "jump pill click while generating requests stick-to-bottom" {
+    setJumpHit(true, 10, 20, 40);
+    defer setJumpHit(false, 0, 0, 0);
+    _ = takeJumpToBottom();
+    try std.testing.expect(!routeTurnKeys("\x1b[<0;25;10m", 20));
+    try std.testing.expect(takeJumpToBottom());
+    // Beside the pill: no jump.
+    try std.testing.expect(!routeTurnKeys("\x1b[<0;5;10m", 20));
+    try std.testing.expect(!takeJumpToBottom());
 }
 
 test "cancelled is false without a flag" {

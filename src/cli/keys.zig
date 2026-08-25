@@ -64,6 +64,9 @@ pub const Event = union(enum) {
     esc,
     page_up,
     page_down,
+    /// Mouse wheel: a few lines, not a whole page.
+    scroll_up,
+    scroll_down,
     up,
     down,
     tab,
@@ -116,18 +119,26 @@ fn mouseCell(params: []const u8, semi: usize) ?Click {
     };
 }
 
-/// Left press becomes a click; everything else is consumed and dropped.
+/// Left press becomes a click; wheel scrolls the transcript a few lines;
+/// everything else is consumed and dropped.
 ///
-/// Wheel reports (bit 64) and the right and middle buttons are decoded only
-/// far enough to be thrown away: their payload is printable bytes, and left
-/// undecoded it lands in the composer as text nobody typed.
+/// Wheel reports (bit 64) used to be thrown away so their printable payload
+/// never landed in the composer — but that also meant the wheel did nothing.
+/// Map them to scroll_up / scroll_down (line steps), not page keys: a full
+/// page jump on every notch feels like teleporting to the ends.
+/// Right and middle buttons stay ignored.
 fn classifyMouse(raw: []const u8, release: bool) Event {
     // SGR reports lead with `<`; the numbers start after it.
     const params = if (raw.len != 0 and raw[0] == '<') raw[1..] else raw;
     const semi = std.mem.indexOfScalar(u8, params, ';') orelse return .skip;
     const btn = parseU32(params[0..semi]) orelse return .skip;
-    // Bit 64 is the wheel: no button is down, so it is neither.
-    if (btn & 64 != 0) return .skip;
+    // Bit 64 is the wheel: 64 up, 65 down (and 66/67 for tilt, ignored).
+    if (btn & 64 != 0) {
+        if (release) return .skip;
+        // Low bit distinguishes up (0) from down (1); tilt has bits 0+1 set.
+        if ((btn & 3) == 2 or (btn & 3) == 3) return .skip;
+        return if ((btn & 1) == 0) .scroll_up else .scroll_down;
+    }
     // Low two bits name the button; only the left one drives anything here.
     if (btn & 3 != 0) return .skip;
     const cell = mouseCell(params, semi) orelse return .skip;
@@ -142,7 +153,11 @@ fn classifyMouse(raw: []const u8, release: bool) Event {
 /// omfx asks for SGR, so this only fires for a terminal that ignored that.
 fn classifyX10(btn_c: u8, col_c: u8, row_c: u8) Event {
     const btn: u32 = if (btn_c >= 32) @as(u32, btn_c) - 32 else return .skip;
-    if (btn & 64 != 0 or btn & 32 != 0 or btn & 3 != 0) return .skip;
+    if (btn & 64 != 0) {
+        if ((btn & 3) == 2 or (btn & 3) == 3) return .skip;
+        return if ((btn & 1) == 0) .scroll_up else .scroll_down;
+    }
+    if (btn & 32 != 0 or btn & 3 != 0) return .skip;
     return .{ .click = .{
         .col = if (col_c >= 32) @as(u16, col_c) - 32 else 1,
         .row = if (row_c >= 32) @as(u16, row_c) - 32 else 1,
@@ -496,17 +511,10 @@ test "the pointer speaks click, drag, and release; the rest is swallowed" {
         .release => |c| try std.testing.expectEqual(@as(u16, 12), c.col),
         else => try std.testing.expect(false),
     }
-    // Wheel and the other buttons carry printable bytes, so each has to be
-    // consumed whole rather than typed into the composer.
-    for ([_][]const u8{
-        "\x1b[<64;10;5M",
-        "\x1b[<65;10;5M",
-        "\x1b[<2;10;5M",
-    }) |seq| {
-        const got = takeEvent(seq);
-        try std.testing.expectEqual(Event.skip, std.meta.activeTag(got.ev));
-        try std.testing.expect(got.n > 1);
-    }
+    // Wheel scrolls a few lines; PageUp/Down stay full-page.
+    try std.testing.expectEqual(Event.scroll_up, takeEvent("\x1b[<64;10;5M").ev);
+    try std.testing.expectEqual(Event.scroll_down, takeEvent("\x1b[<65;10;5M").ev);
+    try std.testing.expectEqual(Event.skip, takeEvent("\x1b[<2;10;5M").ev);
     // X10, for a terminal that ignored the SGR request.
     switch (takeEvent("\x1b[M !!").ev) {
         .click => {},

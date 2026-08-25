@@ -59,6 +59,7 @@ pub const File = struct {
     web: Web = .{},
     rules: []const permissions.Rule = &.{},
     review: []const u8 = "",
+    /// OS sandbox on bash. Empty or anything but `"on"` is off (opt-in).
     sandbox: []const u8 = "",
     cdp_port: []const u8 = "",
     sound: []const u8 = "",
@@ -382,8 +383,10 @@ pub fn cdpPort(file: File) u16 {
     return std.fmt.parseInt(u16, file.cdp_port, 10) catch 9224;
 }
 
+/// Empty means off: the OS sandbox is opt-in so a fresh install does not trap
+/// bash behind seatbelt/landlock until the user asks for it.
 pub fn sandboxOff(file: File) bool {
-    return std.mem.eql(u8, file.sandbox, "off");
+    return !std.mem.eql(u8, file.sandbox, "on");
 }
 
 pub fn reviewLlm(file: File) bool {
@@ -1001,4 +1004,10 @@ test "telemetry is off until the user says otherwise" {
     var f = load(std.testing.allocator, std.testing.io, home);
     defer f.deinit(std.testing.allocator);
     try std.testing.expect(telemetryOn(f));
+}
+
+test "sandbox is off until the user turns it on" {
+    try std.testing.expect(sandboxOff(.{}));
+    try std.testing.expect(sandboxOff(.{ .sandbox = "off" }));
+    try std.testing.expect(!sandboxOff(.{ .sandbox = "on" }));
 }

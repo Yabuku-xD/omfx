@@ -61,8 +61,8 @@ fn mark(st: Status) []const u8 {
 
 pub fn clipCols(src: []const u8, cols: u16) []const u8 {
     if (cols == 0) return src[0..0];
-    if (src.len <= cols) return src;
-    return src[0..cols];
+    if (measure.cellsTo(src) <= cols) return src;
+    return src[0..measure.indexAtCell(src, cols)];
 }
 
 pub const FormatError = error{OutOfMemory};
@@ -512,6 +512,7 @@ pub fn formatThink(allocator: std.mem.Allocator, cols: u16, chunk: []const u8, s
             continue;
         }
         const n = measure.utf8LenAt(chunk, i);
+        if (n == 0) break;
         if (st.len + n > think_word_cap) try thinkWord(&out, allocator, st, limit);
         @memcpy(st.buf[st.len..][0..n], chunk[i .. i + n]);
         st.len += n;

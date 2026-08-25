@@ -122,19 +122,23 @@ pub fn describeModel(ctx: *Ctx, provider: []const u8, id: []const u8) ?models.Mo
     const built = models.lookup(provider, id);
     const live = providerModels(ctx, provider);
     const e = live.find(id) orelse return built;
+    const fallback_proto = if (catalog.byId(provider)) |spec| spec.protocol else .openai_compat;
+    const proto = if (e.has_protocol) e.protocol else catalog.protocolForModel(provider, id, fallback_proto);
     const base = built orelse models.Model{
         .id = e.id(),
         .name = e.name(),
         .provider = provider,
-        .protocol = if (catalog.byId(provider)) |spec| spec.protocol else .openai_compat,
+        .protocol = proto,
         .base_url = if (catalog.byId(provider)) |spec| spec.base_url else "",
-        .reasoning = e.efforts().len != 0,
+        .reasoning = e.reasoning == .yes or e.efforts().len != 0,
         .context_window = 0,
         .max_tokens = 0,
         .efforts = "",
-        .vision = false,
+        .vision = e.vision == .yes,
     };
-    return registry.merge(base, e);
+    var out = registry.merge(base, e);
+    out.protocol = catalog.protocolForModel(provider, id, out.protocol);
+    return out;
 }
 
 pub fn modelSummary(buf: []u8, m: models.Model) []const u8 {

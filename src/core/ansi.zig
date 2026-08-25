@@ -44,9 +44,9 @@ pub const hunk = "\x1b[38;2;125;211;252m";
 /// Marks the row the keyboard is on. Only ever painted over a marker glyph:
 /// a whole row cannot carry it, because the row's own resets end it.
 pub const sel_bg = "\x1b[48;2;30;58;54m";
-pub const think_open = muted ++ "  Thinking" ++ reset ++ "\n";
-// One blank row after the thought, so the reply is spaced from it the way
-// every other block is spaced from its neighbour.
+pub const think_open = "\n" ++ muted ++ "  Thinking" ++ reset ++ "\n\n";
+// Blank row after the thought so the reply is spaced from it the way every
+// other block is spaced from its neighbour.
 pub const think_close = reset ++ "\n\n";
 
 test "accent is an SGR sequence" {
