@@ -83,6 +83,14 @@ pub fn logRel(allocator: std.mem.Allocator, id: usize) ![]u8 {
     return std.fmt.allocPrint(allocator, ".omfx/jobs/{d}.log", .{id});
 }
 
+/// Soft progress signal: how many bytes the job has written so far.
+pub fn logBytes(io: Io, workspace: []const u8, id: usize) u64 {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/.omfx/jobs/{d}.log", .{ workspace, id }) catch return 0;
+    const st = Io.Dir.cwd().statFile(io, path, .{}) catch return 0;
+    return st.size;
+}
+
 fn capRefused(allocator: std.mem.Allocator, n: usize) ![]u8 {
     return std.fmt.allocPrint(
         allocator,

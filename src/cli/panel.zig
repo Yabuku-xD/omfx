@@ -20,6 +20,7 @@ const Io = std.Io;
 
 const paint = @import("../core/ansi.zig");
 const width = @import("width.zig");
+const virt = @import("virt.zig");
 
 /// Reveal time for an opening panel. Long enough to read as motion, short
 /// enough that it never delays a keystroke: a panel is interactive on the
@@ -200,16 +201,12 @@ pub const chrome_rows: u16 = 5;
 /// rather than drawing past the frame -- an unwindowed `/help` painted 54 rows
 /// into a 34-row terminal and tore the box apart.
 pub fn visibleRows(g: Geometry) usize {
-    const room = if (g.rows > chrome_rows) g.rows - chrome_rows else 1;
-    return @min(room, max_visible);
+    return virt.viewRows(g.rows, chrome_rows, max_visible);
 }
 
 /// First field to draw so `sel` stays on screen.
 pub fn windowStart(total: usize, sel: usize, view: usize) usize {
-    if (total <= view or view == 0) return 0;
-    var start: usize = if (sel + 1 > view) sel + 1 - view else 0;
-    if (start + view > total) start = total - view;
-    return start;
+    return virt.windowStart(total, sel, view);
 }
 
 /// Centred, clamped to `max_cols`, and never taller than the pane.
@@ -576,16 +573,16 @@ fn finish(
 }
 
 fn hintFor(p: *const Panel) []const u8 {
-    if (p.editing) return "type to edit  ·  enter save  ·  esc cancel";
-    const f = p.current() orelse return "esc close";
+    if (p.editing) return "type your answer  ·  enter saves  ·  esc cancels";
+    const f = p.current() orelse return "esc closes";
     return switch (f.kind) {
-        .toggle => "space toggle  ·  up down move  ·  esc close",
-        .choice => "left right change  ·  up down move  ·  esc close",
-        .number => "left right adjust  ·  up down move  ·  esc close",
-        .text => "enter edit  ·  up down move  ·  esc close",
-        .pick => "enter run  ·  up down move  ·  type to filter  ·  esc close",
-        .entry => "enter read  ·  up down move  ·  type to filter  ·  esc close",
-        .info, .heading => "up down move  ·  esc close",
+        .toggle => "space turns on/off  ·  up/down moves  ·  esc closes",
+        .choice => "left/right changes  ·  up/down moves  ·  esc closes",
+        .number => "left/right adjusts  ·  up/down moves  ·  esc closes",
+        .text => "enter to edit  ·  up/down moves  ·  esc closes",
+        .pick => "enter chooses  ·  up/down moves  ·  type to filter  ·  esc closes",
+        .entry => "enter opens  ·  up/down moves  ·  type to filter  ·  esc closes",
+        .info, .heading => "up/down moves  ·  esc closes",
     };
 }
 

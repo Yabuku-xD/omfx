@@ -240,7 +240,7 @@ fn runCmd(ctx: *Ctx, cmd: slash.Name, rest: []const u8) !Flow {
         .reload => try doReload(ctx),
         .yolo => try doYolo(ctx, rest),
         .effort => try doEffort(ctx, rest),
-        .peers => try doPeers(ctx, rest),
+        .peers => if (rest.len == 0) return .{ .panel = .peers } else try doPeers(ctx, rest),
         .@"resume" => if (rest.len == 0) return .{ .panel = .sessions } else try doResume(ctx, rest),
         .clear => {
             const n = jobs.count();
@@ -308,6 +308,7 @@ fn runCmd(ctx: *Ctx, cmd: slash.Name, rest: []const u8) !Flow {
         .wake => return doWake(ctx, rest),
         .ide => try doIde(ctx, rest),
         .plugin => try emit(ctx, try plugins.run(ctx.arena, ctx.io, ctx.home, rest)),
+        .files => return .{ .panel = .files },
     }
     return .handled;
 }
@@ -359,7 +360,7 @@ fn doYolo(ctx: *Ctx, rest: []const u8) !void {
 
 fn doPeers(ctx: *Ctx, rest: []const u8) !void {
     if (rest.len == 0) {
-        try emit(ctx, "Give the teammate a goal: /peers <goal>.\n");
+        try emit(ctx, "Tell a teammate what to do: /peers followed by their goal.\n");
         return;
     }
     const ep = peerEndpointOf(ctx, rest) orelse {
@@ -1246,9 +1247,9 @@ fn doPlan(ctx: *Ctx, rest: []const u8) !Flow {
     switch (PlanArg.parse(rest)) {
         .enter => {
             ctx.state.plan = .on;
-            try emit(ctx, "plan=on\nread-only frontier interview until /plan go\n");
+            try emit(ctx, "Planning mode is on. I'll look around and draft a plan — nothing changes until you say go.\n");
             if (ctx.state.last_plan.len > 0) {
-                try emit(ctx, try std.fmt.allocPrint(ctx.arena, "{s}\n", .{ctx.state.last_plan}));
+                return .{ .panel = .plan };
             }
             if (ctx.state.last_goal.len > 0) {
                 return .{ .retry = try std.fmt.allocPrint(
@@ -1257,26 +1258,30 @@ fn doPlan(ctx: *Ctx, rest: []const u8) !Flow {
                     .{ctx.state.last_goal},
                 ) };
             }
-            return .handled;
+            return .{ .panel = .plan };
         },
         .set => |next| {
             ctx.state.plan = next;
-            try emit(ctx, try std.fmt.allocPrint(ctx.arena, "plan={s}\n", .{next.asSlice()}));
+            const msg: []const u8 = if (next == .on)
+                "Planning mode is on.\n"
+            else
+                "Planning mode is off. Changes can happen again when you allow them.\n";
+            try emit(ctx, msg);
             return .handled;
         },
         .go => {
             ctx.state.plan = .off;
             const plan = if (ctx.state.last_plan.len > 0) ctx.state.last_plan else ctx.state.last_reply;
             if (plan.len == 0) {
-                try emit(ctx, "There is no plan to implement yet.\n");
+                try emit(ctx, "There's no plan yet. Start planning, then come back and choose \"Looks good — do it\".\n");
                 return .handled;
             }
-            try emit(ctx, "plan=off\n");
+            try emit(ctx, "Carrying out your plan.\n");
             return .{ .retry = try std.fmt.allocPrint(ctx.arena, "Implement the approved plan.\n\n{s}", .{plan}) };
         },
         .prompt => |text| {
             ctx.state.plan = .on;
-            try emit(ctx, "plan=on\n");
+            try emit(ctx, "Planning mode is on.\n");
             return .{ .retry = text };
         },
     }
@@ -1628,11 +1633,11 @@ test "cycleSurface walks normal plan yolo" {
     defer reads.deinit();
     var st = State{ .mode = .ask, .reads = reads };
     try std.testing.expectEqualStrings("normal", footerPerm(&st));
-    try std.testing.expectEqualStrings("plan  read-only; /plan go to implement", cycleSurface(&st));
+    try std.testing.expectEqualStrings("plan  look first; say go when ready", cycleSurface(&st));
     try std.testing.expectEqualStrings("plan", footerPerm(&st));
-    try std.testing.expectEqualStrings("yolo  tools run without asking", cycleSurface(&st));
+    try std.testing.expectEqualStrings("yolo  changes without asking", cycleSurface(&st));
     try std.testing.expectEqualStrings("yolo", footerPerm(&st));
-    try std.testing.expectEqualStrings("normal  ask before tools", cycleSurface(&st));
+    try std.testing.expectEqualStrings("normal  ask before changes", cycleSurface(&st));
     try std.testing.expectEqualStrings("normal", footerPerm(&st));
     applySurface(&st, "plan");
     try std.testing.expectEqualStrings("plan", footerPerm(&st));

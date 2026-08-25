@@ -30,4 +30,4 @@ Every turn while a spec is active:
 1. Orientation pointer only, e.g. `spec=auth phase=design task=…`
 2. Spec overlay (same tools as the base postcard; use `read`/`write`/`edit`/`patch` on phase files; keep bodies on disk)
 
-`/plan` is separate: ad-hoc read-only frontier interview. `/spec` owns the gated three-file flow. If both are on, plan still blocks mutations until `/plan go`.
+`/plan` is separate: draft a plan first, then say go. `/spec` owns the gated three-file flow. If both are on, plan still waits for `/plan go` before mutations.

@@ -7,12 +7,12 @@ Control when tools run.
 | Mode | Behavior |
 | --- | --- |
 | Normal (`ask`) | Sensitive tools prompt |
-| Plan | Read-only; writes blocked until `/plan go` |
-| Yolo | Tools run without asking for this session |
+| Plan | Look first; writes wait until you say go (`/plan go`) |
+| Yolo | Changes without asking for this session |
 
-Shift-Tab cycles ask → auto → yolo for later tool calls in the same turn (in-flight tools keep the mode they were admitted under). Yolo is never written to disk.
+Shift-Tab cycles normal → plan → yolo. Yolo is never written to disk.
 
-Human **allow** / **always** on a prompt binds to that exact tool name + args and is re-checked before execute. Commands or paths copied from prior tool output stay blocked unless the user asked for them.
+Human **Allow once** / **Always allow this** on a prompt binds to that exact tool name + args and is re-checked before execute. Commands or paths copied from prior tool output stay blocked unless the user asked for them.
 
 ```
 /permissions ask|auto|yolo
@@ -22,7 +22,7 @@ Human **allow** / **always** on a prompt binds to that exact tool name + args an
 /plan off
 ```
 
-Bare `/plan` enters plan mode and appends a read-only overlay (same tools, writes blocked; bash limited to `git status|diff|log` and `ls|pwd|cat` until `/plan go`). When a `/spec` is also active, that overlay sits under plan — mutations still wait for `/plan go`.
+Bare `/plan` opens planning (look around, draft a plan — nothing changes until `/plan go`). When a `/spec` is also active, that overlay sits under plan — mutations still wait for `/plan go`.
 
 ## Allowlist (deterministic DSL)
 

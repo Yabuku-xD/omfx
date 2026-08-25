@@ -4,9 +4,10 @@ const paint = @import("../core/ansi.zig");
 const activity = @import("activity.zig");
 const measure = @import("width.zig");
 const mermaid = @import("../core/mermaid.zig");
+const diffview = @import("diffview.zig");
 
 pub const max_preview: usize = 12;
-pub const max_diff_preview: usize = 40;
+pub const max_diff_preview: usize = diffview.collapsed_cap;
 
 pub const Status = enum { run, ok, err, deny };
 
@@ -64,19 +65,6 @@ pub fn clipCols(src: []const u8, cols: u16) []const u8 {
     return src[0..cols];
 }
 
-fn appendSpaces(out: *std.ArrayList(u8), allocator: std.mem.Allocator, n: u16) !void {
-    var i: u16 = 0;
-    while (i < n) : (i += 1) try out.append(allocator, ' ');
-}
-
-fn appendPadded(out: *std.ArrayList(u8), allocator: std.mem.Allocator, src: []const u8, cols: u16) !void {
-    const clip = clipCols(src, cols);
-    try out.appendSlice(allocator, clip);
-    if (clip.len < cols) {
-        try appendSpaces(out, allocator, cols - @as(u16, @intCast(clip.len)));
-    }
-}
-
 pub const FormatError = error{OutOfMemory};
 const markdown = @import("markdown.zig");
 pub const Markdown = markdown.Markdown;
@@ -125,52 +113,14 @@ pub fn looksLikeDiff(body: []const u8) bool {
     return false;
 }
 
-/// Unified diff: + mint, - red, @@ cyan, file headers dim. Caps at max_diff_preview.
+/// Unified diff: + mint, - red, @@ cyan. Collapsed by default; open the call for full.
 pub fn formatDiff(allocator: std.mem.Allocator, cols: u16, src: []const u8) ![]u8 {
-    const width: u16 = if (cols < 8) 80 else cols;
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    var shown: usize = 0;
-    var total: usize = 0;
-    var it = std.mem.splitScalar(u8, src, '\n');
-    while (it.next()) |line| {
-        if (line.len == 0 and total == 0) continue;
-        total += 1;
-        if (shown >= max_diff_preview) continue;
-        shown += 1;
-        if (std.mem.startsWith(u8, line, "+++") or std.mem.startsWith(u8, line, "---") or std.mem.startsWith(u8, line, "diff ")) {
-            try out.appendSlice(allocator, paint.dim);
-            try appendPadded(&out, allocator, line, width);
-            try out.appendSlice(allocator, paint.reset);
-        } else if (std.mem.startsWith(u8, line, "@@")) {
-            try out.appendSlice(allocator, paint.hunk);
-            try appendPadded(&out, allocator, line, width);
-            try out.appendSlice(allocator, paint.reset);
-        } else if (std.mem.startsWith(u8, line, "+")) {
-            try out.appendSlice(allocator, paint.add_bg);
-            try out.appendSlice(allocator, paint.add_fg);
-            try appendPadded(&out, allocator, line, width);
-            try out.appendSlice(allocator, paint.reset);
-        } else if (std.mem.startsWith(u8, line, "-")) {
-            try out.appendSlice(allocator, paint.del_bg);
-            try out.appendSlice(allocator, paint.del_fg);
-            try appendPadded(&out, allocator, line, width);
-            try out.appendSlice(allocator, paint.reset);
-        } else {
-            try out.appendSlice(allocator, paint.dim);
-            const rest = if (line.len > 0 and line[0] == ' ') line[1..] else line;
-            try out.append(allocator, ' ');
-            try appendPadded(&out, allocator, rest, if (width > 0) width - 1 else width);
-            try out.appendSlice(allocator, paint.reset);
-        }
-        try out.append(allocator, '\n');
-    }
-    if (total > max_diff_preview) {
-        var buf: [40]u8 = undefined;
-        const more = std.fmt.bufPrint(&buf, "{s}… {d} more{s}\n", .{ paint.dim, total - max_diff_preview, paint.reset }) catch "…\n";
-        try out.appendSlice(allocator, more);
-    }
-    return out.toOwnedSlice(allocator);
+    return diffview.render(allocator, cols, src, false);
+}
+
+/// Full colored diff (no line cap). `focus_hunk` highlights one @@ header.
+pub fn formatDiffExpanded(allocator: std.mem.Allocator, cols: u16, src: []const u8, focus_hunk: ?usize) ![]u8 {
+    return diffview.renderFocus(allocator, cols, src, true, focus_hunk);
 }
 
 fn previewLines(body: []const u8, cap: usize, shown: *usize, total: *usize) []const u8 {
@@ -307,12 +257,24 @@ pub fn formatGroupChild(
 /// wall, and the row that follows says what was cut.
 pub const child_body_lines: usize = 12;
 
-/// The output of one opened call, indented under it and cut to size.
+/// The output of one opened call, indented under it.
+/// Diffs paint in full colour (the summary card already showed the collapse).
+/// Plain text stays capped so a huge bash dump does not flood the pane.
 pub fn formatChildBody(
     allocator: std.mem.Allocator,
     cols: u16,
     body: []const u8,
     last: bool,
+) FormatError![]u8 {
+    return formatChildBodyFocus(allocator, cols, body, last, null);
+}
+
+pub fn formatChildBodyFocus(
+    allocator: std.mem.Allocator,
+    cols: u16,
+    body: []const u8,
+    last: bool,
+    focus_hunk: ?usize,
 ) FormatError![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -329,6 +291,20 @@ pub fn formatChildBody(
         try out.appendSlice(allocator, "  no output");
         try out.appendSlice(allocator, paint.reset);
         try out.append(allocator, '\n');
+        return out.toOwnedSlice(allocator);
+    }
+    if (looksLikeDiff(text)) {
+        const painted = try formatDiffExpanded(allocator, if (cols > 4) cols - 4 else cols, text, focus_hunk);
+        defer allocator.free(painted);
+        var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, painted, "\n"), '\n');
+        while (it.next()) |line| {
+            try out.appendSlice(allocator, paint.border);
+            try out.appendSlice(allocator, trunk);
+            try out.appendSlice(allocator, paint.reset);
+            try out.appendSlice(allocator, "  ");
+            try out.appendSlice(allocator, line);
+            try out.append(allocator, '\n');
+        }
         return out.toOwnedSlice(allocator);
     }
     var it = std.mem.splitScalar(u8, text, '\n');
@@ -702,7 +678,8 @@ test "fenced code renders as a plate, not a bare rule" {
     const s = try formatAssistant(std.testing.allocator, 40, "before\n```zig\nconst x = 1;\n```\nafter\n");
     defer std.testing.allocator.free(s);
     try std.testing.expect(std.mem.indexOf(u8, s, "zig") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "const x = 1;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "const") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "x = ") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, paint.code_bg) != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "╭") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "╰") != null);

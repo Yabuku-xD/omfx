@@ -26,7 +26,7 @@ pub const Flow = union(enum) {
     panel: PanelKind,
 };
 
-pub const PanelKind = enum { settings, help, shortcuts, sessions, statusline, status, jobs, workspace, rewind, context };
+pub const PanelKind = enum { settings, help, shortcuts, sessions, statusline, status, jobs, workspace, rewind, context, plan, files, peers };
 
 pub const max_extra: usize = 8;
 pub const max_jobs: usize = 8;

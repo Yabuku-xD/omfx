@@ -2,6 +2,7 @@ const std = @import("std");
 const paint = @import("../core/ansi.zig");
 const measure = @import("width.zig");
 const mermaid = @import("../core/mermaid.zig");
+const codeview = @import("codeview.zig");
 
 pub const FormatError = error{OutOfMemory};
 
@@ -183,6 +184,9 @@ pub const Markdown = struct {
     /// Whether the fence being read is a mermaid block. Those are collected
     /// like a table is: a diagram is a property of the whole block.
     diagram: bool = false,
+    /// Language on the open fence, for CodeView keyword colour.
+    fence_lang: [24]u8 = undefined,
+    fence_lang_len: usize = 0,
     /// Whether the reply has printed anything yet. A model that opens with a
     /// blank line would otherwise stack it on the blank row the block above
     /// already ends with, and the gap between blocks would not be one rule.
@@ -271,7 +275,7 @@ pub const Markdown = struct {
         defer allocator.free(top);
         try indentInto(&out, allocator, top);
         for (self.rows.items) |row| {
-            const body = try codeRow(allocator, self.inner(), row);
+            const body = try codeRow(allocator, self.inner(), lang, row);
             defer allocator.free(body);
             try indentInto(&out, allocator, body);
         }
@@ -424,6 +428,7 @@ pub const Markdown = struct {
             const lang = fenceLang(t);
             if (self.in_fence) {
                 self.in_fence = false;
+                self.fence_lang_len = 0;
                 if (self.diagram) {
                     self.diagram = false;
                     return self.drawDiagram(allocator);
@@ -431,6 +436,9 @@ pub const Markdown = struct {
                 return codeEdge(allocator, self.inner(), "", false);
             }
             self.in_fence = true;
+            const n = @min(lang.len, self.fence_lang.len);
+            @memcpy(self.fence_lang[0..n], lang[0..n]);
+            self.fence_lang_len = n;
             if (std.ascii.eqlIgnoreCase(lang, "mermaid")) {
                 self.diagram = true;
                 return allocator.alloc(u8, 0);
@@ -438,7 +446,7 @@ pub const Markdown = struct {
             return codeEdge(allocator, self.inner(), lang, true);
         }
         if (self.in_fence) {
-            if (!self.diagram) return codeRow(allocator, self.inner(), t);
+            if (!self.diagram) return codeRow(allocator, self.inner(), self.fence_lang[0..self.fence_lang_len], t);
             try self.rows.append(allocator, try allocator.dupe(u8, t));
             return allocator.alloc(u8, 0);
         }
@@ -577,7 +585,7 @@ fn takeRunes(s: []const u8, n: u16) []const u8 {
 
 /// One line inside a fence: gutter, then the code on its own plate. Long lines
 /// wrap onto more plate rows -- clipping a code line silently deletes code.
-fn codeRow(allocator: std.mem.Allocator, cols: u16, text: []const u8) FormatError![]u8 {
+fn codeRow(allocator: std.mem.Allocator, cols: u16, lang: []const u8, text: []const u8) FormatError![]u8 {
     const w = codeWidth(cols);
     const inner: u16 = if (w > 2) w - 2 else 1;
     var out: std.ArrayList(u8) = .empty;
@@ -592,7 +600,10 @@ fn codeRow(allocator: std.mem.Allocator, cols: u16, text: []const u8) FormatErro
         try out.appendSlice(allocator, paint.code_bg);
         try out.appendSlice(allocator, paint.code_fg);
         try out.append(allocator, ' ');
-        try appendPadded(&out, allocator, take, inner);
+        var painted: std.ArrayList(u8) = .empty;
+        defer painted.deinit(allocator);
+        try codeview.paintLine(&painted, allocator, lang, take);
+        try appendPadded(&out, allocator, painted.items, inner);
         try out.appendSlice(allocator, paint.reset);
         try out.appendSlice(allocator, paint.border);
         try out.appendSlice(allocator, "\u{2502}");
