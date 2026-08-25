@@ -266,6 +266,12 @@ fn chatTurn(
                     .tool_name = tool_name,
                     .tool_args = tool_args,
                 })) |deny_body| {
+                    if (host.cancelled()) {
+                        allocator.free(asst_text);
+                        allocator.free(tool_name);
+                        allocator.free(tool_args);
+                        return allocator.dupe(u8, interrupted_text);
+                    }
                     var deny_detail_buf: [permissions.max_command]u8 = undefined;
                     const deny_detail = turn_loop.toolDetail(&deny_detail_buf, tool_args);
                     host.toolOut(tool_name, deny_detail, true, deny_body);
