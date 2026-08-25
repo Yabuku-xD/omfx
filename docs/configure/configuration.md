@@ -44,12 +44,13 @@ The settings panel and the one-shot form share one setter.
 | `review` | `llm` enables billed review after writes |
 | `cdp_port` | Chrome relay port |
 | `plugin_marketplaces` | Array of `owner/repo` marketplace ids |
-| `mcp` | Array of MCP server objects |
+| `mcp` | Array of MCP server objects (`command`+`args` and/or `url` for HTTP) |
+| `models` | Optional map of provider id → preferred model |
 | `web` | Search order, excludes, SearXNG endpoint — prefer `/web` over editing by hand |
 
 ## Last used
 
-Last provider, model, and permission surface persist across launches. There is no separate “default model” concept — last used is what you get. Reasoning level `auto` is resolved per prompt.
+Last provider, model, optional per-provider `models` map, and permission surface persist across launches. Reasoning level `auto` is resolved per prompt.
 
 ## Project instructions
 

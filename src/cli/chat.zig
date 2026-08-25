@@ -36,6 +36,7 @@ pub fn verbFor(name: []const u8) Verb {
         .compact => .{ .run = "Compacting", .done = "Compacted" },
         .todo => .{ .run = "Planning", .done = "Tasks" },
         .job => .{ .run = "Checking", .done = "Checked" },
+        .read_result => .{ .run = "Re-reading", .done = "Re-read" },
     };
 }
 
@@ -204,7 +205,7 @@ fn previewLines(body: []const u8, cap: usize, shown: *usize, total: *usize) []co
 pub fn groupable(name: []const u8) bool {
     const t = Tool.Name.fromSlice(name) orelse return false;
     return switch (t) {
-        .read, .open_file, .file_info, .list, .glob, .grep, .semantic_search, .bash, .edit, .patch, .write, .copy, .mkdir, .rename, .delete, .memory, .job => true,
+        .read, .open_file, .file_info, .list, .glob, .grep, .semantic_search, .bash, .edit, .patch, .write, .copy, .mkdir, .rename, .delete, .memory, .job, .read_result => true,
         .web_fetch, .web_scrape, .web_search, .ask_user, .browser, .peer, .board, .mcp, .compact, .todo => false,
     };
 }

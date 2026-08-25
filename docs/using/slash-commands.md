@@ -63,7 +63,7 @@ Model and provider picks settle in the footer for three seconds; menus and error
 | `/browser` | Install Chrome relay extension |
 | `/reload` | Reload settings, auth, skills, relay |
 | `/background` | Background commands |
-| `/mcp` | MCP servers |
+| `/mcp` | List / invoke / `add` (stdio or `--transport http`) |
 | `/ide` | Open workspace in external IDE (`open` \| `list` \| pin) |
 | `/plugin` | Plugin marketplaces (`list` \| `marketplace add` \| `install`) |
 | `/init` | Scaffold `AGENTS.md` |

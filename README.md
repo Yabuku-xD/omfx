@@ -67,7 +67,8 @@ Subscription and API windows capped correctly. Auto effort plus every reasoning
 level the model declares. Vision when supported.
 
 **Permissions** — ask before sensitive tools; plan is read-only until you go; yolo
-is session-only and never persisted. Deterministic allowlist DSL (named args,
+is session-only and never persisted. Exact-action allow/always; untrusted tool
+output stays blocked unless the user asked. Deterministic allowlist DSL (named args,
 `#fallback=ask`), session shrink-only rules, sandbox, Shift-Tab cycling. No
 learned classifier and no policy dump into the prompt.
 

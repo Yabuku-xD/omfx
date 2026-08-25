@@ -75,7 +75,14 @@ pub fn main(init: std.process.Init) !void {
         break :blk modeFromEnv(lookup);
     };
     const want_provider = parsed.provider orelse (if (prefs.last_provider.len > 0) prefs.last_provider else null);
-    const want_model = parsed.model orelse (if (prefs.last_model.len > 0) prefs.last_model else null);
+    const want_model = parsed.model orelse blk: {
+        if (want_provider) |p| {
+            const pref = omfx.settings.modelForProvider(prefs, p);
+            if (pref.len > 0) break :blk pref;
+        }
+        if (prefs.last_model.len > 0) break :blk prefs.last_model;
+        break :blk null;
+    };
     const auth_json = readAuth(arena, io, home);
     const resolved = omfx.providers.auth.resolveStored(lookup, auth_json, want_provider, want_model);
     const model_name = parsed.model orelse lookup.get("OMFX_MODEL") orelse if (resolved) |r| r.model else "(unset)";

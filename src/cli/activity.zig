@@ -72,6 +72,7 @@ fn running(name: Tool.Name, detail: []const u8) []const u8 {
         .compact => "Compacting",
         .todo => "Planning",
         .job => "Checking a job",
+        .read_result => "Re-reading a result",
     };
 }
 
@@ -97,6 +98,7 @@ fn ran(name: Tool.Name, detail: []const u8) []const u8 {
         .compact => "Compacted",
         .todo => "Planned",
         .job => "Checked a job",
+        .read_result => "Re-read a result",
     };
 }
 

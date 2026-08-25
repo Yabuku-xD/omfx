@@ -38,12 +38,20 @@ pub const max_rules: usize = 32;
 /// Tripwire for a settings file that stopped being configuration.
 pub const max_mcp: usize = 128;
 pub const max_mcp_args: usize = 32;
+pub const max_provider_models: usize = 24;
 
 pub const McpServer = struct {
     name: []const u8 = "",
     command: []const u8 = "",
+    /// Remote Streamable HTTP endpoint. When set, `command` is unused.
+    url: []const u8 = "",
     argv: [max_mcp_args][]const u8 = undefined,
     argv_n: usize = 0,
+};
+
+pub const ProviderPref = struct {
+    provider: []const u8 = "",
+    model: []const u8 = "",
 };
 
 pub const File = struct {
@@ -92,6 +100,13 @@ pub const File = struct {
     last_model: []const u8 = "",
     last_provider: []const u8 = "",
     last_mode: []const u8 = "",
+    /// Preferred model per provider so switching providers does not clobber.
+    provider_models: [max_provider_models]ProviderPref = [_]ProviderPref{.{}} ** max_provider_models,
+    provider_models_n: usize = 0,
+
+    pub fn providerModels(self: *const File) []const ProviderPref {
+        return self.provider_models[0..self.provider_models_n];
+    }
 
     pub fn deinit(self: *File, allocator: std.mem.Allocator) void {
         if (self.web.order.len > 0) allocator.free(self.web.order);
@@ -173,6 +188,8 @@ pub fn parse(allocator: std.mem.Allocator, json: []const u8) !File {
     const market_n = extractArray(raw, "plugin_marketplaces", &market_store);
     const plugin_marketplaces = try allocator.dupe([]const u8, market_store[0..market_n]);
     errdefer allocator.free(plugin_marketplaces);
+    var provider_models: [max_provider_models]ProviderPref = [_]ProviderPref{.{}} ** max_provider_models;
+    const provider_models_n = fillProviderModels(raw, &provider_models);
     return .{
         .raw = raw,
         .web = .{
@@ -211,6 +228,8 @@ pub fn parse(allocator: std.mem.Allocator, json: []const u8) !File {
         .last_model = extractString(raw, "last_model"),
         .last_provider = extractString(raw, "last_provider"),
         .last_mode = extractString(raw, "last_mode"),
+        .provider_models = provider_models,
+        .provider_models_n = provider_models_n,
     };
 }
 
@@ -271,19 +290,62 @@ fn extractMcp(allocator: std.mem.Allocator, json: []const u8) ![]McpServer {
         var server: McpServer = .{
             .name = extractString(obj, "name"),
             .command = extractString(obj, "command"),
+            .url = extractString(obj, "url"),
         };
         var args_store: [max_ids][]const u8 = undefined;
         const args_n = extractArray(obj, "args", &args_store);
         var a: usize = 0;
         while (a < args_n and a < max_mcp_args) : (a += 1) server.argv[a] = args_store[a];
         server.argv_n = @min(args_n, max_mcp_args);
-        if (server.command.len > 0) {
-            if (server.name.len == 0) server.name = server.command;
-            try list.append(allocator, server);
-        }
+        if (server.name.len != 0 and (server.command.len != 0 or server.url.len != 0)) try list.append(allocator, server);
         i = cb + 1;
     }
-    return try list.toOwnedSlice(allocator);
+    return list.toOwnedSlice(allocator);
+}
+
+fn fillProviderModels(json: []const u8, out: *[max_provider_models]ProviderPref) usize {
+    const key = std.mem.indexOf(u8, json, "\"models\"") orelse return 0;
+    const rest = json[key..];
+    const lb = std.mem.indexOfScalar(u8, rest, '{') orelse return 0;
+    var depth: i32 = 0;
+    var rb: usize = lb;
+    for (rest[lb..], lb..) |c, idx| {
+        if (c == '{') depth += 1;
+        if (c == '}') {
+            depth -= 1;
+            if (depth == 0) {
+                rb = idx;
+                break;
+            }
+        }
+    }
+    if (rb <= lb) return 0;
+    const inner = rest[lb + 1 .. rb];
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < inner.len and n < max_provider_models) {
+        const q1 = std.mem.indexOfScalarPos(u8, inner, i, '"') orelse break;
+        const q2 = std.mem.indexOfScalarPos(u8, inner, q1 + 1, '"') orelse break;
+        const provider = inner[q1 + 1 .. q2];
+        const colon = std.mem.indexOfScalarPos(u8, inner, q2 + 1, ':') orelse break;
+        const q3 = std.mem.indexOfScalarPos(u8, inner, colon + 1, '"') orelse break;
+        const q4 = std.mem.indexOfScalarPos(u8, inner, q3 + 1, '"') orelse break;
+        const model = inner[q3 + 1 .. q4];
+        if (provider.len != 0 and model.len != 0) {
+            out[n] = .{ .provider = provider, .model = model };
+            n += 1;
+        }
+        i = q4 + 1;
+    }
+    return n;
+}
+
+pub fn modelForProvider(file: File, provider: []const u8) []const u8 {
+    for (file.providerModels()) |p| {
+        if (std.mem.eql(u8, p.provider, provider)) return p.model;
+    }
+    if (std.mem.eql(u8, file.last_provider, provider) and file.last_model.len > 0) return file.last_model;
+    return "";
 }
 
 fn extractPermRules(json: []const u8, out: *[max_rules]permissions.Rule) usize {
@@ -373,10 +435,16 @@ pub fn encodeFile(allocator: std.mem.Allocator, file: File) ![]u8 {
             if (i != 0) try w.writeAll(",");
             try w.writeAll("{\"name\":\"");
             try w.writeAll(s.name);
-            try w.writeAll("\",\"command\":\"");
-            try w.writeAll(s.command);
-            try w.writeAll("\",\"args\":");
-            try writeQuotedList(w, s.argv[0..s.argv_n]);
+            if (s.url.len > 0) {
+                try w.writeAll("\",\"url\":\"");
+                try w.writeAll(s.url);
+                try w.writeAll("\"");
+            } else {
+                try w.writeAll("\",\"command\":\"");
+                try w.writeAll(s.command);
+                try w.writeAll("\",\"args\":");
+                try writeQuotedList(w, s.argv[0..s.argv_n]);
+            }
             try w.writeAll("}");
         }
         try w.writeAll("]");
@@ -409,6 +477,14 @@ pub fn encodeFile(allocator: std.mem.Allocator, file: File) ![]u8 {
     if (file.last_model.len > 0) try w.print(",\n  \"last_model\": \"{s}\"", .{file.last_model});
     if (file.last_provider.len > 0) try w.print(",\n  \"last_provider\": \"{s}\"", .{file.last_provider});
     if (file.last_mode.len > 0) try w.print(",\n  \"last_mode\": \"{s}\"", .{file.last_mode});
+    if (file.provider_models_n > 0) {
+        try w.writeAll(",\n  \"models\": {");
+        for (file.providerModels(), 0..) |p, i| {
+            if (i != 0) try w.writeAll(",");
+            try w.print("\"{s}\":\"{s}\"", .{ p.provider, p.model });
+        }
+        try w.writeAll("}");
+    }
     try w.writeAll("\n}\n");
     return aw.toOwnedSlice();
 }
@@ -504,6 +580,8 @@ fn copyMeta(file: File, web: Web) File {
         .last_model = file.last_model,
         .last_provider = file.last_provider,
         .last_mode = file.last_mode,
+        .provider_models = file.provider_models,
+        .provider_models_n = file.provider_models_n,
     };
 }
 
@@ -649,10 +727,8 @@ pub fn rememberProvider(
 ) !void {
     var file = load(allocator, io, home);
     defer file.deinit(allocator);
-    const model = if (std.mem.eql(u8, file.last_provider, provider) and file.last_model.len > 0)
-        file.last_model
-    else
-        fallback_model;
+    const preferred = modelForProvider(file, provider);
+    const model = if (preferred.len > 0) preferred else fallback_model;
     try setLastChat(allocator, io, home, provider, model, file.last_mode);
 }
 
@@ -666,10 +742,59 @@ pub fn setLastChat(
 ) !void {
     var file = load(allocator, io, home);
     defer file.deinit(allocator);
+    var prefs = file.provider_models;
+    var n = file.provider_models_n;
+    var replaced = false;
+    for (prefs[0..n]) |*p| {
+        if (std.mem.eql(u8, p.provider, provider)) {
+            p.* = .{ .provider = provider, .model = model };
+            replaced = true;
+            break;
+        }
+    }
+    if (!replaced and n < prefs.len and provider.len > 0 and model.len > 0) {
+        prefs[n] = .{ .provider = provider, .model = model };
+        n += 1;
+    }
     var merged = copyMeta(file, file.web);
     merged.last_provider = provider;
     merged.last_model = model;
     merged.last_mode = mode;
+    merged.provider_models = prefs;
+    merged.provider_models_n = n;
+    const body = try encodeFile(allocator, merged);
+    defer allocator.free(body);
+    try writePath(allocator, io, home, body);
+}
+
+pub fn upsertMcp(
+    allocator: std.mem.Allocator,
+    io: Io,
+    home: []const u8,
+    server: McpServer,
+) !void {
+    var file = load(allocator, io, home);
+    defer file.deinit(allocator);
+    var store: [max_mcp]McpServer = undefined;
+    var n: usize = 0;
+    var replaced = false;
+    for (file.mcp) |s| {
+        if (n >= store.len) break;
+        if (std.mem.eql(u8, s.name, server.name)) {
+            store[n] = server;
+            replaced = true;
+        } else {
+            store[n] = s;
+        }
+        n += 1;
+    }
+    if (!replaced) {
+        if (n >= store.len) return error.Full;
+        store[n] = server;
+        n += 1;
+    }
+    var merged = copyMeta(file, file.web);
+    merged.mcp = store[0..n];
     const body = try encodeFile(allocator, merged);
     defer allocator.free(body);
     try writePath(allocator, io, home, body);

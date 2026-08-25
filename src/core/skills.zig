@@ -117,11 +117,11 @@ fn eachHomeRoot(
         if (out.items.len >= max_home_roots) return;
         const path = try std.fs.path.join(allocator, &.{ home, root });
         errdefer allocator.free(path);
-        var probe = Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch {
+        var skill_dir = Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch {
             allocator.free(path);
             continue;
         };
-        probe.close(io);
+        skill_dir.close(io);
         try out.append(allocator, path);
     }
     var dir = Io.Dir.cwd().openDir(io, home, .{ .iterate = true }) catch return;
@@ -160,11 +160,11 @@ fn appendIfSkills(
 ) !void {
     const path = try std.fs.path.join(allocator, &.{ base, "skills" });
     errdefer allocator.free(path);
-    var probe = Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch {
+    var skill_dir = Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch {
         allocator.free(path);
         return;
     };
-    probe.close(io);
+    skill_dir.close(io);
     // Already on the documented list: adding it twice would make every skill
     // in it a duplicate to filter out later.
     for (out.items) |have| {
@@ -232,11 +232,11 @@ pub fn readAccessRoots(
         if (workspace.len == 0) break;
         const path = try std.fs.path.join(allocator, &.{ workspace, root });
         errdefer allocator.free(path);
-        var probe = Io.Dir.cwd().openDir(io, path, .{}) catch {
+        var skill_dir = Io.Dir.cwd().openDir(io, path, .{}) catch {
             allocator.free(path);
             continue;
         };
-        probe.close(io);
+        skill_dir.close(io);
         try out.append(allocator, path);
     }
     var found: std.ArrayList([]u8) = .empty;
@@ -251,24 +251,90 @@ pub fn readAccessRoots(
     return out.toOwnedSlice(allocator);
 }
 
-/// A skill's directory, for the prompt that tells the model to read it.
-pub fn pathOf(allocator: std.mem.Allocator, io: Io, home: []const u8, workspace: []const u8, name: []const u8) ?[]u8 {
+/// A skill's SKILL.md path, or why it could not be opened.
+pub const Probe = union(enum) {
+    path: []u8,
+    missing_dir: []u8,
+    unreadable: []u8,
+};
+
+/// Resolve a skill name to its SKILL.md, distinguishing missing vs unreadable.
+pub fn probe(
+    allocator: std.mem.Allocator,
+    io: Io,
+    home: []const u8,
+    workspace: []const u8,
+    name: []const u8,
+) ?Probe {
+    var saw_dir: ?[]u8 = null;
+    defer if (saw_dir) |p| allocator.free(p);
     for (roots) |root| {
         if (workspace.len == 0) break;
-        const path = std.fs.path.join(allocator, &.{ workspace, root, name, "SKILL.md" }) catch continue;
-        if (Io.Dir.cwd().statFile(io, path, .{})) |_| return path else |_| allocator.free(path);
+        const dir_path = std.fs.path.join(allocator, &.{ workspace, root, name }) catch continue;
+        defer allocator.free(dir_path);
+        const path = std.fs.path.join(allocator, &.{ dir_path, "SKILL.md" }) catch continue;
+        // Open for read — stat alone succeeds on mode 000 and misses unreadable.
+        if (Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only })) |f| {
+            f.close(io);
+            return .{ .path = path };
+        } else |err| {
+            if (err == error.FileNotFound) {
+                allocator.free(path);
+                if (Io.Dir.cwd().openDir(io, dir_path, .{})) |d| {
+                    d.close(io);
+                    if (saw_dir == null) saw_dir = allocator.dupe(u8, dir_path) catch null;
+                } else |_| {}
+            } else {
+                return .{ .unreadable = path };
+            }
+        }
     }
     var found_roots: std.ArrayList([]u8) = .empty;
     defer {
         for (found_roots.items) |r| allocator.free(r);
         found_roots.deinit(allocator);
     }
-    eachHomeRoot(allocator, io, home, &found_roots) catch return null;
+    eachHomeRoot(allocator, io, home, &found_roots) catch {};
     for (found_roots.items) |base| {
-        const path = std.fs.path.join(allocator, &.{ base, name, "SKILL.md" }) catch continue;
-        if (Io.Dir.cwd().statFile(io, path, .{})) |_| return path else |_| allocator.free(path);
+        const dir_path = std.fs.path.join(allocator, &.{ base, name }) catch continue;
+        defer allocator.free(dir_path);
+        const path = std.fs.path.join(allocator, &.{ dir_path, "SKILL.md" }) catch continue;
+        if (Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only })) |f| {
+            f.close(io);
+            return .{ .path = path };
+        } else |err| {
+            if (err == error.FileNotFound) {
+                allocator.free(path);
+                if (Io.Dir.cwd().openDir(io, dir_path, .{})) |d| {
+                    d.close(io);
+                    if (saw_dir == null) saw_dir = allocator.dupe(u8, dir_path) catch null;
+                } else |_| {}
+            } else {
+                return .{ .unreadable = path };
+            }
+        }
+    }
+    if (saw_dir) |d| {
+        const owned = d;
+        saw_dir = null;
+        return .{ .missing_dir = owned };
     }
     return null;
+}
+
+/// A skill's SKILL.md path, for the prompt that tells the model to read it.
+pub fn pathOf(allocator: std.mem.Allocator, io: Io, home: []const u8, workspace: []const u8, name: []const u8) ?[]u8 {
+    return switch (probe(allocator, io, home, workspace, name) orelse return null) {
+        .path => |p| p,
+        .missing_dir => |d| blk: {
+            allocator.free(d);
+            break :blk null;
+        },
+        .unreadable => |p| blk: {
+            allocator.free(p);
+            break :blk null;
+        },
+    };
 }
 
 fn appendFromDir(
@@ -397,21 +463,42 @@ fn expandLeading(
 ) !?[]u8 {
     var paths: [max_in_prompt][]u8 = undefined;
     var n: usize = 0;
+    var notes: std.ArrayList(u8) = .empty;
+    errdefer notes.deinit(allocator);
     var rest = text;
+    var saw = false;
     while (n < max_in_prompt) {
         rest = std.mem.trimStart(u8, rest, " \t");
         if (rest.len == 0 or rest[0] != '/') break;
         const name = tokenAt(rest[1..]);
         if (name.len == 0) break;
-        const path = pathOf(allocator, io, home, workspace, name) orelse break;
-        paths[n] = path;
-        n += 1;
+        const pr = probe(allocator, io, home, workspace, name) orelse break;
+        saw = true;
         rest = rest[1 + name.len ..];
+        switch (pr) {
+            .path => |p| {
+                paths[n] = p;
+                n += 1;
+            },
+            .missing_dir => |d| {
+                defer allocator.free(d);
+                try notes.print(allocator, "skill '{s}': directory exists at {s} but SKILL.md is missing; repair or remove the link\n", .{ name, d });
+            },
+            .unreadable => |p| {
+                defer allocator.free(p);
+                try notes.print(allocator, "skill '{s}': SKILL.md at {s} is unreadable; check permissions or authorize access\n", .{ name, p });
+            },
+        }
     }
-    if (n == 0) return null;
+    if (!saw) {
+        notes.deinit(allocator);
+        return null;
+    }
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, notes.items);
+    notes.deinit(allocator);
     for (paths[0..n]) |p| {
         defer allocator.free(p);
         try out.print(allocator, "Read {s} and follow it.\n", .{p});
@@ -742,6 +829,42 @@ test "missing skills dir is zero" {
     defer tmp.cleanup();
     const n = try countSkills(tmp.dir, std.testing.io, std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), n);
+}
+
+test "probe distinguishes missing vs unreadable SKILL.md" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ws = try pathing.testWorkspace(a, &tmp);
+    defer a.free(ws);
+
+    const dirp = try std.fs.path.join(a, &.{ ws, ".omfx", "skills", "probe-e2e" });
+    defer a.free(dirp);
+    try Io.Dir.cwd().createDirPath(io, dirp);
+    const md = try std.fs.path.join(a, &.{ dirp, "SKILL.md" });
+    defer a.free(md);
+
+    const miss = probe(a, io, "", ws, "probe-e2e") orelse return error.TestUnexpectedResult;
+    defer switch (miss) {
+        .missing_dir => |d| a.free(d),
+        .path, .unreadable => |p| a.free(p),
+    };
+    try std.testing.expect(miss == .missing_dir);
+
+    var f = try Io.Dir.cwd().createFile(io, md, .{ .truncate = true });
+    try f.setPermissions(io, .fromMode(0o000));
+    defer {
+        f.setPermissions(io, .fromMode(0o644)) catch {};
+        f.close(io);
+    }
+
+    const bad = probe(a, io, "", ws, "probe-e2e") orelse return error.TestUnexpectedResult;
+    defer switch (bad) {
+        .missing_dir => |d| a.free(d),
+        .path, .unreadable => |p| a.free(p),
+    };
+    try std.testing.expect(bad == .unreadable);
 }
 
 test "promptBlock lists names" {

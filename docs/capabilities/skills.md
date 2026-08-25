@@ -26,6 +26,8 @@ Other CLIs converge on the same idea: name several skills in one prompt, keep th
 
 omfx follows the leading stack and the mid-prompt form. Expansion stops at the first token that is not a known skill. Cap is eight skills per prompt. Skill bodies stay on disk (`Read …/SKILL.md and follow it`) so context stays progressive.
 
+If a skill directory exists but `SKILL.md` is missing or unreadable, expand notes that in the skills event instead of inventing a path.
+
 A sample skill ships at `skills/hello-omfx/` in this repository.
 
 ## Plugins

@@ -10,7 +10,9 @@ Control when tools run.
 | Plan | Read-only; writes blocked until `/plan go` |
 | Yolo | Tools run without asking for this session |
 
-Shift-Tab cycles normal → plan → yolo. Yolo is never written to disk.
+Shift-Tab cycles ask → auto → yolo for later tool calls in the same turn (in-flight tools keep the mode they were admitted under). Yolo is never written to disk.
+
+Human **allow** / **always** on a prompt binds to that exact tool name + args and is re-checked before execute. Commands or paths copied from prior tool output stay blocked unless the user asked for them.
 
 ```
 /permissions ask|auto|yolo

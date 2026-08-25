@@ -7,6 +7,7 @@ Built-in tools the agent can call. Exact availability depends on permission mode
 - Read, edit, patch, and search the workspace (`read`, `write`, `edit`, `patch`, `glob`, `grep`, `list`, …). `write` and `copy` create missing parent directories.
 - Hybrid `semantic_search` — repo reference rank, symbol names, and tokens fused with reciprocal rank fusion (no embeddings, no on-disk index)
 - Shell commands (`bash`, `job`) with optional OS sandbox
+- `read_result` — re-read a recall cite (`rN` / `3`) or a background job log (`job:N`); secret-shaped bodies stay redacted
 - Web fetch, scrape (readable HTML text), and search (via `/web` backends)
 - Diagnostics after writes — parse gate, then optional one-shot LSP
 - Memory, board, todo, and peer coordination

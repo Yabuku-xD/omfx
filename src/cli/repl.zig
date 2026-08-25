@@ -2619,6 +2619,8 @@ pub fn run(
         // nothing to do with whether the reply was already shown.
         const kept = sess.shown.bytes().len;
         var reply_owned = true;
+        var turn_host = live.host();
+        turn_host.mode_live = &state.mode;
         const reply = if (sess.cancel.load(.acquire)) blk: {
             reply_owned = false;
             break :blk @as([]const u8, "");
@@ -2631,12 +2633,13 @@ pub fn run(
             model_prompt,
             .{
                 .mode = state.mode,
+                .mode_live = &state.mode,
                 .has_tty = true,
                 .home = home,
                 .reads = &state.reads,
                 .trace = &trace,
                 .plan = state.plan,
-                .host = live.host(),
+                .host = turn_host,
                 .max_peer_depth = peer_depth,
                 .prior_user = if (state.interrupted) state.last_prompt else "",
                 .prior_assistant = if (state.interrupted) state.last_reply else "",

@@ -92,6 +92,7 @@ fn session(
     method: []const u8,
     params: []const u8,
 ) ![]u8 {
+    if (server.url.len > 0) return sessionHttp(allocator, io, server, method, params);
     var argv_buf: [10][]const u8 = undefined;
     argv_buf[0] = server.command;
     var n: usize = 1;
@@ -130,6 +131,45 @@ fn session(
     defer allocator.free(req);
     try writeLine(io, child.stdin, req);
     return readJson(allocator, io, child.stdout);
+}
+
+fn sessionHttp(
+    allocator: std.mem.Allocator,
+    io: Io,
+    server: settings.McpServer,
+    method: []const u8,
+    params: []const u8,
+) ![]u8 {
+    const body = try std.fmt.allocPrint(
+        allocator,
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"{s}\",\"params\":{s}}}",
+        .{ method, params },
+    );
+    defer allocator.free(body);
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
+    defer client.deinit();
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var loc_buf: [4096]u8 = undefined;
+    const result = client.fetch(.{
+        .location = .{ .url = server.url },
+        .method = .POST,
+        .payload = body,
+        .headers = .{ .content_type = .{ .override = "application/json" } },
+        .extra_headers = &.{
+            .{ .name = "Accept", .value = "application/json, text/event-stream" },
+        },
+        .response_writer = &aw.writer,
+        .redirect_buffer = &loc_buf,
+    }) catch |err| {
+        return std.fmt.allocPrint(allocator, "mcp http failed ({s}): {s}", .{ server.name, @errorName(err) });
+    };
+    const status: u16 = @intFromEnum(result.status);
+    const raw = aw.written();
+    if (status < 200 or status >= 300) {
+        return std.fmt.allocPrint(allocator, "mcp http {d}: {s}", .{ status, raw[0..@min(raw.len, 200)] });
+    }
+    return allocator.dupe(u8, raw);
 }
 
 fn writeLine(io: Io, file: ?Io.File, line: []const u8) !void {
