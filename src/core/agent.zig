@@ -54,8 +54,8 @@ fn postOrStop(
     sys: []const u8,
     flags: pclient.ChatFlags,
 ) !?pclient.ChatResult {
-    // The main thread is about to block on the socket, where `pollCancel` can
-    // never run. The watcher owns the keyboard until the response returns.
+    // The main thread is about to block on the socket. The watcher owns the
+    // keyboard and can shut the socket down on Esc / stall so the read returns.
     var watch = sink.Watch{
         .cancel = flags.host.cancel orelse return blk: {
             break :blk pclient.postChatFiltered(allocator, io, endpoint, messages, sys, flags) catch |err| {

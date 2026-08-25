@@ -668,12 +668,60 @@ fn pollCancelKeyTimeout(wait_ms: i32, page_rows: u16) bool {
     return drainKeysTimeout(wait_ms, page_rows);
 }
 
+/// In-flight chat socket. Esc/timeout shuts it down so a blocked
+/// `Reader.stream` returns instead of waiting forever for the first byte.
+var abort_fd: std.atomic.Value(i64) = .init(-1);
+var stall_flag: std.atomic.Value(bool) = .init(false);
+
+/// How long to wait for any provider bytes before aborting. Reasoning models
+/// can think for a while; this is a network/API hang tripwire, not a token budget.
+pub const stall_timeout_ms: i64 = 120_000;
+
+pub fn armAbort(fd: std.posix.fd_t) void {
+    stall_flag.store(false, .release);
+    abort_fd.store(@intCast(fd), .release);
+}
+
+pub fn disarmAbort() void {
+    abort_fd.store(-1, .release);
+}
+
+/// Unblock a hung chat read. Safe if nothing is armed. Leaves the fd armed so
+/// a late Esc (before connect) still aborts once `armAbort` runs.
+pub fn fireAbort() void {
+    const raw = abort_fd.load(.acquire);
+    if (raw < 0) return;
+    const fd: std.posix.fd_t = @intCast(raw);
+    const rc = std.posix.system.shutdown(fd, std.posix.SHUT.RDWR);
+    log.debug("fireAbort fd={d} rc={d}", .{ fd, rc });
+}
+
+pub fn takeStall() bool {
+    return stall_flag.swap(false, .acq_rel);
+}
+
+fn wallMs() i64 {
+    const posix = std.posix;
+    const id: posix.clockid_t = switch (builtin.os.tag) {
+        .macos, .ios, .tvos, .watchos, .visionos => posix.CLOCK.UPTIME_RAW,
+        else => posix.CLOCK.MONOTONIC,
+    };
+    var ts: posix.timespec = undefined;
+    switch (posix.errno(posix.system.clock_gettime(id, &ts))) {
+        .SUCCESS => return ts.sec * 1000 + @divTrunc(ts.nsec, 1_000_000),
+        else => return 0,
+    }
+}
+
 /// Watches the keyboard while the main thread is blocked reading the socket.
 ///
 /// `pollCancel` only runs at SSE lines and tool boundaries. Before the first
 /// token there are neither, so an Esc pressed during a long reasoning pause sat
 /// in the stdin buffer with no acknowledgement -- indistinguishable, from the
 /// user's side, from a broken key.
+///
+/// Esc also shuts down the armed chat socket (`fireAbort`) so the blocked HTTP
+/// read returns. Without that, cancel only took effect after the first byte.
 ///
 /// The watcher owns stdin for the duration of the request. That is safe
 /// precisely because the main thread is blocked elsewhere: the two never read
@@ -682,17 +730,25 @@ pub const Watch = struct {
     cancel: *std.atomic.Value(bool),
     stop: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
-    /// Painted on the first stop request, so the keypress is visibly received
-    /// even though the request cannot be torn down until bytes arrive.
+    /// Painted on the first stop request (stream/ask without a TUI tick).
     ack: []const u8 = "",
     tick: ?*const fn (ctx: ?*anyopaque) void = null,
     tick_ctx: ?*anyopaque = null,
     /// PageUp/Down step while the turn owns stdin (transcript pane height).
     page_rows: u16 = 20,
+    /// Override for tests; 0 disables the stall timer.
+    stall_ms: i64 = stall_timeout_ms,
+    /// Cooked stdin buffers Esc until Enter. Drop ICANON for the watch only
+    /// when the terminal is still line-buffered (ask/stream). TUI is already
+    /// raw, so this is a no-op there and must not fight `tty.Raw`.
+    termios_saved: bool = false,
+    termios_old: std.posix.system.termios = undefined,
 
     pub fn start(self: *Watch) void {
         if (builtin.os.tag == .windows) return;
         self.stop.store(false, .release);
+        stall_flag.store(false, .release);
+        self.enterKeyMode();
         self.thread = std.Thread.spawn(.{}, loop, .{self}) catch |err| blk: {
             log.warn("cancel watch: {s}", .{@errorName(err)});
             break :blk null;
@@ -703,13 +759,56 @@ pub const Watch = struct {
         self.stop.store(true, .release);
         if (self.thread) |t| t.join();
         self.thread = null;
+        self.leaveKeyMode();
+        disarmAbort();
+    }
+
+    fn enterKeyMode(self: *Watch) void {
+        if (comptime builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
+        const fd = std.posix.STDIN_FILENO;
+        const old = std.posix.tcgetattr(fd) catch return;
+        if (!old.lflag.ICANON) return;
+        var next = old;
+        next.lflag.ECHO = false;
+        next.lflag.ICANON = false;
+        if (@hasField(@TypeOf(next.lflag), "ECHOCTL")) next.lflag.ECHOCTL = false;
+        if (@hasField(std.posix.system.V, "MIN")) {
+            next.cc[@intFromEnum(std.posix.system.V.MIN)] = 1;
+            next.cc[@intFromEnum(std.posix.system.V.TIME)] = 0;
+        }
+        std.posix.tcsetattr(fd, .FLUSH, next) catch return;
+        self.termios_old = old;
+        self.termios_saved = true;
+    }
+
+    fn leaveKeyMode(self: *Watch) void {
+        if (!self.termios_saved) return;
+        self.termios_saved = false;
+        std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, self.termios_old) catch {};
     }
 
     fn loop(self: *Watch) void {
         var told = false;
+        var stalled = false;
+        const started = wallMs();
         while (!self.stop.load(.acquire)) {
             const hit = pollCancelKeyTimeout(60, self.page_rows);
-            if (hit) self.cancel.store(true, .release);
+            if (hit) {
+                self.cancel.store(true, .release);
+                log.debug("watch: stop key", .{});
+            }
+            // Re-fire while cancelled: Esc may arrive before the socket is armed.
+            if (self.cancel.load(.acquire)) fireAbort();
+            if (!stalled and self.stall_ms > 0) {
+                const now = wallMs();
+                if (now != 0 and started != 0 and now -| started >= self.stall_ms) {
+                    stalled = true;
+                    stall_flag.store(true, .release);
+                    self.cancel.store(true, .release);
+                    fireAbort();
+                    log.debug("watch: stall timeout", .{});
+                }
+            }
             if (self.tick) |f| f(self.tick_ctx);
             if (!hit) continue;
             if (told or self.ack.len == 0) continue;
@@ -834,6 +933,61 @@ test "jump pill click while generating requests stick-to-bottom" {
 test "cancelled is false without a flag" {
     const h = Host{};
     try std.testing.expect(!h.cancelled());
+}
+
+test "fireAbort is a no-op until armed" {
+    disarmAbort();
+    fireAbort();
+    try std.testing.expect(!takeStall());
+}
+
+test "takeStall clears the flag" {
+    stall_flag.store(true, .release);
+    try std.testing.expect(takeStall());
+    try std.testing.expect(!takeStall());
+}
+
+test "fireAbort unblocks a blocked read" {
+    if (builtin.os.tag == .windows) return;
+    var fds: [2]std.posix.fd_t = undefined;
+    const rc = std.c.socketpair(@intCast(std.c.AF.UNIX), @intCast(std.c.SOCK.STREAM), 0, &fds);
+    try std.testing.expect(rc == 0);
+    defer {
+        _ = std.posix.system.close(fds[0]);
+        _ = std.posix.system.close(fds[1]);
+    }
+    const Box = struct {
+        var n: isize = -99;
+        fn reader(fd: std.posix.fd_t) void {
+            var buf: [8]u8 = undefined;
+            const got = std.posix.read(fd, &buf) catch {
+                n = -1;
+                return;
+            };
+            n = @intCast(got);
+        }
+    };
+    Box.n = -99;
+    armAbort(fds[0]);
+    defer disarmAbort();
+    const t = try std.Thread.spawn(.{}, Box.reader, .{fds[0]});
+    var wait = std.c.timespec{ .sec = 0, .nsec = 50 * std.time.ns_per_ms };
+    _ = std.c.nanosleep(&wait, null);
+    fireAbort();
+    t.join();
+    try std.testing.expect(Box.n == 0 or Box.n == -1);
+}
+
+test "watch stall timer sets takeStall" {
+    if (builtin.os.tag == .windows) return;
+    var cancelled: std.atomic.Value(bool) = .init(false);
+    var w = Watch{ .cancel = &cancelled, .stall_ms = 80 };
+    w.start();
+    var wait = std.c.timespec{ .sec = 0, .nsec = 250 * std.time.ns_per_ms };
+    _ = std.c.nanosleep(&wait, null);
+    w.finish();
+    try std.testing.expect(cancelled.load(.acquire));
+    try std.testing.expect(takeStall());
 }
 
 test "toolOut forwards body to on_tool" {

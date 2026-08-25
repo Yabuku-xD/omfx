@@ -2,6 +2,8 @@ const std = @import("std");
 const types = @import("types.zig");
 const sse = @import("sse.zig");
 const tool = @import("../core/tool.zig");
+const sink = @import("../core/sink.zig");
+const http = std.http;
 
 pub const PostError = error{ OutOfMemory, Transport };
 
@@ -801,6 +803,73 @@ pub fn shouldRetry(status: u16, attempt: u8) bool {
     return status == 429 and attempt == 0;
 }
 
+/// Like `Client.fetch`, but arms `sink.armAbort` on the live socket so Esc /
+/// stall timeout can unblock a hung first-byte wait.
+fn streamChatPost(
+    allocator: std.mem.Allocator,
+    client: *http.Client,
+    url: []const u8,
+    body: []const u8,
+    headers: http.Client.Request.Headers,
+    extra_headers: []const http.Header,
+    tee: *HostWriter,
+    flags: ChatFlags,
+    endpoint: types.Endpoint,
+) anyerror!http.Client.FetchResult {
+    _ = endpoint;
+    const uri = try std.Uri.parse(url);
+    var req = try client.request(.POST, uri, .{
+        .headers = headers,
+        .extra_headers = extra_headers,
+        .redirect_behavior = .unhandled,
+    });
+    defer req.deinit();
+
+    req.transfer_encoding = .{ .content_length = body.len };
+    var send_buf: [16 * 1024]u8 = undefined;
+    var body_writer = try req.sendBodyUnflushed(&send_buf);
+    try body_writer.writer.writeAll(body);
+    try body_writer.end();
+    try req.connection.?.flush();
+
+    if (req.connection) |conn| {
+        const fd = conn.stream_reader.stream.socket.handle;
+        sink.armAbort(fd);
+        std.log.scoped(.client).debug("armAbort fd={d}", .{fd});
+    }
+    defer sink.disarmAbort();
+
+    // Esc may have landed before the socket existed; abort now if so.
+    if (flags.host.cancelled()) {
+        sink.fireAbort();
+        return error.Canceled;
+    }
+
+    var head_buf: [16 * 1024]u8 = undefined;
+    var response = req.receiveHead(&head_buf) catch |err| {
+        if (flags.host.cancelled()) return error.Canceled;
+        return err;
+    };
+
+    const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+        .identity => &.{},
+        .zstd => try allocator.alloc(u8, std.compress.zstd.default_window_len),
+        .deflate, .gzip => try allocator.alloc(u8, std.compress.flate.max_window_len),
+        .compress => return error.UnsupportedCompressionMethod,
+    };
+    defer if (decompress_buffer.len != 0) allocator.free(decompress_buffer);
+
+    var transfer_buffer: [64]u8 = undefined;
+    var decompress: http.Decompress = undefined;
+    const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+    _ = reader.streamRemaining(&tee.writer) catch |err| {
+        if (flags.host.cancelled()) return error.Canceled;
+        return err;
+    };
+
+    return .{ .status = response.head.status };
+}
+
 pub fn postChatMsgs(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -883,18 +952,32 @@ pub fn postChatFiltered(
     }
 
     var attempt: u8 = 0;
-    var result: std.http.Client.FetchResult = undefined;
+    var result: http.Client.FetchResult = undefined;
     while (true) {
-        result = client.fetch(.{
-            .location = .{ .url = url },
-            .method = .POST,
-            .payload = body,
-            .headers = headers,
-            .extra_headers = extra.slice(),
-            .response_writer = &tee.writer,
-        }) catch |err| switch (err) {
+        result = streamChatPost(
+            allocator,
+            &client,
+            url,
+            body,
+            headers,
+            extra.slice(),
+            &tee,
+            flags,
+            endpoint,
+        ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
+                if (sink.takeStall()) {
+                    const msg = try std.fmt.allocPrint(
+                        allocator,
+                        "timed out waiting for {s}; check the network or API key",
+                        .{endpoint.vendor.asSlice()},
+                    );
+                    return .{ .status = 0, .outcome = .{ .text = msg } };
+                }
+                if (flags.host.cancelled() or err == error.Canceled) {
+                    return error.Transport;
+                }
                 const msg = try std.fmt.allocPrint(allocator, "transport error: {s}", .{@errorName(err)});
                 return .{ .status = 0, .outcome = .{ .text = msg } };
             },
