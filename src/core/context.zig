@@ -1,5 +1,9 @@
 const std = @import("std");
 const deadline = @import("../tools/deadline.zig");
+const orient_mod = @import("orient.zig");
+
+pub const OrientDepth = orient_mod.Depth;
+pub const orientDepth = orient_mod.orientDepth;
 
 /// Orientation, not a long operation.
 pub const git_secs: u32 = 15;

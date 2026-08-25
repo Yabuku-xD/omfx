@@ -222,7 +222,6 @@ pub const Group = struct {
     count: usize = 1,
     status: Status = .ok,
     expanded: bool = false,
-    /// Whether the keyboard is on this run.
     selected: bool = false,
 
     /// Whether a call belongs to the run currently open.

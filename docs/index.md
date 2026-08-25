@@ -65,7 +65,7 @@ In an interactive session, type `/` for commands. See [Slash commands](using/sla
 - **Hybrid semantic search**: repo rank, symbols, and tokens fused; no embeddings required.
 - **Memory + playbook**: workspace and user facts, plus verified lessons that can graduate into skills.
 - **Shared board**: structured notes for facts, failures, and paths for peers and coordination.
-- **Ranked repo map**: personalized file-graph rank + symbol packing inside a 4k char budget (no tree-sitter).
+- **Ranked repo map**: personalized file-graph rank + symbol packing inside a 4k char budget (no tree-sitter); Adaptive-RAG depth-gated (none / git / full) so greetings skip orientation.
 - **Credential-aware `/models`**: signed-in providers first, then that provider's models.
 - **Stacked skills + `@files`**: several skills and file anchors in one prompt.
 - **Web fallback chain**: nineteen search backends; pick an order in `/web`, first match wins.

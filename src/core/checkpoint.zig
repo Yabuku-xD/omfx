@@ -33,7 +33,7 @@ pub const Input = struct {
     note: []const u8 = "",
     last_tool: []const u8 = "",
     last_reply: []const u8 = "",
-    /// Re-injected on wake (Constraint Pinning); not summarized.
+    /// Pinned across wake; not summarized.
     mode: []const u8 = "ask",
     plan: []const u8 = "off",
     git_sha: []const u8 = "",

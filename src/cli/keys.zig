@@ -49,7 +49,6 @@ pub const Event = union(enum) {
     ctrl_t,
     ctrl_r,
     ctrl_j,
-    /// Left-button press.
     click: Click,
     /// Pointer moved with the left button held: a selection being drawn.
     drag: Click,

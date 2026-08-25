@@ -174,7 +174,6 @@ pub fn afterMutate(
     };
 }
 
-/// If HEAD is the last omfx auto-commit, reset it. Returns a short note or "".
 pub fn undoOmfxCommit(allocator: std.mem.Allocator, io: Io, workspace: []const u8) ![]u8 {
     if (!hasGit(io, workspace)) return allocator.dupe(u8, "");
     const recorded = readSha(allocator, io, workspace);

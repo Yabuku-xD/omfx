@@ -399,49 +399,6 @@ fn runCmd(
     return std.fmt.allocPrint(allocator, "verify: findings ({s}, exit {d})\n{s}", .{ label, code, got.body });
 }
 
-fn zigAstCheck(
-    allocator: std.mem.Allocator,
-    io: Io,
-    workspace: []const u8,
-    rel: []const u8,
-) ![]u8 {
-    var child = std.process.spawn(io, .{
-        .argv = &.{ "zig", "ast-check", rel },
-        .cwd = .{ .path = workspace },
-        .stdout = .pipe,
-        .stderr = .pipe,
-    }) catch {
-        return unavailable(allocator, "zig ast-check spawn failed");
-    };
-    var out_buf: [2048]u8 = undefined;
-    var collected: std.ArrayList(u8) = .empty;
-    errdefer {
-        collected.deinit(allocator);
-        child.kill(io);
-    }
-    if (child.stderr) |f| {
-        var reader = Io.File.Reader.initStreaming(f, io, &out_buf);
-        while (reader.interface.takeByte()) |b| {
-            try collected.append(allocator, b);
-            if (collected.items.len > 4000) break;
-        } else |_| {}
-    }
-    const term = child.wait(io) catch {
-        child.kill(io);
-        allocator.free(try collected.toOwnedSlice(allocator));
-        return timeout(allocator);
-    };
-    const err_out = try collected.toOwnedSlice(allocator);
-    defer allocator.free(err_out);
-    const ok = switch (term) {
-        .exited => |code| code == 0,
-        else => false,
-    };
-    if (ok) return clean(allocator, "zig ast-check");
-    if (err_out.len == 0) return findings(allocator, "(zig ast-check failed with no output)\n");
-    return findings(allocator, err_out);
-}
-
 test "unavailable is not clean" {
     const s = try unavailable(std.testing.allocator, ".md");
     defer std.testing.allocator.free(s);

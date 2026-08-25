@@ -8,7 +8,6 @@ pub const max_ides: usize = 12;
 
 pub const Spec = struct {
     id: []const u8,
-    /// Binary name on PATH.
     bin: []const u8,
     /// Extra args before the workspace path (`code -g`, `cursor -r`).
     prefix: []const []const u8 = &.{},

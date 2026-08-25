@@ -53,7 +53,7 @@ Last provider, model, and permission surface persist across launches. There is n
 
 ## Project instructions
 
-`AGENTS.md` at the workspace root (and nested files) is parsed into a harness contract (8 KiB cap). `/init` scaffolds one from the repo when missing. Volatile orientation (git status, repo map) rides on the user message so the system prefix stays byte-identical for provider prompt caching.
+`AGENTS.md` at the workspace root (and nested files) is parsed into a harness contract (8 KiB cap). `/init` scaffolds one from the repo when missing. Volatile orientation (git status, repo map) rides on the user message so the system prefix stays byte-identical for provider prompt caching. Depth follows Adaptive-RAG (arXiv:2403.14403): `none` / `git` / `full` from lexical query complexity — see `src/core/orient.zig`.
 
 ## Telemetry
 

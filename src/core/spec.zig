@@ -158,12 +158,6 @@ pub fn loadActive(allocator: std.mem.Allocator, io: Io, workspace: []const u8) ?
     return .{ .name = allocator.dupe(u8, name) catch return null, .phase = phase };
 }
 
-pub fn clearActive(allocator: std.mem.Allocator, io: Io, workspace: []const u8) void {
-    const full = std.fs.path.join(allocator, &.{ workspace, active_name }) catch return;
-    defer allocator.free(full);
-    Io.Dir.cwd().deleteFile(io, full) catch {};
-}
-
 pub fn advance(allocator: std.mem.Allocator, io: Io, workspace: []const u8) ![]u8 {
     const cur = loadActive(allocator, io, workspace) orelse
         return allocator.dupe(u8, "No active spec. /spec new <name> or /spec <name>.\n");

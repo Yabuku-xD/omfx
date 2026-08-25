@@ -138,14 +138,10 @@ test "spec postcard keeps bodies on disk" {
     try std.testing.expect(std.mem.indexOf(u8, spec_text, "Plan mode") != null);
 }
 
-test "postcard names semantic_search" {
-    try std.testing.expect(std.mem.indexOf(u8, text, "semantic_search") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "session surfaces") == null);
-}
-
 test "prompt has best-of core tools and no mcp dump" {
     try std.testing.expect(std.mem.indexOf(u8, text, "read") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "glob") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "semantic_search") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "web_search") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "list") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "not a clean verdict") != null);
@@ -157,6 +153,7 @@ test "prompt has best-of core tools and no mcp dump" {
     try std.testing.expect(std.mem.indexOf(u8, text, "peer") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "network denied") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "activate_tools") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "session surfaces") == null);
     try std.testing.expect(containsOnlyAdvertised(&advertised));
 }
 
