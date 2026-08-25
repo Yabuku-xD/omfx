@@ -307,6 +307,18 @@ pub fn peekSteer() Queued {
     return out;
 }
 
+/// Same as `peekSteer`, but `typing` is copied so a paint frame does not read
+/// the live buffer while the watcher appends to it.
+pub fn peekSteerCopy(typing_buf: []u8) Queued {
+    steerLock();
+    defer steerUnlock();
+    const n = @min(steer_len, typing_buf.len);
+    @memcpy(typing_buf[0..n], steer_buf[0..n]);
+    var out = Queued{ .rows = undefined, .n = queued_n, .typing = typing_buf[0..n] };
+    for (0..queued_n) |i| out.rows[i] = queued[i][0..queued_len[i]];
+    return out;
+}
+
 /// Everything typed during the turn, copied out and cleared. A line that was
 /// never committed with Enter comes back as the last message: it is what the
 /// user was writing, and dropping it would cost them the words.
@@ -367,6 +379,7 @@ pub fn dropSteer() void {
     x10_left = 0;
     utf8_need = 0;
     utf8_start = 0;
+    key_hold_len = 0;
     ctx_peek.store(false, .release);
     pending_cmd_len.store(0, .release);
     slash_tab.store(false, .release);
@@ -378,10 +391,23 @@ pub fn dropSteer() void {
 /// This cannot peek. `recv(MSG_PEEK)` fails with ENOTSOCK on a TTY, which is
 /// what made the previous version of this function never fire.
 fn pollCancelKey() bool {
+    // The watcher thread owns stdin for the request. A second drain here
+    // splits CSI across readers and the tail lands in the composer as text.
+    if (watchers.load(.acquire) != 0) return false;
     return drainKeys();
 }
 
 var mode_cycle_pending: std.atomic.Value(bool) = .init(false);
+
+/// How many cancel watchers currently own stdin. HostWriter must not drain
+/// while this is non-zero: two readers split CSI and the tail is steered.
+var watchers: std.atomic.Value(u32) = .init(0);
+
+/// Incomplete SGR/CSI from the previous stdin read, prepended to the next.
+/// Mouse reports often arrive as `\x1b[<` then `64;col;rowM`; dropping the
+/// prefix left `64;col;rowM` to land in the composer as text nobody typed.
+var key_hold: [64]u8 = undefined;
+var key_hold_len: usize = 0;
 
 /// Wheel / PageUp deltas queued by the cancel watcher while a turn owns stdin.
 /// Positive = older transcript (scroll up); negative = toward the live tail.
@@ -614,20 +640,38 @@ fn drainKeysTimeout(wait_ms: i32, page_rows: u16) bool {
     }
 }
 
+fn stashKeys(bytes: []const u8) void {
+    const n = @min(bytes.len, key_hold.len);
+    @memcpy(key_hold[0..n], bytes[0..n]);
+    key_hold_len = n;
+}
+
+fn joinHeld(bytes: []const u8, buf: *[cancel_drain_bytes + 64]u8) []const u8 {
+    if (key_hold_len == 0) return bytes;
+    const held = key_hold_len;
+    key_hold_len = 0;
+    const n = @min(bytes.len, buf.len - held);
+    @memcpy(buf[0..held], key_hold[0..held]);
+    @memcpy(buf[held..][0..n], bytes[0..n]);
+    return buf[0 .. held + n];
+}
+
 /// Split a stdin chunk into scroll deltas vs steer/stop. Returns true when a
 /// stop key was present.
 fn routeTurnKeys(bytes: []const u8, page_rows: u16) bool {
+    var join_buf: [cancel_drain_bytes + 64]u8 = undefined;
+    const src = joinHeld(bytes, &join_buf);
     var stop = false;
     var i: usize = 0;
-    while (i < bytes.len) {
-        if (takeScrollSeq(bytes[i..], page_rows)) |s| {
+    while (i < src.len) {
+        if (takeScrollSeq(src[i..], page_rows)) |s| {
             noteScroll(s.delta);
             i += s.n;
             continue;
         }
         // Slash picker: Up/Down move the highlight while typing `/…`.
-        if (bytes.len >= i + 3 and bytes[i] == 0x1b and bytes[i + 1] == '[') {
-            const key = bytes[i + 2];
+        if (src.len >= i + 3 and src[i] == 0x1b and src[i + 1] == '[') {
+            const key = src[i + 2];
             if (key == 'A' or key == 'B') {
                 steerLock();
                 const in_slash = slashTypingLocked();
@@ -639,10 +683,13 @@ fn routeTurnKeys(bytes: []const u8, page_rows: u16) bool {
                 }
             }
         }
-        if (std.mem.startsWith(u8, bytes[i..], "\x1b[<") and sgrMouseEnd(bytes[i..]) == null) break;
+        if (std.mem.startsWith(u8, src[i..], "\x1b[<") and sgrMouseEnd(src[i..]) == null) {
+            stashKeys(src[i..]);
+            break;
+        }
         // Next mouse/page CSI, or the end of the buffer.
-        const next = findScrollAt(bytes, i + 1) orelse bytes.len;
-        const chunk = bytes[i..next];
+        const next = findScrollAt(src, i + 1) orelse src.len;
+        const chunk = src[i..next];
         if (chunk.len != 0) {
             if (wantsStop(chunk)) stop = true else steerPush(chunk);
         }
@@ -753,12 +800,16 @@ pub const Watch = struct {
             log.warn("cancel watch: {s}", .{@errorName(err)});
             break :blk null;
         };
+        if (self.thread != null) _ = watchers.fetchAdd(1, .acq_rel);
     }
 
     pub fn finish(self: *Watch) void {
         self.stop.store(true, .release);
-        if (self.thread) |t| t.join();
-        self.thread = null;
+        if (self.thread) |t| {
+            t.join();
+            self.thread = null;
+            _ = watchers.fetchSub(1, .acq_rel);
+        }
         self.leaveKeyMode();
         disarmAbort();
     }
@@ -1110,6 +1161,21 @@ test "a mouse report never becomes a queued message" {
     // All three payload bytes belong to the report, space included.
     pushSteerForTest("\xc8\xe0 y");
     try std.testing.expectEqualStrings("xy", peekSteer().typing);
+    dropSteer();
+}
+
+test "a split SGR mouse report never becomes a queued message" {
+    dropSteer();
+    // `\x1b[<` in one read, coordinates in the next: dropping the prefix
+    // used to steer `64;10;5M` as if it had been typed.
+    try std.testing.expect(!routeTurnKeys("ok\x1b[<", 20));
+    try std.testing.expect(!routeTurnKeys("64;10;5Mfine", 20));
+    try std.testing.expectEqualStrings("okfine", peekSteer().typing);
+    dropSteer();
+
+    try std.testing.expect(!routeTurnKeys("\x1b[<0;12", 20));
+    try std.testing.expect(!routeTurnKeys(";5m", 20));
+    try std.testing.expectEqual(@as(usize, 0), peekSteer().typing.len);
     dropSteer();
 }
 

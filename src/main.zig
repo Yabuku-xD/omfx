@@ -7,6 +7,7 @@ const log = std.log.scoped(.omfx);
 /// Leave the alt screen before the default panic dump. Otherwise a crash
 /// mid-session looks like a silent exit — the primary screen never saw the UI.
 fn panicRestore(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    omfx.tty.halt();
     omfx.tty.restore();
     std.debug.defaultPanic(msg, first_trace_addr);
 }

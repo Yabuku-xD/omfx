@@ -16,9 +16,19 @@ const Saved = struct {
 
 var saved: Saved = .{};
 var resized: std.atomic.Value(bool) = .init(false);
+/// Painters check this so a panic dump is not overwritten by the spinner.
+var halted: std.atomic.Value(bool) = .init(false);
 
 pub fn takeResize() bool {
     return resized.swap(false, .seq_cst);
+}
+
+pub fn halt() void {
+    halted.store(true, .release);
+}
+
+pub fn isHalted() bool {
+    return halted.load(.acquire);
 }
 
 /// Input queue only. Linux TCIFLUSH=0, Darwin TCIFLUSH=1.
@@ -189,6 +199,13 @@ test "restore seq leaves alt screen and pops kitty keyboard" {
     try std.testing.expect(std.mem.indexOf(u8, restore_seq, "1049l") != null);
     try std.testing.expect(std.mem.indexOf(u8, restore_seq, "\x1b[<u") != null);
     try std.testing.expect(std.mem.indexOf(u8, restore_seq, "1000l") != null);
+}
+
+test "halt stops painters without restoring" {
+    try std.testing.expect(!isHalted());
+    halt();
+    defer halted.store(false, .release);
+    try std.testing.expect(isHalted());
 }
 
 test "the caret is a blinking bar, and the shape is handed back on exit" {

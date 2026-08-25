@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 const tui = @import("tui.zig");
+const tty_mod = @import("tty.zig");
 const activity = @import("activity.zig");
 const Tool = @import("../core/tool.zig");
 const chat = @import("chat.zig");
@@ -325,6 +326,7 @@ pub const Live = union(enum) {
     fn paintTty(self: *Tty, extra: Extra) void {
         // A stopping spinner must not paint a generating frame over idle.
         if (self.spin_thread != null and self.spin_stop.load(.acquire)) return;
+        if (tty_mod.isHalted()) return;
         lockPaint(self);
         defer unlockPaint(self);
         const now = wallMs();
@@ -368,7 +370,8 @@ pub const Live = union(enum) {
         // as their own row rather than inside the composer: the composer is
         // where the next prompt is written, and a queued message is a message
         // already committed to this turn.
-        const q = sink.peekSteer();
+        var typing_buf: [sink.max_steer]u8 = undefined;
+        const q = sink.peekSteerCopy(&typing_buf);
         var rows: [sink.max_queued][]const u8 = undefined;
         var row_bufs: [sink.max_queued][96]u8 = undefined;
         for (q.slice(), 0..) |msg, i| {
@@ -395,9 +398,8 @@ pub const Live = union(enum) {
         sink.setSlashPalette(sel, slash_n);
         if (sink.takeSlashTab() and slash_n != 0) {
             sink.completeSlashName(slash_buf[sel].name);
-            const q2 = sink.peekSteer();
-            footer.queued = q2.typing;
-            footer.caret = q2.typing.len;
+            footer.queued = sink.peekSteerCopy(&typing_buf).typing;
+            footer.caret = footer.queued.len;
             footer.slash = &.{};
         }
 
