@@ -172,6 +172,8 @@ pub const Footer = struct {
     /// Open todos painted as sticky chrome above the composer (Claude Ctrl+T
     /// pattern). Not part of the scrolling transcript.
     tasks: []const []const u8 = &.{},
+    /// Live context breakdown while generating (click the header bar).
+    peek: []const []const u8 = &.{},
 
     fn hintLine(self: Footer, buf: []u8, cols: u16) []const u8 {
         return switch (self.hint) {
@@ -1414,6 +1416,12 @@ pub fn writeChrome(
             try stdout.writeAll("\x1b[K");
             r +|= 1;
         }
+        for (footer.peek) |line| {
+            try stdout.writeAll(try moveTo(&cup, r, 1));
+            try stdout.writeAll(line);
+            try stdout.writeAll("\x1b[K");
+            r +|= 1;
+        }
         if (footer.jump) {
             const pill = try formatJumpPill(allocator, layout.cols);
             defer allocator.free(pill);
@@ -1530,6 +1538,21 @@ pub fn jumpHitBox(layout: Layout) ?JumpHit {
 
 pub fn jumpHit(layout: Layout, term_row: u16, term_col: u16) bool {
     const box = jumpHitBox(layout) orelse return false;
+    return term_row == box.row and term_col >= box.col0 and term_col <= box.col1;
+}
+
+/// Rightmost header cells that open the context panel (matches idle click).
+pub fn contextHitBox(layout: Layout) ?JumpHit {
+    if (layout.header_rows == 0 or layout.cols < 16) return null;
+    return .{
+        .row = 1,
+        .col0 = layout.cols - 15,
+        .col1 = layout.cols,
+    };
+}
+
+pub fn contextHit(layout: Layout, term_row: u16, term_col: u16) bool {
+    const box = contextHitBox(layout) orelse return false;
     return term_row == box.row and term_col >= box.col0 and term_col <= box.col1;
 }
 
@@ -1780,9 +1803,9 @@ pub fn plainCells(out: *std.ArrayList(u8), allocator: std.mem.Allocator, row: []
     }
 }
 
-/// Rows reserved above the footer for sticky chrome (tasks, jump, toast).
+/// Rows reserved above the footer for sticky chrome (tasks, peek, jump, toast).
 pub fn chromeOverlay(footer: Footer) u16 {
-    var n: u16 = @intCast(@min(footer.tasks.len, std.math.maxInt(u16)));
+    var n: u16 = @intCast(@min(footer.tasks.len + footer.peek.len, std.math.maxInt(u16)));
     if (footer.jump) n +|= 1 else if (footer.toast.len != 0) n +|= 1;
     return n;
 }

@@ -32,6 +32,7 @@ pub const text =
     \\activity: few words on every tool call; it is the status line and the tab title while the call runs.
     \\The harness parses AGENTS.md from managed/user/project/local layers into behavior: Verify runs after writes; Never blocks; path-scoped rules attach on touch. Hard deny is settings.json, not AGENTS.md prose.
     \\Read a file before editing it. Do not invent paths. Prefer the smallest change.
+    \\list for folders; read for files. Never read "." or a directory path — use list (or glob/grep under it).
     \\read shows `   12\tcode`: the number and tab are a gutter, not file text. Never put them in old_string. grep reports path:line: so read offset= lands on the hit.
     \\Prefer patch for existing files. write is for new files only.
     \\edit: unique old_string/new_string, or symbol+action (before|after|inside|replace|delete).

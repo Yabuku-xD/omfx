@@ -347,7 +347,7 @@ pub fn advertisedBytes(endpoint: types.Endpoint) usize {
 }
 
 const tool_defs = [_]ToolDef{
-    .{ .name = "read", .description = "Read a workspace file as numbered lines. `offset` (1-based line) and `limit` page through a long file; the numbers are a display gutter, never part of edit strings", .parameters = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"}},\"required\":[\"path\"]}" },
+    .{ .name = "read", .description = "Read a workspace file as numbered lines (regular files only — directories need list). `offset` (1-based line) and `limit` page through a long file; the numbers are a display gutter, never part of edit strings", .parameters = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"}},\"required\":[\"path\"]}" },
     .{ .name = "write", .description = "Create a new workspace file. Prefer patch for existing files", .parameters = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"contents\":{\"type\":\"string\"}},\"required\":[\"path\",\"contents\"]}" },
     .{ .name = "edit", .description = "Edit one file. Either one unique old_string/new_string, or `edits`: an array of {old_string,new_string} applied in order, all-or-nothing, each seeing the previous result. Or splice a named symbol (action before|after|inside|replace|delete) without breaking braces", .parameters = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"old_string\":{\"type\":\"string\"},\"new_string\":{\"type\":\"string\"},\"edits\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"old_string\":{\"type\":\"string\"},\"new_string\":{\"type\":\"string\"}},\"required\":[\"old_string\",\"new_string\"]}},\"symbol\":{\"type\":\"string\"},\"action\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}},\"required\":[\"path\"]}" },
     .{ .name = "bash", .description = "Run a shell command in the workspace. `timeout` is seconds to wait (default 120, max 600) -- raise it for a slow build rather than letting it be cut off. `background: true` starts it detached and returns at once; dev servers and watchers do that by default. A detached command streams to .omfx/jobs/<id>.log and is polled with the job tool", .parameters = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\"},\"background\":{\"type\":\"boolean\"}},\"required\":[\"command\"]}" },
@@ -355,7 +355,7 @@ const tool_defs = [_]ToolDef{
     .{ .name = "read_result", .description = "Re-read a retained tool result without re-running it. `id` is `rN` from a cite, or `job:N` for a background log", .parameters = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}" },
     .{ .name = "glob", .description = "Find workspace files by glob, recursively. `*` and `?` stay inside one path segment, `**` spans them; a pattern with no `/` matches the basename. `path` roots the search", .parameters = "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}}}" },
     .{ .name = "grep", .description = "Search file contents for a literal string, recursively. Returns path:line: text. `glob` filters filenames, `path` roots the search", .parameters = "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},\"glob\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":[\"pattern\"]}" },
-    .{ .name = "list", .description = "List one directory level", .parameters = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}" },
+    .{ .name = "list", .description = "List one directory level (default path is `.`). Use list for folders; use read for file contents", .parameters = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}" },
     .{ .name = "copy", .description = "Copy a file", .parameters = "{\"type\":\"object\",\"properties\":{\"from\":{\"type\":\"string\"},\"to\":{\"type\":\"string\"}},\"required\":[\"from\",\"to\"]}" },
     .{ .name = "mkdir", .description = "Create a directory", .parameters = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}" },
     .{ .name = "delete", .description = "Delete a file or empty directory", .parameters = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}" },
@@ -641,6 +641,9 @@ const HostWriter = struct {
     /// Running token totals for this request.
     usage: sse.Usage = .{},
     writer: std.Io.Writer,
+    /// Scratch for `std.http.Client.fetch` streaming. An empty buffer panics in
+    /// Zig 0.16 `writableSliceGreedy` / `defaultRebase` (zig#25021 class).
+    scratch: [16 * 1024]u8 = undefined,
     allocator: std.mem.Allocator,
     body: std.ArrayList(u8),
     line: std.ArrayList(u8),
@@ -653,6 +656,8 @@ const HostWriter = struct {
     overflow: bool = false,
 
     fn init(allocator: std.mem.Allocator, host: types.Stream, proto: types.Protocol) HostWriter {
+        // `writer.buffer` is wired by the caller after the value is in its
+        // final place — pointing at `scratch` before move would dangle.
         return .{
             .writer = .{ .vtable = &vtable, .buffer = &.{} },
             .allocator = allocator,
@@ -665,11 +670,17 @@ const HostWriter = struct {
         };
     }
 
+    fn bindScratch(self: *HostWriter) void {
+        self.writer.buffer = self.scratch[0..];
+        self.writer.end = 0;
+    }
+
     fn reset(self: *HostWriter) void {
         self.body.clearRetainingCapacity();
         self.line.clearRetainingCapacity();
         self.answer.clearRetainingCapacity();
         self.seen = .{};
+        self.writer.end = 0;
     }
 
     fn emitPlain(self: *HostWriter, channel: types.Channel, raw: []const u8) error{WriteFailed}!void {
@@ -718,16 +729,33 @@ const HostWriter = struct {
 
     const vtable: std.Io.Writer.VTable = .{
         .drain = drain,
-        .flush = std.Io.Writer.noopFlush,
+        .flush = flush,
     };
+
+    fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (w.end == 0) return;
+        _ = try drain(w, &.{""}, 1);
+    }
 
     fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
         const self: *HostWriter = @alignCast(@fieldParentPtr("writer", w));
         // Failing the write is what actually tears down the HTTP read. Setting
         // the flag alone just lets the model finish talking to a closed ear.
         if (self.host.cancelled()) return error.WriteFailed;
-        if (data.len == 0) return 0;
         const start = self.body.items.len;
+        // Buffered bytes first — `streamImpl` fills `w.buffer` then rebases
+        // through drain; ignoring them drops SSE chunks (Zig 0.16 Writer contract).
+        if (w.end != 0) {
+            const buffered = w.buffer[0..w.end];
+            self.body.appendSlice(self.allocator, buffered) catch return error.WriteFailed;
+            if (self.body.items.len > max_response_bytes) {
+                self.overflow = true;
+                return error.WriteFailed;
+            }
+            try self.ingest(buffered);
+            w.end = 0;
+        }
+        if (data.len == 0) return self.body.items.len - start;
         const pattern = data[data.len - 1];
         for (data) |bytes| {
             self.body.appendSlice(self.allocator, bytes) catch return error.WriteFailed;
@@ -809,6 +837,7 @@ pub fn postChatFiltered(
 
     var tee = HostWriter.init(allocator, flags.host, proto);
     defer tee.deinit();
+    tee.bindScratch();
 
     var extra = Extra{};
     extra.add("Accept", "application/json");
@@ -817,6 +846,9 @@ pub fn postChatFiltered(
     var headers: std.http.Client.Request.Headers = .{
         .content_type = .{ .override = "application/json" },
         .authorization = .{ .override = bearer },
+        // Zig 0.16 flate → empty/fixed writers can panic on rebase (zig#25021).
+        // SSE never needs gzip; force identity.
+        .accept_encoding = .{ .override = "identity" },
     };
 
     if (proto == .anthropic and !oat) {
@@ -867,6 +899,9 @@ pub fn postChatFiltered(
                 return .{ .status = 0, .outcome = .{ .text = msg } };
             },
         };
+        // Fetch may leave the last SSE bytes in the writer buffer without a
+        // final drain — flush so HostWriter.ingest sees them.
+        tee.writer.flush() catch {};
         const try_status: u16 = @intFromEnum(result.status);
         if (!shouldRetry(try_status, attempt)) break;
         attempt += 1;

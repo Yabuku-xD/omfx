@@ -27,6 +27,25 @@ pub fn read(
     return open_dir.readFileAlloc(io, rel, allocator, .limited(max_read_bytes));
 }
 
+/// Soft recovery when `read` is aimed at a directory: teach `list` and return
+/// one level so the model does not thrash on opaque `NotAFile` (industry: Kilo
+/// read→list, Claude EISDIR). FIFOs/sockets stay hard errors via `read`.
+pub fn readDirHint(
+    dir: Io.Dir,
+    io: Io,
+    allocator: std.mem.Allocator,
+    workspace: []const u8,
+    rel: []const u8,
+) ![]u8 {
+    const listing = try list(dir, io, allocator, workspace, rel);
+    defer allocator.free(listing);
+    return std.fmt.allocPrint(
+        allocator,
+        "{s} is a folder, not a file. Use list for directories (or glob/grep under them). Listing:\n{s}",
+        .{ rel, listing },
+    );
+}
+
 /// What the `read` tool shows the model: numbered lines, pageable. `offset` is
 /// 1-based, `limit` counts lines; 0 means "from the top" / "to the cap".
 /// Numbering lets a `grep` hit at `file:12:` be read without counting.
@@ -280,6 +299,20 @@ test "list on a file explains to use read" {
     defer std.testing.allocator.free(msg);
     try std.testing.expect(std.mem.indexOf(u8, msg, "is a file") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg, "read") != null);
+}
+
+test "read on a directory explains to use list" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try mkdir(tmp.dir, io, "ws", "sub");
+    try write(tmp.dir, io, std.testing.allocator, "ws", "sub/a.txt", "x");
+    try std.testing.expectError(error.NotAFile, read(tmp.dir, io, std.testing.allocator, "ws", "sub"));
+    const msg = try readDirHint(tmp.dir, io, std.testing.allocator, "ws", "sub");
+    defer std.testing.allocator.free(msg);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "is a folder") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "list") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "a.txt") != null);
 }
 
 test "write creates missing parent directories" {

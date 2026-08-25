@@ -93,7 +93,13 @@ pub fn run(
             const path = args.str("path") orelse return error.MissingPath;
             const offset = args.usize_("offset") orelse 0;
             const limit = args.usize_("limit") orelse 0;
-            const raw = try fs.read(dir, io, allocator, workspace, path);
+            // Models often `read` a directory (`.` / `src`). Opaque NotAFile
+            // makes them retry the same call; mirror list→file with a soft hint
+            // and a one-level listing so the turn can advance (Kilo/Claude EISDIR).
+            const raw = fs.read(dir, io, allocator, workspace, path) catch |err| switch (err) {
+                error.NotAFile => break :blk try fs.readDirHint(dir, io, allocator, workspace, path),
+                else => return err,
+            };
             defer allocator.free(raw);
             const body = try fs.numberLines(allocator, path, raw, offset, limit);
             errdefer allocator.free(body);
@@ -373,6 +379,20 @@ test "dispatch read" {
     const out = try run(tmp.dir, io, std.testing.allocator, "ws", "read", "{\"path\":\"a.txt\"}", "");
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings("     1\thello\n", out);
+}
+
+test "dispatch read on a directory soft-hints list" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try fs.mkdir(tmp.dir, io, "ws", "docs");
+    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "docs/a.txt", "x");
+    const out = try run(tmp.dir, io, std.testing.allocator, "ws", "read", "{\"path\":\"docs\"}", "");
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "is a folder") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "list") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "a.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "NotAFile") == null);
 }
 
 test "read_result redacts secret-shaped recall bodies" {

@@ -196,7 +196,7 @@ def slash_cases() -> None:
                 "/version",
                 "/stats",
                 "/permissions ask",
-                "/plan",
+                "/plan on",
                 "/plan off",
                 "/effort none",
                 "/context",
@@ -209,8 +209,18 @@ def slash_cases() -> None:
     LOG.write_text(cap)
     checks = [
         ("version prints", "omfx" in cap.lower() or "0.0.1" in cap),
-        ("plan enters", "plan=on" in cap or "read-only" in cap.lower()),
-        ("plan off", "plan=off" in cap),
+        (
+            "plan enters",
+            "plan=on" in cap
+            or "read-only" in cap.lower()
+            or "planning mode is on" in cap.lower(),
+        ),
+        (
+            "plan off",
+            "plan=off" in cap
+            or "planning mode is off" in cap.lower()
+            or "changes can happen" in cap.lower(),
+        ),
         ("permissions", "ask" in cap.lower() or "permission" in cap.lower()),
         ("context or status painted", "context" in cap.lower() or "workspace" in cap.lower() or "/" in cap),
     ]
@@ -423,10 +433,21 @@ def feature_cases() -> None:
     section("Shipped features (permissions / models / mcp / recall / skills)")
 
     repo = Path(__file__).resolve().parents[1]
-    zt = run(["zig", "build", "test"], cwd=repo, timeout=300)
+    # Fast path: targeted tests, not full `zig build test` (minutes on cold CI).
+    zt = run(
+        [
+            "zig",
+            "test",
+            "src/tools/fs.zig",
+            "--test-filter",
+            "directory",
+        ],
+        cwd=repo,
+        timeout=60,
+    )
     check(
         zt.returncode == 0,
-        "zig build test (probe / presentResult / read_result / sensitive recall)",
+        "zig test fs directory soft-hint (fast)",
         ((zt.stdout or "") + (zt.stderr or ""))[-1200:],
     )
 

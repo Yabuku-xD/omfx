@@ -212,7 +212,22 @@ fn steerPush(bytes: []const u8) void {
             continue;
         }
         if (c == '\r' or c == '\n') {
+            // Bare `/cmd` mid-turn: defer as a slash command, do not queue as
+            // a user message (Claude keeps slash UX live while generating).
+            if (slashTypingLocked() and steer_len > 1) {
+                setPendingCmdLocked(steer_buf[0..steer_len]);
+                steer_len = 0;
+                continue;
+            }
             commitLine();
+            continue;
+        }
+        if (c == 0x09) {
+            // Tab: live paint path completes via slash_sel; mark request.
+            if (slashTypingLocked()) {
+                // Selection stays; live.paintTty applies completeSlashName.
+                slash_tab.store(true, .release);
+            }
             continue;
         }
         if (c == 0x7f or c == 0x08) {
@@ -352,6 +367,9 @@ pub fn dropSteer() void {
     x10_left = 0;
     utf8_need = 0;
     utf8_start = 0;
+    ctx_peek.store(false, .release);
+    pending_cmd_len.store(0, .release);
+    slash_tab.store(false, .release);
 }
 
 /// True if the user asked to stop: ctrl-c, a bare Esc, or kitty CSI-u Esc (27).
@@ -389,6 +407,22 @@ var jump_col0: std.atomic.Value(u32) = .init(0);
 var jump_col1: std.atomic.Value(u32) = .init(0);
 var jump_pending: std.atomic.Value(bool) = .init(false);
 
+/// Header context meter hit box (1-based cells) while a turn owns stdin.
+var ctx_active: std.atomic.Value(bool) = .init(false);
+var ctx_row: std.atomic.Value(u32) = .init(0);
+var ctx_col0: std.atomic.Value(u32) = .init(0);
+var ctx_col1: std.atomic.Value(u32) = .init(0);
+var ctx_peek: std.atomic.Value(bool) = .init(false);
+
+/// Slash palette selection while typing `/…` mid-turn.
+var slash_sel: std.atomic.Value(u32) = .init(0);
+var slash_count: std.atomic.Value(u32) = .init(0);
+var slash_tab: std.atomic.Value(bool) = .init(false);
+
+/// Deferred slash command to run when the turn ends (e.g. `/settings`).
+var pending_cmd: [64]u8 = undefined;
+var pending_cmd_len: std.atomic.Value(u32) = .init(0);
+
 pub fn setJumpHit(active: bool, row: u16, col0: u16, col1: u16) void {
     jump_active.store(active, .release);
     jump_row.store(row, .release);
@@ -401,12 +435,96 @@ pub fn takeJumpToBottom() bool {
     return jump_pending.swap(false, .acq_rel);
 }
 
+pub fn setContextHit(active: bool, row: u16, col0: u16, col1: u16) void {
+    ctx_active.store(active, .release);
+    ctx_row.store(row, .release);
+    ctx_col0.store(col0, .release);
+    ctx_col1.store(col1, .release);
+}
+
+pub fn contextPeekOn() bool {
+    return ctx_peek.load(.acquire);
+}
+
+pub fn setSlashPalette(sel: usize, count: usize) void {
+    slash_sel.store(@intCast(@min(sel, std.math.maxInt(u32))), .release);
+    slash_count.store(@intCast(@min(count, std.math.maxInt(u32))), .release);
+}
+
+pub fn slashSel() usize {
+    return slash_sel.load(.acquire);
+}
+
+pub fn takeSlashTab() bool {
+    return slash_tab.swap(false, .acq_rel);
+}
+
 fn noteJumpIfHit(row: u16, col: u16) void {
     if (!jump_active.load(.acquire)) return;
     if (row != @as(u16, @truncate(jump_row.load(.acquire)))) return;
     const c0: u16 = @truncate(jump_col0.load(.acquire));
     const c1: u16 = @truncate(jump_col1.load(.acquire));
     if (col >= c0 and col <= c1) jump_pending.store(true, .release);
+}
+
+fn noteContextIfHit(row: u16, col: u16) void {
+    if (!ctx_active.load(.acquire)) return;
+    if (row != @as(u16, @truncate(ctx_row.load(.acquire)))) return;
+    const c0: u16 = @truncate(ctx_col0.load(.acquire));
+    const c1: u16 = @truncate(ctx_col1.load(.acquire));
+    if (col >= c0 and col <= c1) {
+        const on = ctx_peek.load(.acquire);
+        ctx_peek.store(!on, .release);
+    }
+}
+
+/// Copy a deferred slash command out and clear it.
+pub fn takePendingCmd(out: []u8) []const u8 {
+    steerLock();
+    defer steerUnlock();
+    const n: usize = pending_cmd_len.swap(0, .acq_rel);
+    if (n == 0) return "";
+    const take = @min(n, out.len);
+    @memcpy(out[0..take], pending_cmd[0..take]);
+    return out[0..take];
+}
+
+fn setPendingCmdLocked(cmd: []const u8) void {
+    const n = @min(cmd.len, pending_cmd.len);
+    @memcpy(pending_cmd[0..n], cmd[0..n]);
+    pending_cmd_len.store(@intCast(n), .release);
+}
+
+fn slashTypingLocked() bool {
+    if (steer_len == 0 or steer_buf[0] != '/') return false;
+    return std.mem.indexOfScalar(u8, steer_buf[0..steer_len], ' ') == null;
+}
+
+fn replaceSteerLocked(text: []const u8) void {
+    const n = @min(text.len, steer_buf.len);
+    @memcpy(steer_buf[0..n], text[0..n]);
+    steer_len = n;
+    utf8_need = 0;
+}
+
+/// Complete the highlighted slash into the steer buffer. `name` includes `/`.
+pub fn completeSlashName(name: []const u8) void {
+    steerLock();
+    defer steerUnlock();
+    if (!slashTypingLocked()) return;
+    var buf: [max_steer]u8 = undefined;
+    const filled = std.fmt.bufPrint(&buf, "{s} ", .{name}) catch return;
+    replaceSteerLocked(filled);
+}
+
+fn bumpSlashSel(delta: i32) void {
+    const count = slash_count.load(.acquire);
+    if (count == 0) return;
+    var sel: i64 = @intCast(slash_sel.load(.acquire));
+    sel += delta;
+    if (sel < 0) sel = @intCast(count - 1);
+    if (sel >= count) sel = 0;
+    slash_sel.store(@intCast(sel), .release);
 }
 
 fn wantsModeCycle(bytes: []const u8) bool {
@@ -451,13 +569,17 @@ fn takeScrollSeq(bytes: []const u8, page_rows: u16) ?struct { n: usize, delta: i
         if ((btn & 3) == 2 or (btn & 3) == 3) return .{ .n = end, .delta = 0 };
         return .{ .n = end, .delta = if ((btn & 1) == 0) wheel_step else -wheel_step };
     }
-    // Left release on the jump pill re-pins to the live tail.
+    // Left release on the jump pill re-pins to the live tail; header context
+    // toggles the live peek overlay.
     if ((btn & 3) == 0 and (btn & 32) == 0 and bytes[end - 1] == 'm') {
         const rest = params[semi + 1 ..];
         if (std.mem.indexOfScalar(u8, rest, ';')) |semi2| {
             const col = std.fmt.parseInt(u16, rest[0..semi2], 10) catch 0;
             const row = std.fmt.parseInt(u16, rest[semi2 + 1 ..], 10) catch 0;
-            if (row != 0 and col != 0) noteJumpIfHit(row, col);
+            if (row != 0 and col != 0) {
+                noteJumpIfHit(row, col);
+                noteContextIfHit(row, col);
+            }
         }
     }
     // Clicks / drags must not become steer text.
@@ -502,6 +624,20 @@ fn routeTurnKeys(bytes: []const u8, page_rows: u16) bool {
             noteScroll(s.delta);
             i += s.n;
             continue;
+        }
+        // Slash picker: Up/Down move the highlight while typing `/…`.
+        if (bytes.len >= i + 3 and bytes[i] == 0x1b and bytes[i + 1] == '[') {
+            const key = bytes[i + 2];
+            if (key == 'A' or key == 'B') {
+                steerLock();
+                const in_slash = slashTypingLocked();
+                steerUnlock();
+                if (in_slash) {
+                    bumpSlashSel(if (key == 'A') -1 else 1);
+                    i += 3;
+                    continue;
+                }
+            }
         }
         if (std.mem.startsWith(u8, bytes[i..], "\x1b[<") and sgrMouseEnd(bytes[i..]) == null) break;
         // Next mouse/page CSI, or the end of the buffer.

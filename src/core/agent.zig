@@ -483,6 +483,7 @@ fn chatTurn(
     var same: usize = 0;
     var malformed: usize = 0;
     var orient_streak: usize = 0;
+    var tool_rounds: usize = 0;
     while (true) {
         // A tool boundary is the other place a turn can pause; the SSE reader
         // covers the streaming half.
@@ -494,12 +495,19 @@ fn chatTurn(
         }
         const call = switch (last.outcome) {
             .text => |body| {
-                const out = try ensureNl(allocator, body);
+                // Tool rounds can end with empty prose; that used to paint as a
+                // silent finish after a wall of tool cards.
+                const raw = if (body.len == 0 and tool_rounds != 0)
+                    "Turn finished after tools with no further reply. Say if you want the next step.\n"
+                else
+                    body;
+                const out = try ensureNl(allocator, raw);
                 last.deinit(allocator);
                 return out;
             },
             .tool => |t| t,
         };
+        tool_rounds += 1;
         // A tool the harness does not have can only be echoed back as an error,
         // so a model inventing names trades turns without doing any work. The
         // doom-loop counter misses it: each invented name differs from the last.
@@ -1214,6 +1222,14 @@ fn presentResult(
     const secret = hooks.hasSecret(archive_src);
     if (follow_raw.len <= compact.result_budget and !secret) return trimmed;
     defer allocator.free(trimmed);
+    // Explore dumps (list/bash/…) rarely need cite-back and were filling
+    // workspace `.omfx/recall/` on every long "walk the repo" turn. Cap in
+    // memory instead; file/read archives and secret placeholders still land
+    // on disk. Industry: keep project trees free of agent scratch (Claude
+    // sessions live under ~/.claude, not the repo).
+    if (!secret and exploreSkipRecall(tool_name)) {
+        return compact.capResult(allocator, trimmed);
+    }
     const target: recall.Target = if (path) |p| .{ .path = p } else .none;
     const body = if (secret) archive_src else follow_raw;
     const id = recall.put(dir, io, tool_name, target, body) catch {
@@ -1229,6 +1245,14 @@ fn presentResult(
     const joined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ stub, trimmed });
     defer allocator.free(joined);
     return compact.capResult(allocator, joined);
+}
+
+fn exploreSkipRecall(tool_name: []const u8) bool {
+    const n = Tool.Name.fromSlice(tool_name) orelse return false;
+    return switch (n) {
+        .list, .glob, .grep, .semantic_search, .file_info, .bash, .job, .web_search, .web_fetch, .web_scrape => true,
+        else => false,
+    };
 }
 
 test "presentResult archives secret-shaped bodies as placeholder" {
