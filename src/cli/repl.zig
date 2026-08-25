@@ -1753,7 +1753,8 @@ pub fn run(
             state.appendExtra(try arena.dupe(u8, d)) catch break;
         }
     }
-    pathing.setAccess(.{ .workspace = workspace, .extra = state.extraSlice() });
+    const skill_roots = skills.readAccessRoots(arena, io, home, workspace) catch &.{};
+    pathing.setAccess(.{ .workspace = workspace, .extra = state.extraSlice(), .read_extra = skill_roots });
     sess.skill_specs = skillSpecs(&sess);
     var raw = tty.Raw.enter();
     defer raw.leave();

@@ -2,7 +2,10 @@ const std = @import("std");
 
 pub const Access = struct {
     workspace: []const u8,
+    /// Full read/write roots (e.g. `/workspace add`).
     extra: []const []const u8 = &.{},
+    /// Read-only roots (home skill dirs). Writes still need workspace/extra.
+    read_extra: []const []const u8 = &.{},
 
     pub fn allows(self: Access, requested: []const u8) error{PathEscape}!void {
         if (requested.len == 0) return error.PathEscape;
@@ -25,6 +28,16 @@ pub const Access = struct {
             }
         }
     }
+
+    /// Workspace / extra writes, plus skill roots for following `/skill`.
+    pub fn allowsRead(self: Access, requested: []const u8) error{PathEscape}!void {
+        if (self.allows(requested)) |_| return else |_| {}
+        if (requested.len == 0 or !std.fs.path.isAbsolute(requested)) return error.PathEscape;
+        for (self.read_extra) |root| {
+            if (isPrefix(root, requested)) return;
+        }
+        return error.PathEscape;
+    }
 };
 
 var access: Access = .{ .workspace = "" };
@@ -37,8 +50,16 @@ pub fn extra() []const []const u8 {
     return access.extra;
 }
 
+pub fn readExtra() []const []const u8 {
+    return access.read_extra;
+}
+
 pub fn assertInside(workspace: []const u8, requested: []const u8) error{PathEscape}!void {
-    return (Access{ .workspace = workspace, .extra = access.extra }).allows(requested);
+    return (Access{ .workspace = workspace, .extra = access.extra, .read_extra = access.read_extra }).allows(requested);
+}
+
+pub fn assertReadable(workspace: []const u8, requested: []const u8) error{PathEscape}!void {
+    return (Access{ .workspace = workspace, .extra = access.extra, .read_extra = access.read_extra }).allowsRead(requested);
 }
 
 fn isPrefix(root: []const u8, path: []const u8) bool {
@@ -120,6 +141,20 @@ test "extra roots allow an absolute path" {
     defer setAccess(.{ .workspace = "" });
     try assertInside("/tmp/ws", "/tmp/other/a.txt");
     try std.testing.expectError(error.PathEscape, assertInside("/tmp/ws", "/tmp/secret/a.txt"));
+}
+
+test "read_extra allows skill path without write" {
+    setAccess(.{
+        .workspace = "/tmp/ws",
+        .read_extra = &.{"/home/u/.agents/skills"},
+    });
+    defer setAccess(.{ .workspace = "" });
+    try assertReadable("/tmp/ws", "/home/u/.agents/skills/deslop/SKILL.md");
+    try std.testing.expectError(
+        error.PathEscape,
+        assertInside("/tmp/ws", "/home/u/.agents/skills/deslop/SKILL.md"),
+    );
+    try std.testing.expectError(error.PathEscape, assertReadable("/tmp/ws", "/home/u/.ssh/id"));
 }
 
 test "env files are secret except examples" {

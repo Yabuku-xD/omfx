@@ -168,10 +168,14 @@ pub fn main(init: std.process.Init) !void {
                     .fix = "omfx ask \"what does src/main.zig do?\"",
                 });
             }
-            if (try omfx.skills.expand(arena, io, home, workspace, prompt_text)) |expanded| {
+            const skills_expanded = try omfx.skills.expand(arena, io, home, workspace, prompt_text);
+            if (skills_expanded) |expanded| {
                 prompt_text = expanded;
             }
             prompt_text = try omfx.mention.expand(arena, Io.Dir.cwd(), io, workspace, prompt_text);
+            const skill_roots = try omfx.skills.readAccessRoots(arena, io, home, workspace);
+            omfx.tools.pathing.setAccess(.{ .workspace = workspace, .read_extra = skill_roots });
+            defer omfx.tools.pathing.setAccess(.{ .workspace = "" });
             const stdin_tty = Io.File.stdin().isTty(io) catch false;
             const can_prompt = parsed.prompt_permissions and stdin_tty;
             var cfg = omfx.settings.load(gpa, io, home);
@@ -194,6 +198,11 @@ pub fn main(init: std.process.Init) !void {
                     endpoint.model,
                 }) catch "session";
                 omfx.live.emitJson(stdout, "session", sess_line);
+                // So harnesses can assert expansion without depending on think
+                // tokens (cheap models often skip reasoning).
+                if (skills_expanded) |expanded| {
+                    omfx.live.emitJson(stdout, "skills", expanded);
+                }
             }
             const peer_depth = cfg.max_peer_depth;
             const reply = omfx.agent.chatOnce(
@@ -224,7 +233,8 @@ pub fn main(init: std.process.Init) !void {
             defer gpa.free(reply);
             live.closeThink();
             if (!parsed.json) {
-                try stdout.writeAll(reply);
+                // `.stream` already painted tokens via host.on_text; reprinting
+                // the full reply doubled every ask ("The" + "The" → "TheThe").
                 if (reply.len == 0 or reply[reply.len - 1] != '\n') try stdout.writeAll("\n");
             } else {
                 omfx.live.emitJson(stdout, "result", reply);

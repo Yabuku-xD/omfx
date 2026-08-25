@@ -213,6 +213,44 @@ pub fn listAllNames(
     return names.toOwnedSlice(allocator);
 }
 
+/// Skill directories the model may read when following `/skill` expansions.
+///
+/// Home skills live outside the workspace; without these roots `read` PathEscapes
+/// the absolute SKILL.md path expand injects.
+pub fn readAccessRoots(
+    allocator: std.mem.Allocator,
+    io: Io,
+    home: []const u8,
+    workspace: []const u8,
+) ![][]const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (out.items) |p| allocator.free(p);
+        out.deinit(allocator);
+    }
+    for (roots) |root| {
+        if (workspace.len == 0) break;
+        const path = try std.fs.path.join(allocator, &.{ workspace, root });
+        errdefer allocator.free(path);
+        var probe = Io.Dir.cwd().openDir(io, path, .{}) catch {
+            allocator.free(path);
+            continue;
+        };
+        probe.close(io);
+        try out.append(allocator, path);
+    }
+    var found: std.ArrayList([]u8) = .empty;
+    defer {
+        for (found.items) |r| allocator.free(r);
+        found.deinit(allocator);
+    }
+    try eachHomeRoot(allocator, io, home, &found);
+    for (found.items) |path| {
+        try out.append(allocator, try allocator.dupe(u8, path));
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 /// A skill's directory, for the prompt that tells the model to read it.
 pub fn pathOf(allocator: std.mem.Allocator, io: Io, home: []const u8, workspace: []const u8, name: []const u8) ?[]u8 {
     for (roots) |root| {
