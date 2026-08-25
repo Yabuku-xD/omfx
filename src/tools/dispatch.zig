@@ -40,14 +40,10 @@ pub fn run(
     }
     const kind = tool.Name.fromSlice(name) orelse return error.UnknownTool;
     return switch (kind) {
-        .read, .write, .edit, .glob, .grep, .delete, .rename, .list, .copy, .mkdir, .file_info =>
-            fs_dispatch.run(kind, dir, io, allocator, workspace, home, args, args_json),
-        .bash, .job, .read_result =>
-            shell_dispatch.run(kind, dir, io, allocator, workspace, home, args),
-        .web_fetch, .web_scrape, .web_search, .browser =>
-            web_dispatch.run(kind, io, allocator, home, args, args_json),
-        .semantic_search, .open_file, .memory, .ask_user, .peer, .board, .todo, .patch, .mcp, .compact =>
-            misc_dispatch.run(kind, dir, io, allocator, workspace, home, args, args_json),
+        .read, .write, .edit, .glob, .grep, .delete, .rename, .list, .copy, .mkdir, .file_info => fs_dispatch.run(kind, dir, io, allocator, workspace, home, args, args_json),
+        .bash, .job, .read_result => shell_dispatch.run(kind, dir, io, allocator, workspace, home, args),
+        .web_fetch, .web_scrape, .web_search, .browser => web_dispatch.run(kind, io, allocator, home, args, args_json),
+        .semantic_search, .open_file, .memory, .ask_user, .peer, .board, .todo, .patch, .mcp, .compact => misc_dispatch.run(kind, dir, io, allocator, workspace, home, args, args_json),
     };
 }
 

@@ -396,7 +396,7 @@ test "derivedFromToolOutput needs user text" {
 }
 
 test "exactKeyHit matches only that action" {
-    const keys = [_][]const u8{ "bash\n{\"command\":\"git status\"}" };
+    const keys = [_][]const u8{"bash\n{\"command\":\"git status\"}"};
     try std.testing.expect(exactKeyHit(&keys, "bash", "{\"command\":\"git status\"}"));
     try std.testing.expect(!exactKeyHit(&keys, "bash", "{\"command\":\"rm -rf x\"}"));
     try std.testing.expect(!exactKeyHit(&keys, "write", "{\"command\":\"git status\"}"));

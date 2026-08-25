@@ -42,14 +42,14 @@ pub const Depth = enum {
 };
 
 const path_exts = [_][]const u8{
-    ".zig", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".c", ".h",
-    ".cpp", ".hpp", ".md", ".json", ".toml", ".yaml", ".yml", ".swift", ".kt",
+    ".zig", ".ts",  ".tsx", ".js",   ".jsx",  ".py",   ".go",  ".rs",    ".c",  ".h",
+    ".cpp", ".hpp", ".md",  ".json", ".toml", ".yaml", ".yml", ".swift", ".kt",
 };
 
 /// Elevates A→B without forcing C: short coding intents need a pulse, not a 4k map.
 const work_intent = [_][]const u8{
-    "fix", "bug", "error", "fail", "implement", "build", "ship", "break",
-    "crash", "stack", "trace", "commit", "merge", "deploy", "patch",
+    "fix",   "bug",   "error", "fail",   "implement", "build",  "ship",  "break",
+    "crash", "stack", "trace", "commit", "merge",     "deploy", "patch",
 };
 
 pub const Features = struct {

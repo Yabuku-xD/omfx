@@ -136,7 +136,7 @@ pub const State = struct {
     }
 
     /// Session rules may only shrink privilege (ask|deny). Allow must be persistent.
-    pub fn appendSessionRule(self: *State, pattern: []const u8, action: permissions.DslAction) error{Full, Expand}!void {
+    pub fn appendSessionRule(self: *State, pattern: []const u8, action: permissions.DslAction) error{ Full, Expand }!void {
         if (action == .allow) return error.Expand;
         if (self.session_rule_n >= max_session_rules) return error.Full;
         const parsed = permissions.parsePattern(pattern);

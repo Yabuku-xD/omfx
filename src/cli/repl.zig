@@ -199,7 +199,6 @@ pub fn run(
     });
 }
 
-
 /// A Session with no terminal attached, for exercising the state the event loop
 /// mutates. `run` needs a tty; the decisions it makes do not.
 fn testSession(allocator: std.mem.Allocator) Session {

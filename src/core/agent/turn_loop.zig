@@ -270,6 +270,73 @@ pub fn recheckAdmitted(a: RecheckArgs) !?[]u8 {
     return null;
 }
 
+pub const orient_after: usize = 3;
+
+pub const orient_nudge =
+    \\harness: stop re-orienting. Results above already cover the tree. Advance the open todo with one specific next step — do not restate the plan or re-list the repo.
+;
+
+fn asciiLowerEq(hay: []const u8, needle: []const u8) bool {
+    if (needle.len > hay.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= hay.len) : (i += 1) {
+        var ok = true;
+        for (needle, 0..) |nc, j| {
+            const hc = hay[i + j];
+            const a = if (hc >= 'A' and hc <= 'Z') hc + 32 else hc;
+            const b = if (nc >= 'A' and nc <= 'Z') nc + 32 else nc;
+            if (a != b) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) return true;
+    }
+    return false;
+}
+
+fn preambleReorients(text: []const u8) bool {
+    const head = if (text.len > 480) text[0..480] else text;
+    const needles = [_][]const u8{
+        "get oriented",
+        "lay of the land",
+        "getting oriented",
+        "let me start by",
+        "let me first get",
+        "map the codebase",
+        "survey the repo",
+        "go through the whole",
+    };
+    for (needles) |n| {
+        if (asciiLowerEq(head, n)) return true;
+    }
+    return false;
+}
+
+fn bashLooksOrient(args: []const u8) bool {
+    const markers = [_][]const u8{
+        "\"ls\"", " ls", "ls ", "ls\n", "pwd", "find ", "tree", "du ", "git status", "git log",
+    };
+    for (markers) |m| {
+        if (asciiLowerEq(args, m)) return true;
+    }
+    return false;
+}
+
+fn toolLooksOrient(name: []const u8, args: []const u8) bool {
+    const n = Tool.Name.fromSlice(name) orelse return false;
+    return switch (n) {
+        .list, .glob, .semantic_search, .file_info => true,
+        .bash => bashLooksOrient(args),
+        .read, .grep => false,
+        else => false,
+    };
+}
+
+pub fn roundOrients(preamble: []const u8, tool_name: []const u8, tool_args: []const u8) bool {
+    return preambleReorients(preamble) or toolLooksOrient(tool_name, tool_args);
+}
+
 test "finishIfText returns null for tool outcomes" {
     var last = pclient.ChatResult{
         .status = 200,
@@ -333,6 +400,16 @@ test "checkTurnLimit trips at the budget" {
     const out = (try checkTurnLimit(std.testing.allocator, 24, 24)).?;
     defer std.testing.allocator.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "max_tool_turns=24") != null);
+}
+
+test "reorient preamble and list/bash orient tools are detected" {
+    try std.testing.expect(roundOrients("Let me get oriented with the repo first.", "read", "{}"));
+    try std.testing.expect(roundOrients("I'll start by getting oriented.", "read", "{}"));
+    try std.testing.expect(!roundOrients("I'll edit src/main.zig next.", "edit", "{}"));
+    try std.testing.expect(roundOrients("", "list", "{}"));
+    try std.testing.expect(roundOrients("", "bash", "{\"command\":\"ls -la\"}"));
+    try std.testing.expect(!roundOrients("", "edit", "{\"path\":\"x\"}"));
+    try std.testing.expect(!roundOrients("", "read", "{\"path\":\"README.md\"}"));
 }
 
 test "toolDetail unescapes a command tab" {
