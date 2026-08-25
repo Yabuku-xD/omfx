@@ -522,6 +522,7 @@ fn fetchUrl(allocator: std.mem.Allocator, io: Io, url: []const u8, limit: usize)
     const result = client.fetch(.{
         .location = .{ .url = url },
         .method = .GET,
+        .headers = .{ .accept_encoding = .{ .override = "identity" } },
         .extra_headers = &extra,
         .response_writer = &aw.writer,
     }) catch |err| {
@@ -874,7 +875,11 @@ pub fn fetch(
     extra[extra_n] = .{ .name = "Accept", .value = "application/json" };
     extra_n += 1;
 
-    var headers: std.http.Client.Request.Headers = .{ .authorization = .{ .override = bearer } };
+    var headers: std.http.Client.Request.Headers = .{
+        .authorization = .{ .override = bearer },
+        // Avoid Zig 0.16 flate → writer rebase panics (zig#25021 class).
+        .accept_encoding = .{ .override = "identity" },
+    };
     const oat = std.mem.indexOf(u8, api_key, "sk-ant-oat") != null;
     if (vendor == .anthropic) {
         if (!oat) {

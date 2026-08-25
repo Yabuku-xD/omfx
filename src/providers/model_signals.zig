@@ -165,6 +165,7 @@ fn fetchOpenRouter(allocator: std.mem.Allocator, io: Io) []u8 {
     const result = client.fetch(.{
         .location = .{ .url = openrouter_url },
         .method = .GET,
+        .headers = .{ .accept_encoding = .{ .override = "identity" } },
         .extra_headers = &.{.{ .name = "Accept", .value = "application/json" }},
         .response_writer = &aw.writer,
     }) catch |err| {

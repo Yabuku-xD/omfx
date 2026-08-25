@@ -4,6 +4,15 @@ const omfx = @import("omfx");
 
 const log = std.log.scoped(.omfx);
 
+/// Leave the alt screen before the default panic dump. Otherwise a crash
+/// mid-session looks like a silent exit — the primary screen never saw the UI.
+fn panicRestore(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    omfx.tty.restore();
+    std.debug.defaultPanic(msg, first_trace_addr);
+}
+
+pub const panic = std.debug.FullPanic(panicRestore);
+
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const gpa = init.gpa;
@@ -261,8 +270,11 @@ pub fn main(init: std.process.Init) !void {
             try runSession(gpa, arena, io, stdout, stderr, home, parsed.rest);
         },
         .interactive => {
-            const tty = Io.File.stdout().isTty(io) catch false;
-            if (!tty) {
+            // Both sides: stdout-only checks let `omfx </dev/null` paint the
+            // alt screen then quit on EOF with a blank primary screen.
+            const out_tty = Io.File.stdout().isTty(io) catch false;
+            const in_tty = Io.File.stdin().isTty(io) catch false;
+            if (!out_tty or !in_tty) {
                 die(stderr, parsed.json, omfx.cli.exit_usage, .{
                     .code = "NOT_A_TTY",
                     .message = "interactive session needs a terminal",

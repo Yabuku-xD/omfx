@@ -440,12 +440,18 @@ fn dispatchRpc(hub: *Hub, body: []const u8) ![]u8 {
     return hub.allocator.dupe(u8, "{\"ok\":false,\"error\":\"timeout\"}");
 }
 
+/// True when something accepts TCP on the relay port. Used to be a full HTTP
+/// GET to `/json/version`; a process that accepts and never replies hung
+/// forever (`Io.Timeout = .none`) and made interactive start look blank.
 pub fn listening(allocator: std.mem.Allocator, io: Io, port: u16) bool {
-    const url = std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/json/version", .{port}) catch return false;
-    defer allocator.free(url);
-    const body = @import("web.zig").fetch(allocator, io, url) catch return false;
-    defer allocator.free(body);
-    return std.mem.indexOf(u8, body, "fetch failed") == null;
+    _ = allocator;
+    const addr: Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+    // No connect timeout: Zig 0.16 Threaded Io panics on timed connect
+    // ("TODO implement netConnectIpPosix with timeout"). ECONNREFUSED is
+    // fast when the port is closed; a live accept returns immediately.
+    const stream = addr.connect(io, .{ .mode = .stream }) catch return false;
+    stream.close(io);
+    return true;
 }
 
 /// Spawn `omfx browser-relay` if nothing is on the port. No-op inside unit tests.
