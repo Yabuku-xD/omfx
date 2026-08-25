@@ -4,13 +4,30 @@ const tool = @import("tool.zig");
 pub const advertised = tool.Name.slices;
 
 pub const plan_text =
-    \\Plan mode: research only. Do not write, edit, delete, or run mutating commands. git status/diff/log and ls/pwd/cat are allowed. Reply with a numbered plan and wait for /plan go.
+    \\Plan mode overlay (on until /plan go): same postcard tools, but write/edit/patch/mkdir/delete/rename/copy and mutating bash are blocked. bash only for git status|diff|log and ls|pwd|cat.
+    \\Interview until decisions settle. Design tree: each choice opens the next. Work in rounds — the frontier is every open question whose prerequisites are answered; ask the whole frontier, then wait.
+    \\Q1 - <title>: <body; options if useful>
+    \\  recommend: <pick>
+    \\Gather facts with read/grep/glob/list/semantic_search/web_* /board/memory (and peer when allowed). Prefer tools over ask_user. Decisions stay with the user.
+    \\When the frontier is empty, post a numbered plan (todo if multi-step), then stop. Wait for /plan go before any mutating tool.
+    \\
+;
+
+/// Appended when a spec is active. Bodies stay on disk; only the orientation pointer above enters every turn.
+pub const spec_text =
+    \\Spec overlay (active pointer above): phase files live under .omfx/specs/<name>/ as ordinary paths — read/write/edit/patch them; never paste file bodies into chat.
+    \\Orient with read/grep/glob/list/semantic_search. Prefer tools over interviewing; ask_user only when a decision is blocked.
+    \\requirements: requirements.md — problem, solution (user view), long numbered user stories (As a … I want … so that …), out of scope, notes.
+    \\design: design.md — modules/interfaces/contracts and testing seams (highest existing seam; fewer is better). Confirm new seams with ask_user before locking.
+    \\tasks: tasks.md — open checkboxes (- [ ] …) in tracer-bullet order.
+    \\execute: implement open tasks with edit/patch/write; mark done in tasks.md; keep changes small; todo for the open set.
+    \\User advances with /spec next; /spec run jumps to execute. Plan mode (if also on) still blocks mutations until /plan go.
     \\
 ;
 
 pub const text =
     \\You are omfx, a small coding agent.
-    \\Core tools: read, write, edit, bash. Search: grep, glob, list. Live web: web_search, web_fetch, web_scrape (prefer these over any built-in model web search). Unique hunks: patch (add/delete/update, all-or-nothing).
+    \\Core tools: read, write, edit, bash. Search: grep, glob, list, semantic_search (hybrid map+symbols+tokens, no embeddings). Live web: web_search, web_fetch, web_scrape (prefer these over any built-in model web search). Unique hunks: patch (add/delete/update, all-or-nothing).
     \\todo: post the task list for multi-step work and re-post it as each task lands. One task in_progress at a time. Skip it for a single obvious step.
     \\activity: few words on every tool call; it is the status line and the tab title while the call runs.
     \\The harness parses AGENTS.md from managed/user/project/local layers into behavior: Verify runs after writes; Never blocks; path-scoped rules attach on touch. Hard deny is settings.json, not AGENTS.md prose.
@@ -107,8 +124,23 @@ fn appendPostcard(out: *std.ArrayList(u8), allocator: std.mem.Allocator, allow_p
 }
 
 test "plan postcard forbids writes" {
-    try std.testing.expect(std.mem.indexOf(u8, plan_text, "research only") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan_text, "Plan mode overlay") != null);
     try std.testing.expect(std.mem.indexOf(u8, plan_text, "/plan go") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan_text, "frontier") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan_text, "mutating bash are blocked") != null);
+}
+
+test "spec postcard keeps bodies on disk" {
+    try std.testing.expect(std.mem.indexOf(u8, spec_text, "requirements.md") != null);
+    try std.testing.expect(std.mem.indexOf(u8, spec_text, "never paste") != null);
+    try std.testing.expect(std.mem.indexOf(u8, spec_text, "/spec next") != null);
+    try std.testing.expect(std.mem.indexOf(u8, spec_text, "read/write/edit/patch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, spec_text, "Plan mode") != null);
+}
+
+test "postcard names semantic_search" {
+    try std.testing.expect(std.mem.indexOf(u8, text, "semantic_search") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "session surfaces") == null);
 }
 
 test "prompt has best-of core tools and no mcp dump" {
@@ -150,11 +182,13 @@ test "nested postcard can omit peer" {
 
 test "bench: postcard and plan sizes" {
     std.debug.print(
-        "BENCH postcard_bytes={d} plan_bytes={d} advertised_tools={d}\n",
-        .{ text.len, plan_text.len, advertised.len },
+        "BENCH postcard_bytes={d} plan_bytes={d} spec_bytes={d} advertised_tools={d}\n",
+        .{ text.len, plan_text.len, spec_text.len, advertised.len },
     );
     try std.testing.expect(text.len > 400);
     try std.testing.expect(text.len < 8_000);
+    try std.testing.expect(plan_text.len < 4_000);
+    try std.testing.expect(spec_text.len < 4_000);
 }
 
 test "withExtras keeps postcard before AGENTS.md" {

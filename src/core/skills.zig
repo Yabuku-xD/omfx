@@ -666,7 +666,6 @@ test "leading skills stack and share the trailing task including @files" {
         f.close(io);
     }
 
-    // Leading stack: `/a /b args` — both skills, shared task, @path intact.
     const stacked = (try expand(a, io, "", ws, "/deslop /tdd fix @src/main.zig")).?;
     defer a.free(stacked);
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, stacked, "Read "));

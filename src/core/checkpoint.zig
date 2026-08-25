@@ -1,32 +1,17 @@
-//! Local run checkpoint / sleep (zero compute while parked).
-//!
-//! Research shape (not a transcript dump):
-//! - AgentRewind (arXiv:2608.14380): aligned checkpoints of *pointers* + env
-//!   hints; resume with thin rewind memory, not the prior attempt blob.
-//! - CWL / Beyond Compaction (arXiv:2606.11213): action effects already live in
-//!   the filesystem — do not keep tool bodies in the live window.
-//! - Durable execution: status=sleeping parks the run at storage cost only.
-//! - Governance Decay (arXiv:2606.22528): pin mode/plan in meta and re-inject
-//!   on wake (Constraint Pinning), never rely on a lossy summary for policy.
-//! - ARC cites (arXiv:2607.25066): recall ids, not bodies.
-//!
+//! Local run checkpoint / sleep: pointers + pinned mode/plan on disk, thin wake
+//! stub — zero compute while parked, no transcript dump into the next turn.
 //! Layout: `.omfx/runs/<id>/{checkpoint.md,meta.json}`
 
 const std = @import("std");
 const Io = std.Io;
 const board = @import("board.zig");
-const recall = @import("recall.zig");
-const todos = @import("todos.zig");
+const snip = @import("packet_snip.zig");
 
 const log = std.log.scoped(.checkpoint);
 
 pub const runs_dir = ".omfx/runs";
 const active_rel = ".omfx/runs/.active";
 
-pub const max_paths: usize = 16;
-pub const max_board_lines: usize = 12;
-pub const max_todo_lines: usize = 8;
-pub const max_goal: usize = 240;
 pub const max_note: usize = 200;
 
 pub const Status = enum {
@@ -48,7 +33,7 @@ pub const Input = struct {
     note: []const u8 = "",
     last_tool: []const u8 = "",
     last_reply: []const u8 = "",
-    /// Pinned governance (Constraint Pinning): re-injected on wake, not summarized.
+    /// Re-injected on wake (Constraint Pinning); not summarized.
     mode: []const u8 = "ask",
     plan: []const u8 = "off",
     git_sha: []const u8 = "",
@@ -59,77 +44,8 @@ pub const Built = struct {
     stub: []u8,
     packet: []u8,
     meta: []u8,
-    /// Relative dir: `.omfx/runs/<id>`
     rel_dir: []u8,
 };
-
-fn clip(s: []const u8, max: usize) []const u8 {
-    const t = std.mem.trim(u8, s, " \t\r\n");
-    if (t.len == 0) return "";
-    if (t.len > max) return t[0..max];
-    return t;
-}
-
-fn appendPaths(allocator: std.mem.Allocator, notes: []const board.Note, out: *std.ArrayList(u8), seen: *std.StringHashMap(void)) !usize {
-    var n: usize = 0;
-    for (notes) |note| {
-        if (note.path.len == 0) continue;
-        if (seen.contains(note.path)) continue;
-        try seen.put(note.path, {});
-        if (n > 0) try out.append(allocator, ' ');
-        try out.appendSlice(allocator, note.path);
-        n += 1;
-        if (n >= max_paths) break;
-    }
-    return n;
-}
-
-fn appendBoardLines(allocator: std.mem.Allocator, notes: []const board.Note, out: *std.ArrayList(u8)) !void {
-    var n: usize = 0;
-    for (notes) |note| {
-        if (n >= max_board_lines) break;
-        const tag = switch (note.kind) {
-            .fact => "FACT",
-            .fail => "FAIL",
-            .path => "PATH",
-        };
-        if (note.path.len > 0) {
-            try out.print(allocator, "{s} path={s} {s}\n", .{ tag, note.path, note.text });
-        } else {
-            try out.print(allocator, "{s} {s}\n", .{ tag, note.text });
-        }
-        n += 1;
-    }
-    if (n == 0) try out.appendSlice(allocator, "(empty)\n");
-}
-
-fn appendTodos(allocator: std.mem.Allocator, out: *std.ArrayList(u8)) !void {
-    const todo_list = todos.get();
-    var n: usize = 0;
-    for (todo_list.items[0..todo_list.n]) |*it| {
-        if (it.status == .done) continue;
-        if (n >= max_todo_lines) break;
-        const mark: u8 = switch (it.status) {
-            .pending => ' ',
-            .in_progress => '~',
-            .done => 'x',
-        };
-        try out.print(allocator, "- [{c}] {s}\n", .{ mark, it.slice() });
-        n += 1;
-    }
-    if (n == 0) try out.appendSlice(allocator, "(none)\n");
-}
-
-fn appendRecallIds(allocator: std.mem.Allocator, reply: []const u8, out: *std.ArrayList(u8)) !usize {
-    var ids: [recall.max_items]recall.Id = undefined;
-    const n = recall.collectIds(reply, &ids);
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        if (i > 0) try out.append(allocator, ' ');
-        try out.print(allocator, "r{d}", .{@intFromEnum(ids[i])});
-    }
-    return n;
-}
 
 fn nextId(allocator: std.mem.Allocator, io: Io, workspace: []const u8) ![]u8 {
     var n: usize = 1;
@@ -157,8 +73,8 @@ pub fn build(
     const id = try nextId(allocator, io, workspace);
     errdefer allocator.free(id);
 
-    const goal = clip(input.goal, max_goal);
-    const note = clip(input.note, max_note);
+    const goal = snip.clip(input.goal, snip.max_goal);
+    const note = snip.clip(input.note, max_note);
     const goal_s = if (goal.len == 0) "(none)" else goal;
 
     const tail = board.loadTail(allocator, io, workspace);
@@ -170,19 +86,19 @@ pub fn build(
     errdefer path_buf.deinit(allocator);
     var seen = std.StringHashMap(void).init(allocator);
     defer seen.deinit();
-    _ = try appendPaths(allocator, notes[0..note_n], &path_buf, &seen);
+    _ = try snip.appendPaths(allocator, notes[0..note_n], &path_buf, &seen);
 
     var board_buf: std.ArrayList(u8) = .empty;
     defer board_buf.deinit(allocator);
-    try appendBoardLines(allocator, notes[0..note_n], &board_buf);
+    try snip.appendBoardLines(allocator, notes[0..note_n], &board_buf);
 
     var todo_buf: std.ArrayList(u8) = .empty;
     defer todo_buf.deinit(allocator);
-    try appendTodos(allocator, &todo_buf);
+    try snip.appendTodos(allocator, &todo_buf);
 
     var recall_buf: std.ArrayList(u8) = .empty;
     defer recall_buf.deinit(allocator);
-    const recall_n = try appendRecallIds(allocator, input.last_reply, &recall_buf);
+    const recall_n = try snip.appendRecallIds(allocator, input.last_reply, &recall_buf);
 
     const rel_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ runs_dir, id });
     errdefer allocator.free(rel_dir);
@@ -241,7 +157,6 @@ pub fn build(
         todo_buf.items,
     });
 
-    // Thin wake stub — AgentRewind-style rewind memory, not the prior reply.
     var stub: std.ArrayList(u8) = .empty;
     errdefer stub.deinit(allocator);
     try stub.print(allocator,
@@ -251,7 +166,7 @@ pub fn build(
         \\recall: {s}
         \\pinned: mode={s} plan={s}
         \\packet: {s}
-        \\Do not replay prior turns. Open packet or cites only if needed.
+        \\Do not replay prior turns. Use read on the packet or recall cites only if needed; continue with the usual tools. Honor pinned plan=on (read-only until /plan go) and any active /spec pointer.
         \\
     , .{
         id,
@@ -331,7 +246,6 @@ pub fn setStatus(allocator: std.mem.Allocator, io: Io, workspace: []const u8, id
     defer allocator.free(meta_p);
     const raw = Io.Dir.cwd().readFileAlloc(io, meta_p, allocator, .limited(4_000)) catch return error.MissingRun;
     defer allocator.free(raw);
-    // Tiny rewrite: replace "status":"…"
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     if (std.mem.indexOf(u8, raw, "\"status\":\"")) |at| {
@@ -345,7 +259,6 @@ pub fn setStatus(allocator: std.mem.Allocator, io: Io, workspace: []const u8, id
     }
     try writeFile(io, meta_p, out.items);
 
-    // Keep checkpoint.md status line honest.
     const pkt = try std.fs.path.join(allocator, &.{ workspace, runs_dir, id, "checkpoint.md" });
     defer allocator.free(pkt);
     const body = Io.Dir.cwd().readFileAlloc(io, pkt, allocator, .limited(32_000)) catch return;
@@ -411,7 +324,7 @@ pub fn wakeStub(allocator: std.mem.Allocator, io: Io, workspace: []const u8, id:
         \\goal={s}
         \\pinned: mode={s} plan={s}
         \\packet: {s}
-        \\Do not replay prior turns. Open packet or cites only if needed.
+        \\Do not replay prior turns. Use read on the packet or recall cites only if needed; continue with the usual tools. Honor pinned plan=on (read-only until /plan go) and any active /spec pointer.
         \\
     , .{ id, goal, mode, plan, packet });
 }

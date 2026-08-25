@@ -3,18 +3,9 @@ const Io = std.Io;
 const langs = @import("langs.zig");
 const lex = @import("lex.zig");
 
-/// Personalized file-graph orientation map: signatures only, hard char budget.
-/// No embeddings, no tree-sitter, no extra model.
-///
-/// Ranking aims at task-relevant spine inside `max_chars`:
-///   1. Cross-file reference credit (self-hits do not count).
-///   2. Rarity + name-length specificity (ubiquitous idents are downweighted).
-///   3. Personalized propagation on the file graph (query tokens bias restart).
-///   4. Per-file signature packing into the budget (not whole-file blocks).
-///
-/// RepoGraph (arXiv:2410.14684) measured a 32.8% average relative gain on
-/// SWE-bench-Lite from structure over a flat listing; which 80 files and which
-/// few signatures survive the budget is the entire question.
+/// Personalized file-graph map: signatures only, hard char budget, no embeddings
+/// or tree-sitter. Cross-file + rarity + query-biased rank; pack into `max_chars`
+/// (RepoGraph arXiv:2410.14684 — ordering is the gain).
 pub const max_chars: usize = 4_000;
 pub const max_files: usize = 80;
 pub const max_sigs: usize = 6;
@@ -69,11 +60,9 @@ const Sig = struct {
 const File = struct {
     path: []const u8,
     sigs: []const Sig,
-    /// Declared name hashes (definitions).
     names: []const u64,
-    /// Unique identifier hashes observed in the file (references + defs).
     refs: []const u64,
-    /// Occurrences of each declared name inside this file (parallel to names).
+    /// Parallel to `names`: hits inside this file (for cross-file credit).
     self_hits: []const u32,
     score: f64 = 0,
 };
@@ -87,8 +76,7 @@ fn isIdentByte(c: u8) bool {
         (c >= '0' and c <= '9') or c == '_';
 }
 
-/// Occurrence count, repo-wide. Feeds rarity weights; propagation uses the
-/// per-file ref lists built alongside.
+/// Feeds rarity weights; propagation uses per-file `refs`.
 fn countIdents(src: []const u8, counts: *std.AutoHashMap(u64, u32)) void {
     var i: usize = 0;
     while (i < src.len) {
@@ -300,7 +288,6 @@ fn rankFiles(arena: std.mem.Allocator, files: []File, counts: *const std.AutoHas
         for (pers) |*p| p.* /= pers_sum;
     }
 
-    // Base mass: cross-file references to this file's declarations.
     var base = arena.alloc(f64, files.len) catch return;
     @memset(base, 0);
     for (files, 0..) |f, i| {
@@ -320,7 +307,6 @@ fn rankFiles(arena: std.mem.Allocator, files: []File, counts: *const std.AutoHas
         base[i] = s;
     }
 
-    // Invert declarations → defining file indices.
     var definers = std.AutoHashMap(u64, std.ArrayList(u32)).init(arena);
     for (files, 0..) |f, i| {
         for (f.names) |h| {

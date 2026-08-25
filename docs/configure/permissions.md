@@ -17,7 +17,10 @@ Shift-Tab cycles normal → plan → yolo. Yolo is never written to disk.
 /yolo [on|off]
 /plan
 /plan go
+/plan off
 ```
+
+Bare `/plan` enters plan mode and appends a read-only overlay (same tools, writes blocked; bash limited to `git status|diff|log` and `ls|pwd|cat` until `/plan go`). When a `/spec` is also active, that overlay sits under plan — mutations still wait for `/plan go`.
 
 ## Allowlist (deterministic DSL)
 

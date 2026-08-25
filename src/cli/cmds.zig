@@ -295,7 +295,7 @@ fn runCmd(ctx: *Ctx, cmd: slash.Name, rest: []const u8) !Flow {
         .rewind => if (rest.len == 0) return .{ .panel = .rewind } else try doRewind(ctx, rest),
         .fork => try doFork(ctx),
         .handoff => try doHandoff(ctx, rest),
-        .spec => try doSpec(ctx, rest),
+        .spec => return doSpec(ctx, rest),
         .checkpoint => try doCheckpoint(ctx, rest, .ready),
         .sleep => try doCheckpoint(ctx, rest, .sleeping),
         .wake => return doWake(ctx, rest),
@@ -1197,13 +1197,14 @@ fn doFeedback(ctx: *Ctx) !void {
 }
 
 const PlanArg = union(enum) {
-    inspect,
+    /// Bare `/plan` — turn plan mode on (idempotent).
+    enter,
     set: agent.Plan,
     go,
     prompt: []const u8,
 
     fn parse(rest: []const u8) PlanArg {
-        if (rest.len == 0) return .inspect;
+        if (rest.len == 0) return .enter;
         if (std.mem.eql(u8, rest, "on")) return .{ .set = .on };
         if (std.mem.eql(u8, rest, "off")) return .{ .set = .off };
         if (std.mem.eql(u8, rest, "go")) return .go;
@@ -1237,11 +1238,18 @@ const RewindArg = union(enum) {
 
 fn doPlan(ctx: *Ctx, rest: []const u8) !Flow {
     switch (PlanArg.parse(rest)) {
-        .inspect => {
-            if (ctx.state.last_plan.len == 0) {
-                try emit(ctx, try std.fmt.allocPrint(ctx.arena, "plan={s}\n", .{ctx.state.plan.asSlice()}));
-            } else {
-                try emit(ctx, try std.fmt.allocPrint(ctx.arena, "plan={s}\n{s}\n", .{ ctx.state.plan.asSlice(), ctx.state.last_plan }));
+        .enter => {
+            ctx.state.plan = .on;
+            try emit(ctx, "plan=on\nread-only frontier interview until /plan go\n");
+            if (ctx.state.last_plan.len > 0) {
+                try emit(ctx, try std.fmt.allocPrint(ctx.arena, "{s}\n", .{ctx.state.last_plan}));
+            }
+            if (ctx.state.last_goal.len > 0) {
+                return .{ .retry = try std.fmt.allocPrint(
+                    ctx.arena,
+                    "Plan mode for: {s}\nMap the design-tree frontier. Use read/grep/glob/list/semantic_search (and bash only for git status|diff|log or ls|pwd|cat). Do not implement until /plan go.\n",
+                    .{ctx.state.last_goal},
+                ) };
             }
             return .handled;
         },
@@ -1421,37 +1429,40 @@ fn doHandoff(ctx: *Ctx, rest: []const u8) !void {
     try emit(ctx, try std.fmt.allocPrint(ctx.arena, "handoff {s}\npacket {s}\n/resume {s}\n", .{ id, built.rel_path, id }));
 }
 
-fn doSpec(ctx: *Ctx, rest: []const u8) !void {
+fn doSpec(ctx: *Ctx, rest: []const u8) !Flow {
     const trimmed = std.mem.trim(u8, rest, " \t");
     if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "list")) {
         const msg = try spec_mod.list(ctx.gpa, ctx.io, ctx.workspace);
         defer ctx.gpa.free(msg);
         try emit(ctx, msg);
-        return;
+        return .handled;
     }
     var it = std.mem.tokenizeScalar(u8, trimmed, ' ');
     const first = it.next() orelse {
         try emit(ctx, "usage: /spec [list|new <name>|<name>|next|run]\n");
-        return;
+        return .handled;
     };
     if (std.mem.eql(u8, first, "new")) {
         const name = it.next() orelse {
             try emit(ctx, "usage: /spec new <name>\n");
-            return;
+            return .handled;
         };
         const msg = spec_mod.create(ctx.gpa, ctx.io, ctx.workspace, name) catch |err| {
             try emit(ctx, try std.fmt.allocPrint(ctx.arena, "spec new: {s}\n", .{@errorName(err)}));
-            return;
+            return .handled;
         };
         defer ctx.gpa.free(msg);
         try emit(ctx, msg);
-        return;
+        return .{ .retry = try specKick(ctx.arena, name, "requirements") };
     }
     if (std.mem.eql(u8, first, "next")) {
         const msg = try spec_mod.advance(ctx.gpa, ctx.io, ctx.workspace);
         defer ctx.gpa.free(msg);
         try emit(ctx, msg);
-        return;
+        if (spec_mod.loadActive(ctx.arena, ctx.io, ctx.workspace)) |cur| {
+            return .{ .retry = try specKick(ctx.arena, cur.name, cur.phase.asSlice()) };
+        }
+        return .handled;
     }
     if (std.mem.eql(u8, first, "run")) {
         const name = it.next();
@@ -1461,12 +1472,26 @@ fn doSpec(ctx: *Ctx, rest: []const u8) !void {
             try emit(ctx, msg);
         }
         try setActiveExecute(ctx);
-        try emit(ctx, "spec run: phase=execute. Work the open tasks; read .omfx/specs/<name>/ as needed.\n");
-        return;
+        try emit(ctx, "spec run: phase=execute\n");
+        const cur = spec_mod.loadActive(ctx.arena, ctx.io, ctx.workspace) orelse return .handled;
+        return .{ .retry = try specKick(ctx.arena, cur.name, "execute") };
     }
     const msg = try spec_mod.resumeNamed(ctx.gpa, ctx.io, ctx.workspace, first);
     defer ctx.gpa.free(msg);
     try emit(ctx, msg);
+    return .{ .retry = try specKick(ctx.arena, first, "requirements") };
+}
+
+fn specKick(arena: std.mem.Allocator, name: []const u8, phase: []const u8) ![]u8 {
+    const file = if (std.mem.eql(u8, phase, "execute"))
+        "tasks.md"
+    else
+        try std.fmt.allocPrint(arena, "{s}.md", .{phase});
+    return std.fmt.allocPrint(
+        arena,
+        "Spec {s} active (phase={s}). Use read/write/edit/patch on .omfx/specs/{s}/{s}. Keep the full doc on disk — do not paste it into chat. Orient with grep/glob/list/semantic_search as needed.\n",
+        .{ name, phase, name, file },
+    );
 }
 
 fn setActiveExecute(ctx: *Ctx) !void {
@@ -1623,7 +1648,7 @@ test "fillCommands lists builtin slash names" {
 }
 
 test "plan and rewind args are tagged" {
-    try std.testing.expect(PlanArg.parse("") == .inspect);
+    try std.testing.expect(PlanArg.parse("") == .enter);
     try std.testing.expectEqual(agent.Plan.on, PlanArg.parse("on").set);
     try std.testing.expect(PlanArg.parse("go") == .go);
     try std.testing.expectEqualStrings("ship it", PlanArg.parse("ship it").prompt);
