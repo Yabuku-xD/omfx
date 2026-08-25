@@ -42,8 +42,43 @@ pub const Access = struct {
 
 var access: Access = .{ .workspace = "" };
 
+pub const Scope = struct {
+    prev: Access,
+
+    pub fn enter(next: Access) Scope {
+        const s: Scope = .{ .prev = access };
+        access = next;
+        return s;
+    }
+
+    pub fn exit(self: Scope) void {
+        access = self.prev;
+    }
+};
+
+pub fn activeAccess() Access {
+    return access;
+}
+
 pub fn setAccess(next: Access) void {
     access = next;
+}
+
+/// Update workspace and extra roots while keeping read-only skill roots.
+pub fn refresh(workspace: []const u8, extra_roots: []const []const u8) void {
+    access = .{
+        .workspace = workspace,
+        .extra = extra_roots,
+        .read_extra = access.read_extra,
+    };
+}
+
+pub fn refreshAll(workspace: []const u8, extra_roots: []const []const u8, read_extra: []const []const u8) void {
+    access = .{
+        .workspace = workspace,
+        .extra = extra_roots,
+        .read_extra = read_extra,
+    };
 }
 
 pub fn extra() []const []const u8 {

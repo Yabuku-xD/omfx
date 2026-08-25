@@ -122,7 +122,11 @@ pub fn run(
         }
     }
     const skill_roots = skills.readAccessRoots(arena, io, home, workspace) catch &.{};
-    pathing.setAccess(.{ .workspace = workspace, .extra = state.extraSlice(), .read_extra = skill_roots });
+    sess.read_extra = skill_roots;
+    const path_scope = pathing.Scope.enter(sess.pathAccess());
+    defer path_scope.exit();
+    const todo_scope = todos.Scope.enter(&sess.tasks);
+    defer todo_scope.exit();
     sess.skill_specs = loop_mod.skillSpecs(&sess);
     var raw = tty.Raw.enter();
     defer raw.leave();
@@ -202,21 +206,7 @@ pub fn run(
 /// A Session with no terminal attached, for exercising the state the event loop
 /// mutates. `run` needs a tty; the decisions it makes do not.
 fn testSession(allocator: std.mem.Allocator) Session {
-    return .{
-        .gpa = allocator,
-        .arena = allocator,
-        .io = std.testing.io,
-        .stdout = undefined,
-        .home = "/tmp",
-        .workspace = "/tmp",
-        .lookup = (env.Table{ .pairs = &.{} }).lookup(),
-        .parsed = .{},
-        .state = .{ .mode = .ask, .reads = agent.Reads.init(allocator) },
-        .shown = tui.Transcript.init(allocator, 80),
-        .runs = runs_mod.Store.init(allocator),
-        .layout = tui.Layout.compute(24, 80),
-        .cups = tui.Cups.compute(tui.Layout.compute(24, 80)),
-    };
+    return Session.testing(allocator);
 }
 
 test "completing a command replaces the whole draft" {
@@ -541,12 +531,14 @@ test "the task list pins while there is work left, then gets out of the way" {
     defer sess.shown.deinit();
     var rows: [todos.max_items][]const u8 = undefined;
 
-    // The list is process-wide, so start from a known empty one.
-    const none = try todos.set(std.testing.allocator, "{\"todos\":[]}");
+    // Scoped to this session, not process-wide.
+    const todo_scope = todos.Scope.enter(&sess.tasks);
+    defer todo_scope.exit();
+    const none = try sess.tasks.applyJson(std.testing.allocator, "{\"todos\":[]}");
     std.testing.allocator.free(none);
     try std.testing.expectEqual(@as(usize, 0), sess.pinTodos(&rows).len);
 
-    const out = try todos.set(std.testing.allocator,
+    const out = try sess.tasks.applyJson(std.testing.allocator,
         \\{"todos":[{"content":"read the loader","status":"completed"},{"content":"fix the parser","status":"in_progress"},{"content":"run the tests","status":"pending"}]}
     );
     std.testing.allocator.free(out);
@@ -558,7 +550,7 @@ test "the task list pins while there is work left, then gets out of the way" {
     try std.testing.expect(std.mem.indexOf(u8, pinned[2], paint.accent_dim) == null);
 
     // All done: the pane gives the rows back rather than holding a wall of ticks.
-    const fin = try todos.set(std.testing.allocator,
+    const fin = try sess.tasks.applyJson(std.testing.allocator,
         \\{"todos":[{"content":"read the loader","status":"completed"}]}
     );
     std.testing.allocator.free(fin);

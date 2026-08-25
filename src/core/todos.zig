@@ -112,64 +112,81 @@ pub const List = struct {
         }
         return out.toOwnedSlice(allocator);
     }
+    pub fn applyJson(self: *List, allocator: std.mem.Allocator, args_json: []const u8) ![]u8 {
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, args_json, .{}) catch
+            return error.BadTodos;
+        defer parsed.deinit();
+        const root = switch (parsed.value) {
+            .object => |o| o,
+            else => return error.BadTodos,
+        };
+        const arr = switch (root.get("todos") orelse root.get("items") orelse return error.BadTodos) {
+            .array => |a| a,
+            else => return error.BadTodos,
+        };
+
+        var next: List = .{};
+        for (arr.items) |item| {
+            switch (item) {
+                .string => |s| next.push(s, .pending),
+                .object => |o| {
+                    const text = switch (o.get("content") orelse o.get("task") orelse o.get("text") orelse continue) {
+                        .string => |v| v,
+                        else => continue,
+                    };
+                    const status = blk: {
+                        const raw = o.get("status") orelse break :blk Status.pending;
+                        const s = switch (raw) {
+                            .string => |v| v,
+                            else => break :blk Status.pending,
+                        };
+                        break :blk Status.fromSlice(s) orelse .pending;
+                    };
+                    next.push(text, status);
+                },
+                else => continue,
+            }
+        }
+        self.* = next;
+        return self.render(allocator);
+    }
 };
 
-var current: List = .{};
+var active: *List = &fallback;
+var fallback: List = .{};
+
+pub const Scope = struct {
+    prev: *List,
+
+    pub fn enter(list: *List) Scope {
+        const s: Scope = .{ .prev = active };
+        active = list;
+        return s;
+    }
+
+    pub fn exit(self: Scope) void {
+        active = self.prev;
+    }
+};
 
 /// The task the model says it is on, for the activity line. Empty when the
 /// model has not posted a list, or has nothing in progress.
 pub fn inProgress() []const u8 {
-    for (current.items[0..current.n]) |*item| {
+    for (active.items[0..active.n]) |*item| {
         if (item.status == .in_progress) return item.slice();
     }
     return "";
 }
 
 pub fn get() *const List {
-    return &current;
+    return active;
 }
 
 /// Replaces the whole list, the way the model always sends it: one authoritative
 /// snapshot per call. Merging partial updates would need stable ids that the
 /// model has no reason to keep straight.
 pub fn set(allocator: std.mem.Allocator, args_json: []const u8) ![]u8 {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, args_json, .{}) catch
-        return error.BadTodos;
-    defer parsed.deinit();
-    const root = switch (parsed.value) {
-        .object => |o| o,
-        else => return error.BadTodos,
-    };
-    const arr = switch (root.get("todos") orelse root.get("items") orelse return error.BadTodos) {
-        .array => |a| a,
-        else => return error.BadTodos,
-    };
-
-    var next: List = .{};
-    for (arr.items) |item| {
-        switch (item) {
-            // A bare string is a pending task; models reach for that shorthand.
-            .string => |s| next.push(s, .pending),
-            .object => |o| {
-                const text = switch (o.get("content") orelse o.get("task") orelse o.get("text") orelse continue) {
-                    .string => |v| v,
-                    else => continue,
-                };
-                const status = blk: {
-                    const raw = o.get("status") orelse break :blk Status.pending;
-                    const s = switch (raw) {
-                        .string => |v| v,
-                        else => break :blk Status.pending,
-                    };
-                    break :blk Status.fromSlice(s) orelse .pending;
-                };
-                next.push(text, status);
-            },
-            else => continue,
-        }
-    }
-    current = next;
-    return current.render(allocator);
+    return active.applyJson(allocator, args_json);
 }
 
 test "set parses objects, bare strings, and status words" {

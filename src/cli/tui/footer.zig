@@ -4,18 +4,31 @@ const Io = std.Io;
 const slash = @import("../../core/slash.zig");
 const cli = @import("../../core/cli.zig");
 const layout_mod = @import("layout.zig");
-const palette = @import("palette.zig");
 const scroll_mod = @import("scroll.zig");
 const width = @import("../width.zig");
 const paint = @import("../../core/ansi.zig");
 
+const box = @import("footer/box.zig");
+const menu = @import("footer/menu.zig");
+const welcome_mod = @import("footer/welcome.zig");
+
 pub const Layout = layout_mod.Layout;
 pub const moveTo = layout_mod.moveTo;
 
+pub const min_menu_cols = menu.min_menu_cols;
+pub const min_card_cols = welcome_mod.min_card_cols;
+pub const welcome = welcome_mod.welcome;
+pub const formatSlashMenu = menu.formatSlashMenu;
+
 const cellsTo = width.cellsTo;
-const indexAtCell = width.indexAtCell;
-const utf8LenAt = width.utf8LenAt;
-const skipEsc = width.skipEsc;
+const padCells = box.padCells;
+const clipCells = box.clipCells;
+const sanitizeRow = box.sanitizeRow;
+const ruleLine = box.ruleLine;
+const boxEdgeIn = box.boxEdgeIn;
+const padPair = box.padPair;
+const composerWindow = box.composerWindow;
+const widestRow = box.widestRow;
 
 /// Once mouse reporting is on the terminal stops making its own, so omfx has
 /// to. It is deliberately not a rectangle over the screen: the welcome card,
@@ -60,31 +73,6 @@ pub const Sel = struct {
         return .{ .from = from, .to = to };
     }
 };
-
-fn widestRow(bytes: []const u8) u16 {
-    var widest: u16 = 0;
-    var row: usize = 0;
-    var i: usize = 0;
-    while (i < bytes.len) {
-        if (bytes[i] == '\n' or bytes[i] == '\r') {
-            widest = @max(widest, cellsTo(bytes[row..i]));
-            i += 1;
-            row = i;
-            continue;
-        }
-        if (bytes[i] == 0x1b) {
-            const end = skipEsc(bytes, i);
-            if (end > i + 1 and (bytes[end - 1] == 'H' or bytes[end - 1] == 'f')) {
-                widest = @max(widest, cellsTo(bytes[row..i]));
-                row = end;
-            }
-            i = end;
-            continue;
-        }
-        i += 1;
-    }
-    return @max(widest, cellsTo(bytes[row..]));
-}
 
 /// Idle parks the caret. Generating hides it and owns the hint row.
 pub const Turn = union(enum) {
@@ -154,6 +142,7 @@ pub const Footer = struct {
         };
     }
 };
+
 const composer_hints = [_]scroll_mod.HintItem{
     .{ .keys = "enter", .label = "send", .pinned = true },
     .{ .keys = "shift+tab", .label = "mode" },
@@ -161,71 +150,9 @@ const composer_hints = [_]scroll_mod.HintItem{
     .{ .keys = "tab", .label = "scrollback" },
     .{ .keys = "?", .label = "keys", .pinned = true },
 };
+
 pub fn hintFor(buf: []u8, cols: u16) []const u8 {
     return scroll_mod.renderHints(buf, &composer_hints, cols);
-}
-/// Printed once into the transcript pane: how to fill it, one next step.
-pub const welcome = paint.muted ++ "Type what you need. " ++ paint.reset ++ paint.accent_dim ++ "?" ++ paint.reset ++ paint.muted ++ " shows keys, " ++ paint.reset ++ paint.accent_dim ++ "/help" ++ paint.reset ++ paint.muted ++ " shows commands." ++ paint.reset ++ "\n";
-const Window = struct { slice: []const u8, park: u16, from: usize };
-
-fn composerWindow(src: []const u8, caret: usize, cols: u16) Window {
-    const cap: usize = @min(caret, src.len);
-    const caret_c = cellsTo(src[0..cap]);
-    const total = cellsTo(src);
-    if (total <= cols) {
-        const park: u16 = @intCast(@min(@as(u32, cols), caret_c + 1));
-        return .{ .slice = src, .park = if (park == 0) 1 else park, .from = 0 };
-    }
-    const start_cell: u16 = if (caret_c + 1 > cols) caret_c + 1 - cols else 0;
-    const from = indexAtCell(src, start_cell);
-    const to = indexAtCell(src, start_cell + cols);
-    const rel = caret_c - start_cell;
-    const park: u16 = @intCast(@min(@as(u32, cols), rel + 1));
-    return .{ .slice = src[from..to], .park = if (park == 0) 1 else park, .from = from };
-}
-
-fn sanitizeRow(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
-    var out = try allocator.alloc(u8, src.len);
-    for (src, 0..) |b, i| {
-        out[i] = if (b == '\n' or b == '\r') ' ' else b;
-    }
-    return out;
-}
-
-fn padCells(allocator: std.mem.Allocator, src: []const u8, cols: u16) ![]u8 {
-    const w = cellsTo(src);
-    const extra: usize = if (w >= cols) 0 else cols - w;
-    const out = try allocator.alloc(u8, src.len + extra);
-    @memcpy(out[0..src.len], src);
-    @memset(out[src.len..], ' ');
-    return out;
-}
-
-fn clipCells(src: []const u8, cols: u16) []const u8 {
-    if (cellsTo(src) <= cols) return src;
-    return src[0..indexAtCell(src, cols)];
-}
-
-fn ruleLine(allocator: std.mem.Allocator, cols: u16) ![]u8 {
-    const cell = "─";
-    const n = if (cols == 0) 1 else cols;
-    const out = try allocator.alloc(u8, cell.len * n);
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        @memcpy(out[i * cell.len ..][0..cell.len], cell);
-    }
-    return out;
-}
-
-fn boxEdgeIn(allocator: std.mem.Allocator, cols: u16, left: []const u8, right: []const u8, color: []const u8) ![]u8 {
-    const inner: u16 = if (cols >= 2) cols - 2 else 1;
-    const mid = try ruleLine(allocator, inner);
-    defer allocator.free(mid);
-    return std.fmt.allocPrint(allocator, "{s}{s}{s}{s}{s}", .{ color, left, mid, right, paint.reset });
-}
-
-fn boxEdge(allocator: std.mem.Allocator, cols: u16, left: []const u8, right: []const u8) ![]u8 {
-    return boxEdgeIn(allocator, cols, left, right, paint.border);
 }
 
 /// Workspace on the left, one brand dot to anchor it, how full the context
@@ -291,229 +218,8 @@ fn writeTokens(w: *Io.Writer, n: u32) !void {
     return w.print("{d}.{d}M", .{ n / 1_000_000, (n % 1_000_000) / 100_000 });
 }
 
-/// `left` flush left, `right` flush right, padded to `inner` cells.
-///
-/// When the pair does not fit, the right side wins and the left is trimmed to
-/// what remains: the model and mode on the right identify the session, while
-/// the hint on the left is a reminder you can lose. Previously neither was
-/// clipped and the row simply ran past the terminal, tearing the footer at any
-/// width narrower than hint + meta.
-fn padPair(allocator: std.mem.Allocator, left: []const u8, right: []const u8, inner: u16) ![]u8 {
-    const rw = cellsTo(right);
-    // The right side is never trimmed below a readable remainder; past that
-    // both sides shrink rather than one vanishing.
-    const right_shown = if (rw <= inner) right else clipCells(right, inner);
-    const rw2 = cellsTo(right_shown);
-    const room: u16 = if (inner > rw2 + 1) inner - rw2 - 1 else 0;
-    const left_shown = clipCells(left, room);
-    const lw = cellsTo(left_shown);
-
-    const gap: usize = if (inner > lw + rw2) inner - lw - rw2 else @intFromBool(room > 0);
-    var buf: [256]u8 = undefined;
-    const n = @min(gap, buf.len);
-    @memset(buf[0..n], ' ');
-    return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ left_shown, buf[0..n], right_shown });
-}
-
-fn rowTitle(hit: slash.Spec) []const u8 {
-    return if (hit.flip) hit.help else hit.name;
-}
-
-fn rowMeta(hit: slash.Spec) []const u8 {
-    return if (hit.flip) hit.name else hit.help;
-}
-
-fn boxBottomCount(allocator: std.mem.Allocator, cols: u16, selected: usize, total: usize, view: usize) ![]u8 {
-    const inner: u16 = if (cols >= 2) cols - 2 else cols;
-    if (total <= view) return boxEdge(allocator, cols, "╰", "╯");
-    var count_buf: [24]u8 = undefined;
-    const count = std.fmt.bufPrint(&count_buf, " {d}/{d} ", .{ selected + 1, total }) catch " ? ";
-    const cw = cellsTo(count);
-    const dashes: u16 = if (inner > cw) inner - cw else 0;
-    const rule = try ruleLine(allocator, dashes);
-    defer allocator.free(rule);
-    return std.fmt.allocPrint(
-        allocator,
-        "{s}╰{s}{s}{s}{s}{s}{s}╯{s}",
-        .{ paint.border, paint.reset, paint.muted, count, paint.reset, paint.border, rule, paint.reset },
-    );
-}
-
-fn writeBoxRow(allocator: std.mem.Allocator, out: *std.ArrayList(u8), inner: u16, body: []const u8) !void {
-    const padded = try padCells(allocator, body, inner);
-    defer allocator.free(padded);
-    try out.appendSlice(allocator, paint.border);
-    try out.appendSlice(allocator, "│");
-    try out.appendSlice(allocator, paint.reset);
-    try out.appendSlice(allocator, padded);
-    try out.appendSlice(allocator, paint.border);
-    try out.appendSlice(allocator, "│");
-    try out.appendSlice(allocator, paint.reset);
-}
-
-/// A menu narrower than this is two borders and a marker with nothing between
-/// them; drawing it just tears the row.
-pub const min_menu_cols: u16 = 12;
-
-pub fn formatSlashMenu(
-    allocator: std.mem.Allocator,
-    cols: u16,
-    hits: []const slash.Spec,
-    selected: usize,
-    item_rows: usize,
-) ![]u8 {
-    if (cols < min_menu_cols) return allocator.dupe(u8, "");
-    const view: usize = if (item_rows == 0) 1 else item_rows;
-    const box_w = palette.paletteWidth(cols);
-    const inner: u16 = if (box_w >= 2) box_w - 2 else box_w;
-    const start = palette.slashWindowStart(selected, hits.len, view);
-    const filled = palette.slashVisible(hits.len -| start, view);
-    const vis = if (hits.len == 0) hits else hits[start .. start + filled];
-    const vis_sel: usize = if (hits.len == 0) 0 else selected - start;
-    var name_w: u16 = 0;
-    for (vis) |hit| name_w = @max(name_w, cellsTo(rowTitle(hit)));
-    const cap: u16 = if (inner > 8) inner / 2 else inner;
-    name_w = @min(name_w, cap);
-
-    const top = try boxEdge(allocator, box_w, "╭", "╮");
-    defer allocator.free(top);
-    const bot = try boxBottomCount(allocator, box_w, selected, hits.len, view);
-    defer allocator.free(bot);
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, top);
-    var body_rows: usize = 0;
-    if (vis.len == 0) {
-        try out.append(allocator, '\n');
-        try writeBoxRow(allocator, &out, inner, " no match");
-        body_rows = 1;
-    }
-    for (vis, 0..) |hit, i| {
-        try out.append(allocator, '\n');
-        const sel = i == vis_sel;
-        const mark: []const u8 = if (sel) "▸ " else "  ";
-        const title = clipCells(rowTitle(hit), name_w);
-        const named = try padCells(allocator, title, name_w);
-        defer allocator.free(named);
-        const used = 2 + name_w + 2;
-        const help_cols: u16 = if (inner > used) inner - used else 0;
-        const help = clipCells(rowMeta(hit), help_cols);
-        const helped = try padCells(allocator, help, help_cols);
-        defer allocator.free(helped);
-        // Selected row: accent marker and title, meta stays quiet either way.
-        try out.appendSlice(allocator, paint.border);
-        try out.appendSlice(allocator, "│");
-        try out.appendSlice(allocator, paint.reset);
-        try out.appendSlice(allocator, if (sel) paint.accent else paint.border);
-        try out.appendSlice(allocator, mark);
-        try out.appendSlice(allocator, if (sel) paint.bold ++ paint.accent else paint.label);
-        try out.appendSlice(allocator, named);
-        try out.appendSlice(allocator, paint.reset);
-        try out.appendSlice(allocator, "  ");
-        try out.appendSlice(allocator, paint.muted);
-        try out.appendSlice(allocator, helped);
-        try out.appendSlice(allocator, paint.reset);
-        try out.appendSlice(allocator, paint.border);
-        try out.appendSlice(allocator, "│");
-        try out.appendSlice(allocator, paint.reset);
-        body_rows += 1;
-    }
-    while (body_rows < view) : (body_rows += 1) {
-        try out.append(allocator, '\n');
-        try writeBoxRow(allocator, &out, inner, "");
-    }
-    try out.append(allocator, '\n');
-    try out.appendSlice(allocator, bot);
-    return out.toOwnedSlice(allocator);
-}
-const WelcomeRow = struct {
-    left: []const u8,
-    right: []const u8 = "",
-    /// Painted on `left`. `right` is always the accent (it is the thing to type).
-    style: []const u8 = "",
-};
-
-/// Centred card: name, what it is talking to, then the four things worth doing.
-/// Narrower than this a bordered card is all border and no content, so the
-/// welcome degrades to the one-line form instead of drawing a broken box.
-pub const min_card_cols: u16 = 24;
-
 pub fn formatWelcome(allocator: std.mem.Allocator, layout: Layout, footer: Footer) ![]u8 {
-    if (layout.cols < min_card_cols or layout.transcript_rows < 3) {
-        return allocator.dupe(u8, clipCells(welcome, layout.cols));
-    }
-    // Never wider than the terminal: the borders are two of those columns, so
-    // a card sized to `cols` itself overflows by two.
-    const card_w: u16 = if (layout.cols >= 56)
-        48
-    else if (layout.cols > 16)
-        layout.cols - 8
-    else
-        @min(layout.cols, @max(layout.cols, 4));
-    const inner: u16 = if (card_w >= 2) card_w - 2 else card_w;
-    const top = try boxEdge(allocator, card_w, "\u{256d}", "\u{256e}");
-    defer allocator.free(top);
-    const bot = try boxEdge(allocator, card_w, "\u{2570}", "\u{256f}");
-    defer allocator.free(bot);
-
-    var talk_buf: [160]u8 = undefined;
-    const talk = std.fmt.bufPrint(&talk_buf, " Talking to {s}", .{footer.model}) catch " Talking to a model";
-
-    const rows = [_]WelcomeRow{
-        .{ .left = " " ++ cli.title, .right = cli.version, .style = paint.bold ++ paint.accent },
-        .{ .left = "" },
-        .{ .left = talk, .style = paint.label },
-        .{ .left = "" },
-        .{ .left = " New session", .right = "/clear", .style = paint.muted },
-        .{ .left = " Resume session", .right = "/resume", .style = paint.muted },
-        .{ .left = " Commands", .right = "/help", .style = paint.muted },
-        .{ .left = " Keys", .right = "?", .style = paint.muted },
-    };
-
-    const card_h: u16 = @intCast(rows.len + 2);
-    const col: u16 = if (layout.cols > card_w) (layout.cols - card_w) / 2 + 1 else 1;
-    const room = layout.transcript_rows;
-    const row0: u16 = if (room > card_h)
-        layout.transcript_start_row + (room - card_h) / 2
-    else
-        layout.transcript_start_row;
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    var cup: [32]u8 = undefined;
-    var r = row0;
-    try out.appendSlice(allocator, try moveTo(&cup, r, col));
-    try out.appendSlice(allocator, top);
-    r += 1;
-    for (rows) |row| {
-        // Right column is drawn flush; the left pad absorbs the width difference.
-        // On a narrow card there is no room for it at all.
-        const rw = if (cellsTo(row.right) + 4 <= inner) cellsTo(row.right) else 0;
-        const lw: u16 = if (rw == 0) inner else if (inner > rw + 1) inner - rw - 1 else inner;
-        const left = try padCells(allocator, clipCells(row.left, lw), lw);
-        defer allocator.free(left);
-        try out.appendSlice(allocator, try moveTo(&cup, r, col));
-        try out.appendSlice(allocator, paint.border);
-        try out.appendSlice(allocator, "\u{2502}");
-        try out.appendSlice(allocator, paint.reset);
-        try out.appendSlice(allocator, row.style);
-        try out.appendSlice(allocator, left);
-        try out.appendSlice(allocator, paint.reset);
-        if (rw != 0) {
-            try out.appendSlice(allocator, paint.accent_dim);
-            try out.appendSlice(allocator, clipCells(row.right, rw));
-            try out.appendSlice(allocator, paint.reset);
-            try out.append(allocator, ' ');
-        }
-        try out.appendSlice(allocator, paint.border);
-        try out.appendSlice(allocator, "\u{2502}");
-        try out.appendSlice(allocator, paint.reset);
-        r += 1;
-    }
-    try out.appendSlice(allocator, try moveTo(&cup, r, col));
-    try out.appendSlice(allocator, bot);
-    return out.toOwnedSlice(allocator);
+    return welcome_mod.formatWelcome(allocator, layout, footer.model);
 }
 
 pub fn formatFooter(allocator: std.mem.Allocator, layout: Layout, footer: Footer) ![]u8 {
@@ -738,11 +444,6 @@ test "the hint bar drops unpinned hints before it clips" {
     try std.testing.expect(cellsTo(hintFor(&buf3, 5)) <= 5);
 }
 
-test "welcome is one empty-state line" {
-    try std.testing.expect(std.mem.indexOf(u8, welcome, "/help") != null);
-    try std.testing.expect(std.mem.indexOf(u8, welcome, "Type what you need") != null);
-}
-
 test "formatFooter offers the stop key while a turn runs" {
     const layout = Layout.compute(24, 80);
     const s = try formatFooter(std.testing.allocator, layout, .{
@@ -769,66 +470,6 @@ test "formatFooter Hint text wins over Turn" {
     defer std.testing.allocator.free(s);
     try std.testing.expect(std.mem.indexOf(u8, s, "armed quit") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, stop_hint) == null);
-}
-
-test "welcome card is centered with commands" {
-    const layout = Layout.compute(24, 80);
-    const s = try formatWelcome(std.testing.allocator, layout, .{
-        .model = "grok-4.6",
-        .permission = "ask",
-        .composer = "> ",
-    });
-    defer std.testing.allocator.free(s);
-    try std.testing.expect(std.mem.indexOf(u8, s, "Oh My Fx") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "/help") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "/resume") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "Talking to") != null);
-}
-
-test "slash menu highlights the selected row" {
-    const hits = [_]slash.Spec{
-        .{ .name = "/help", .help = "list slash commands" },
-        .{ .name = "/quit", .help = "exit" },
-    };
-    const s = try formatSlashMenu(std.testing.allocator, 40, &hits, 1, 8);
-    defer std.testing.allocator.free(s);
-    try std.testing.expect(std.mem.indexOf(u8, s, "/quit") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "▸") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, paint.accent) != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "╭") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\x1b[2K") == null);
-}
-
-test "a flipped row leads with the description, not the id" {
-    const hits = [_]slash.Spec{
-        .{ .name = "grok-composer-2.5-fast", .help = "Grok Composer 2.5 Fast", .flip = true },
-    };
-    const s = try formatSlashMenu(std.testing.allocator, 64, &hits, 0, 8);
-    defer std.testing.allocator.free(s);
-    const title_at = std.mem.indexOf(u8, s, "Grok Composer 2.5 Fast") orelse {
-        try std.testing.expect(false);
-        return;
-    };
-    const id_at = std.mem.indexOf(u8, s, "grok-composer-2.5-fast") orelse {
-        try std.testing.expect(false);
-        return;
-    };
-    try std.testing.expect(title_at < id_at);
-}
-
-test "slash menu windows past the first page" {
-    var hits: [12]slash.Spec = undefined;
-    for (&hits, 0..) |*h, i| {
-        h.* = .{ .name = "/help", .help = "x" };
-        _ = i;
-    }
-    hits[0].name = "/help";
-    hits[9].name = "/trace";
-    const s = try formatSlashMenu(std.testing.allocator, 40, &hits, 9, 6);
-    defer std.testing.allocator.free(s);
-    try std.testing.expect(std.mem.indexOf(u8, s, "/trace") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "10/12") != null);
-    try std.testing.expectEqual(@as(usize, 4), palette.slashWindowStart(9, 12, 6));
 }
 
 test "the composer keeps the accent in both states" {
@@ -954,29 +595,4 @@ test "chrome fits every terminal size it can be given" {
         defer a.free(card);
         try std.testing.expect(widestRow(card) <= cols);
     }
-}
-
-test "the slash menu fits every width" {
-    const a = std.testing.allocator;
-    const hits = [_]slash.Spec{
-        .{ .name = "/a-very-long-command-name-here", .help = "an equally long description of what it does" },
-        .{ .name = "/b", .help = "short" },
-    };
-    for ([_]u16{ 1, 2, 8, 20, 40, 80, 200 }) |cols| {
-        const menu = try formatSlashMenu(a, cols, &hits, 0, 2);
-        defer a.free(menu);
-        try std.testing.expect(widestRow(menu) <= cols);
-    }
-}
-
-test "picker menu height follows match count" {
-    const layout = Layout.compute(24, 80);
-    var b: [12]slash.Spec = undefined;
-    for (&b) |*h| h.* = .{ .name = "/help", .help = "x" };
-    const two = try formatSlashMenu(std.testing.allocator, 80, b[0..2], 0, palette.paletteItemRows(layout, 2));
-    defer std.testing.allocator.free(two);
-    const many = try formatSlashMenu(std.testing.allocator, 80, &b, 0, palette.paletteItemRows(layout, b.len));
-    defer std.testing.allocator.free(many);
-    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, two, "\n"));
-    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, many, "\n"));
 }

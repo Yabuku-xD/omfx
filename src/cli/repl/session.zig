@@ -6,13 +6,15 @@ const panel_mod = @import("../panel.zig");
 const runs_mod = @import("../runs.zig");
 const toast_mod = @import("../toast.zig");
 const cmds = @import("../cmds.zig");
-const todos = @import("../../core/todos.zig");
+const todo_mod = @import("../../core/todos.zig");
 const chat = @import("../chat.zig");
 const slash = @import("../../core/slash.zig");
 const env = @import("../../core/env.zig");
 const cli = @import("../../core/cli.zig");
 const menus = @import("../menus.zig");
 const sink = @import("../../core/sink.zig");
+const pathing = @import("../../tools/pathing.zig");
+const agent = @import("../../core/agent.zig");
 
 const log = std.log.scoped(.repl);
 
@@ -32,6 +34,10 @@ pub const Session = struct {
 
     state: cmds.State,
     shown: tui.Transcript,
+    /// Open todos for this session. Bound into `todos.active` for the REPL lifetime.
+    tasks: todo_mod.List = .{},
+    /// Skill read roots cached at startup; folded into path access for the session.
+    read_extra: []const []const u8 = &.{},
     /// Committed tool runs, by the bytes they occupy in `shown`.
     runs: runs_mod.Store,
     /// Where the keyboard is. Scrollback focus is how a run is opened without
@@ -157,7 +163,39 @@ pub const Session = struct {
     }
 
     pub fn model(self: *const Session) []const u8 {
-        return if (self.state.resolved) |r| r.model else self.fallback_model;
+        if (self.state.resolved) |r| return r.model;
+        return self.fallback_model;
+    }
+
+    pub fn pathAccess(self: *const Session) pathing.Access {
+        return .{
+            .workspace = self.workspace,
+            .extra = self.state.extraSlice(),
+            .read_extra = self.read_extra,
+        };
+    }
+
+    pub fn syncPathing(self: *const Session) void {
+        pathing.setAccess(self.pathAccess());
+    }
+
+    /// Minimal session for unit tests (no tty).
+    pub fn testing(allocator: std.mem.Allocator) Session {
+        return .{
+            .gpa = allocator,
+            .arena = allocator,
+            .io = std.testing.io,
+            .stdout = undefined,
+            .home = "/tmp",
+            .workspace = "/tmp",
+            .lookup = (env.Table{ .pairs = &.{} }).lookup(),
+            .parsed = .{},
+            .state = .{ .mode = .ask, .reads = agent.Reads.init(allocator) },
+            .shown = tui.Transcript.init(allocator, 80),
+            .runs = runs_mod.Store.init(allocator),
+            .layout = tui.Layout.compute(24, 80),
+            .cups = tui.Cups.compute(tui.Layout.compute(24, 80)),
+        };
     }
 
     pub fn footer(self: *Session, turn: tui.Turn) tui.Footer {
@@ -324,7 +362,7 @@ pub const Session = struct {
     /// The task list as sticky chrome rows above the composer, or none when
     /// every item is done (a finished checklist is just noise).
     pub fn pinTodos(self: *Session, rows: [][]const u8) []const []const u8 {
-        const list = todos.get();
+        const list = &self.tasks;
         if (list.n == 0) return &.{};
         const c = list.counts();
         if (c.done == c.total) return &.{};
@@ -340,7 +378,7 @@ pub const Session = struct {
     /// Transcript rows available to scroll after sticky chrome is reserved.
     pub fn scrollRows(self: *const Session) u16 {
         var todo_n: u16 = 0;
-        const list = todos.get();
+        const list = &self.tasks;
         if (list.n != 0) {
             const c = list.counts();
             if (c.done != c.total) todo_n = @intCast(@min(list.n, std.math.maxInt(u16)));
@@ -386,7 +424,7 @@ pub const Session = struct {
         self.shown.resize(self.layout.cols) catch |err| {
             log.debug("transcript resize: {s}", .{@errorName(err)});
         };
-        var todo_rows: [todos.max_items][]const u8 = undefined;
+        var todo_rows: [todo_mod.max_items][]const u8 = undefined;
         var foot = self.footer(turn);
         foot.tasks = self.pinTodos(&todo_rows);
         tui.writePane(self.gpa, self.stdout, self.layout, foot, &self.shown, self.scroll) catch |err| {

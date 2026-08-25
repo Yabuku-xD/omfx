@@ -86,6 +86,38 @@ fn openSearchPanel(sess: *Session, kind: cmds.PanelKind) void {
     }
 }
 
+/// Persist an Esc/cancel mid-turn: partial reply, interrupted flag, follow-up seed.
+pub fn recordInterrupted(
+    sess: *Session,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    io: Io,
+    home: []const u8,
+    model_prompt: []const u8,
+    prompt_text: []const u8,
+    partial: []const u8,
+    trace: *agent.Trace,
+    ctx: *cmds.Ctx,
+) !void {
+    const state = &sess.state;
+    try sess.shown.append(try chat.formatNotice(arena, sess.layout.cols, "Interrupted"));
+    const asst = if (partial.len > 0) partial else agent.interrupted_text;
+    persistSession(gpa, io, home, model_prompt, asst, trace.*, "interrupted") catch |err| {
+        log.warn("persist session: {s}", .{@errorName(err)});
+    };
+    if (!state.interrupted) {
+        const goal_keep = if (prompt_text.len > 80) prompt_text[0..80] else prompt_text;
+        state.last_goal = try arena.dupe(u8, goal_keep);
+        state.last_prompt = try arena.dupe(u8, prompt_text);
+    }
+    state.last_tool = try arena.dupe(u8, if (trace.tool_len > 0) trace.toolName() else "");
+    state.last_reply = try arena.dupe(u8, asst);
+    state.had_turn = true;
+    state.interrupted = true;
+    cmds.persistChat(ctx);
+    sess.dirty = true;
+}
+
 /// Run one chat turn: paint the prompt, stream the reply, persist state.
 pub fn runTurn(
     sess: *Session,
@@ -287,24 +319,9 @@ pub fn runTurn(
     sess.writeIdleTitle();
     try stdout.flush();
     if (cancelled) {
-        try sess.shown.append(try chat.formatNotice(arena, sess.layout.cols, "Interrupted"));
-        const asst = if (partial.len > 0) partial else agent.interrupted_text;
-        persistSession(gpa, io, home, model_prompt, asst, trace, "interrupted") catch |err| {
-            log.warn("persist session: {s}", .{@errorName(err)});
-        };
-        if (!state.interrupted) {
-            const goal_keep = if (prompt_text.len > 80) prompt_text[0..80] else prompt_text;
-            state.last_goal = try arena.dupe(u8, goal_keep);
-            state.last_prompt = try arena.dupe(u8, prompt_text);
-        }
-        state.last_tool = try arena.dupe(u8, if (trace.tool_len > 0) trace.toolName() else "");
-        state.last_reply = try arena.dupe(u8, asst);
-        state.had_turn = true;
-        state.interrupted = true;
-        cmds.persistChat(&ctx);
+        try recordInterrupted(sess, gpa, arena, io, home, model_prompt, prompt_text, partial, &trace, &ctx);
         sess.paintAll(.idle);
         try stdout.flush();
-        sess.dirty = true;
         return .ok;
     }
     takeSteering(sess);
@@ -400,4 +417,36 @@ test "auto resolves to a level of the model's own, and only auto does" {
     ep.effort = "";
     applyEffort(&ep, cmds.auto_effort, "", "why does this deadlock?", 0);
     try std.testing.expectEqualStrings("", ep.effort);
+}
+
+test "interrupt harness: recordInterrupted marks session and transcript" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var sess = Session.testing(std.testing.allocator);
+    defer sess.deinit();
+    var ctx = sess.cmdCtx();
+    var trace = agent.Trace{};
+    const prompt = "count from 1 to 100";
+    try recordInterrupted(
+        &sess,
+        std.testing.allocator,
+        arena_state.allocator(),
+        std.testing.io,
+        "/tmp",
+        prompt,
+        prompt,
+        "1\n2\n3\n",
+        &trace,
+        &ctx,
+    );
+    try std.testing.expect(sess.state.interrupted);
+    try std.testing.expect(sess.state.had_turn);
+    try std.testing.expect(std.mem.indexOf(u8, sess.shown.bytes(), "Interrupted") != null);
+}
+
+test "interrupt harness: esc sets cancel through sink wantsStop" {
+    var cancelled = std.atomic.Value(bool).init(false);
+    try std.testing.expect(sink.wantsStop("\x1b"));
+    cancelled.store(sink.wantsStop("\x1b"), .release);
+    try std.testing.expect(cancelled.load(.acquire));
 }

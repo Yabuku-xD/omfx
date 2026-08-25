@@ -74,6 +74,11 @@ if [ -n "${OMFX_E2E_OFFLINE:-}" ]; then
   v="$("$BIN" version 2>&1)" && [ -n "$v" ] \
     && ok "launch: $v" || bad "the binary did not run: $v"
   "$BIN" help >/dev/null 2>&1 && ok "launch: help exits clean" || bad "help failed"
+  if zig build test -- --test-filter "interrupt harness" >/dev/null 2>&1; then
+    ok "interrupt harness: unit tests pass"
+  else
+    bad "interrupt harness unit tests failed"
+  fi
   echo
   printf '%d passed, %d failed (offline: model cases not run)\n' "$PASS" "$FAIL"
   [ "$FAIL" -eq 0 ]
