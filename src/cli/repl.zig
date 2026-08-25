@@ -123,10 +123,6 @@ pub fn run(
     }
     const skill_roots = skills.readAccessRoots(arena, io, home, workspace) catch &.{};
     sess.read_extra = skill_roots;
-    const path_scope = pathing.Scope.enter(sess.pathAccess());
-    defer path_scope.exit();
-    const todo_scope = todos.Scope.enter(&sess.tasks);
-    defer todo_scope.exit();
     sess.skill_specs = loop_mod.skillSpecs(&sess);
     var raw = tty.Raw.enter();
     defer raw.leave();
@@ -532,8 +528,6 @@ test "the task list pins while there is work left, then gets out of the way" {
     var rows: [todos.max_items][]const u8 = undefined;
 
     // Scoped to this session, not process-wide.
-    const todo_scope = todos.Scope.enter(&sess.tasks);
-    defer todo_scope.exit();
     const none = try sess.tasks.applyJson(std.testing.allocator, "{\"todos\":[]}");
     std.testing.allocator.free(none);
     try std.testing.expectEqual(@as(usize, 0), sess.pinTodos(&rows).len);

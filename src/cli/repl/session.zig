@@ -34,7 +34,7 @@ pub const Session = struct {
 
     state: cmds.State,
     shown: tui.Transcript,
-    /// Open todos for this session. Bound into `todos.active` for the REPL lifetime.
+    /// Open todos for this session.
     tasks: todo_mod.List = .{},
     /// Skill read roots cached at startup; folded into path access for the session.
     read_extra: []const []const u8 = &.{},
@@ -159,6 +159,8 @@ pub const Session = struct {
             .flag_model = self.parsed.model,
             .shown = &self.shown,
             .state = &self.state,
+            .read_extra = &self.read_extra,
+            .tasks = &self.tasks,
         };
     }
 
@@ -174,11 +176,6 @@ pub const Session = struct {
             .read_extra = self.read_extra,
         };
     }
-
-    pub fn syncPathing(self: *const Session) void {
-        pathing.setAccess(self.pathAccess());
-    }
-
     /// Minimal session for unit tests (no tty).
     pub fn testing(allocator: std.mem.Allocator) Session {
         return .{

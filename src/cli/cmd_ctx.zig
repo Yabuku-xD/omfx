@@ -15,6 +15,8 @@ const auth = @import("../providers/auth.zig");
 const registry = @import("../providers/registry.zig");
 const undo = @import("../tools/undo.zig");
 const permissions = @import("../core/permissions.zig");
+const pathing = @import("../tools/pathing.zig");
+const todos = @import("../core/todos.zig");
 
 pub const Flow = union(enum) {
     handled,
@@ -215,7 +217,17 @@ pub const Ctx = struct {
     flag_model: ?[]const u8,
     shown: *tui.Transcript,
     state: *State,
+    read_extra: *[]const []const u8,
+    tasks: *todos.List,
 };
+
+pub fn pathAccess(ctx: *const Ctx) pathing.Access {
+    return .{
+        .workspace = ctx.workspace,
+        .extra = ctx.state.extraSlice(),
+        .read_extra = ctx.read_extra.*,
+    };
+}
 pub fn footerPerm(state: *const State) []const u8 {
     return switch (state.plan) {
         .on => "plan",

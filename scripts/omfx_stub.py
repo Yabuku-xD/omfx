@@ -1,7 +1,29 @@
 import json
+import os
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 STATE = {"n": 0}
+
+
+def _messages(req: dict) -> list:
+    return req.get("messages") or []
+
+
+def _is_count_prompt(req: dict) -> bool:
+    blob = json.dumps(req).lower()
+    return "count" in blob and "2000" in blob
+
+
+def _stream_count(wfile, max_n: int = 2000, delay: float = 0.02) -> None:
+    for i in range(1, max_n + 1):
+        chunk = {
+            "choices": [{"delta": {"content": "%d\n" % i}, "index": 0}],
+        }
+        wfile.write(("data: %s\n\n" % json.dumps(chunk)).encode())
+        wfile.flush()
+        time.sleep(delay)
+    wfile.write(b"data: [DONE]\n\n")
 
 
 class H(BaseHTTPRequestHandler):
@@ -16,6 +38,12 @@ class H(BaseHTTPRequestHandler):
         except Exception:
             req = {}
         stream = bool(req.get("stream"))
+        if _is_count_prompt(req):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            _stream_count(self.wfile)
+            return
         STATE["n"] += 1
         turn = STATE["n"]
         if turn == 1:
@@ -141,5 +169,6 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print("listening 8765", flush=True)
-    HTTPServer(("127.0.0.1", 8765), H).serve_forever()
+    port = int(os.environ.get("OMFX_STUB_PORT", "8765"))
+    print("listening %d" % port, flush=True)
+    HTTPServer(("127.0.0.1", port), H).serve_forever()

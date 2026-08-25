@@ -33,6 +33,7 @@ pub const Deps = struct {
     stdin: *Io.Reader,
     slash_buf: *[tui.max_slash_hits]slash.Spec,
     exit_eof: *bool,
+    at_store: *[32][96]u8,
 };
 
 pub const startSel = pointer.startSel;

@@ -16,8 +16,7 @@ const slash = @import("../core/slash.zig");
 
 const log = std.log.scoped(.live);
 
-fn pinTodoChrome(allocator: std.mem.Allocator, cols: u16, rows: [][]const u8) []const []const u8 {
-    const list = todos.get();
+fn pinTodoChrome(allocator: std.mem.Allocator, cols: u16, list: *const todos.List, rows: [][]const u8) []const []const u8 {
     if (list.n == 0) return &.{};
     const c = list.counts();
     if (c.done == c.total) return &.{};
@@ -63,8 +62,7 @@ fn scrollRowsFor(layout: *const tui.Layout, scroll: usize, task_n: usize, peek_n
     return if (full > overlay) full - overlay else full;
 }
 
-fn footerTaskCount() usize {
-    const list = todos.get();
+fn footerTaskCount(list: *const todos.List) usize {
     if (list.n == 0) return 0;
     const c = list.counts();
     if (c.done == c.total) return 0;
@@ -118,6 +116,7 @@ pub const Live = union(enum) {
         runs: *runs_mod.Store,
         arena: std.mem.Allocator,
         paint_lock: std.atomic.Value(u32) = .init(0),
+        tasks: *const todos.List,
         last_status_ms: ?i64 = null,
         last_title: [96]u8 = undefined,
         last_title_len: usize = 0,
@@ -300,7 +299,7 @@ pub const Live = union(enum) {
         const next = tui.stepScroll(
             self.scroll.*,
             self.shown.rowCount(),
-            scrollRowsFor(self.layout, self.scroll.*, footerTaskCount(), if (sink.contextPeekOn()) 5 else 0),
+            scrollRowsFor(self.layout, self.scroll.*, footerTaskCount(self.tasks), if (sink.contextPeekOn()) 5 else 0),
             up,
             step,
         );
@@ -376,7 +375,7 @@ pub const Live = union(enum) {
         // header in sync instead of freezing the turn-start snapshot.
         if (self.act.state.tokens != 0) footer.context_used = self.act.state.tokens;
         var todo_rows: [todos.max_items][]const u8 = undefined;
-        footer.tasks = pinTodoChrome(self.arena, self.layout.cols, &todo_rows);
+        footer.tasks = pinTodoChrome(self.arena, self.layout.cols, self.tasks, &todo_rows);
         var peek_rows: [6][]const u8 = undefined;
         footer.peek = if (sink.contextPeekOn())
             formatContextPeek(self.arena, self.layout.cols, self.act.state, footer.context_window, &peek_rows)
@@ -944,6 +943,7 @@ const TtyCase = struct {
     scratch: std.heap.ArenaAllocator,
     run: Live.Run,
     runs: runs_mod.Store,
+    tasks: todos.List = .{},
     live: Live,
 
     fn setup(self: *TtyCase, cols: u16, footer: tui.Footer) void {
@@ -960,6 +960,7 @@ const TtyCase = struct {
         self.scratch = .init(std.testing.allocator);
         self.run = .{};
         self.runs = runs_mod.Store.init(std.testing.allocator);
+        self.tasks = .{};
         self.live = tty(.{
             .stdout = &self.aw.writer,
             .stdin = &self.stdin,
@@ -976,6 +977,7 @@ const TtyCase = struct {
             .runs = &self.runs,
             .arena = self.scratch.allocator(),
             .scroll = &self.scroll,
+            .tasks = &self.tasks,
         });
     }
 

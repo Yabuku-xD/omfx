@@ -121,15 +121,15 @@ pub fn recordWrite(
     allocator: std.mem.Allocator,
     dir: Io.Dir,
     io: Io,
-    workspace: []const u8,
+    access: pathing.Access,
     path: []const u8,
 ) void {
-    pathing.assertInside(workspace, path) catch return;
+    pathing.assertInside(access, path) catch return;
     ensureDir(dir, io);
     const index = indexBlob(allocator, dir, io) catch return;
     defer allocator.free(index);
     const slot = nextSlot(index);
-    if (fs.read(dir, io, allocator, workspace, path)) |body| {
+    if (fs.read(dir, io, allocator, access, path)) |body| {
         defer allocator.free(body);
         writeBlob(dir, io, slot, body);
         var line_buf: [256]u8 = undefined;
@@ -146,15 +146,15 @@ pub fn recordDelete(
     allocator: std.mem.Allocator,
     dir: Io.Dir,
     io: Io,
-    workspace: []const u8,
+    access: pathing.Access,
     path: []const u8,
 ) void {
-    pathing.assertInside(workspace, path) catch return;
+    pathing.assertInside(access, path) catch return;
     ensureDir(dir, io);
     const index = indexBlob(allocator, dir, io) catch return;
     defer allocator.free(index);
     const slot = nextSlot(index);
-    if (fs.read(dir, io, allocator, workspace, path)) |body| {
+    if (fs.read(dir, io, allocator, access, path)) |body| {
         defer allocator.free(body);
         writeBlob(dir, io, slot, body);
         var line_buf: [256]u8 = undefined;
@@ -167,12 +167,12 @@ pub fn recordRename(
     allocator: std.mem.Allocator,
     dir: Io.Dir,
     io: Io,
-    workspace: []const u8,
+    access: pathing.Access,
     from: []const u8,
     to: []const u8,
 ) void {
-    pathing.assertInside(workspace, from) catch return;
-    pathing.assertInside(workspace, to) catch return;
+    pathing.assertInside(access, from) catch return;
+    pathing.assertInside(access, to) catch return;
     ensureDir(dir, io);
     var line_buf: [320]u8 = undefined;
     const line = std.fmt.bufPrint(&line_buf, "{{\"k\":\"rename\",\"a\":\"{s}\",\"b\":\"{s}\"}}\n", .{ from, to }) catch return;
@@ -199,20 +199,20 @@ pub fn depth(allocator: std.mem.Allocator, dir: Io.Dir, io: Io) usize {
     return n;
 }
 
-pub fn popTo(allocator: std.mem.Allocator, dir: Io.Dir, io: Io, workspace: []const u8, keep: usize) ![]u8 {
+pub fn popTo(allocator: std.mem.Allocator, dir: Io.Dir, io: Io, access: pathing.Access, keep: usize) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     var n = depth(allocator, dir, io);
     if (n <= keep) return allocator.dupe(u8, "no file changes to rewind\n");
     while (n > keep) : (n -= 1) {
-        const msg = try pop(allocator, dir, io, workspace);
+        const msg = try pop(allocator, dir, io, access);
         defer allocator.free(msg);
         try out.appendSlice(allocator, msg);
     }
     return out.toOwnedSlice(allocator);
 }
 
-pub fn pop(allocator: std.mem.Allocator, dir: Io.Dir, io: Io, workspace: []const u8) ![]u8 {
+pub fn pop(allocator: std.mem.Allocator, dir: Io.Dir, io: Io, access: pathing.Access) ![]u8 {
     const blob = try indexBlob(allocator, dir, io);
     defer allocator.free(blob);
     if (blob.len == 0) return allocator.dupe(u8, "nothing to undo\n");
@@ -223,7 +223,7 @@ pub fn pop(allocator: std.mem.Allocator, dir: Io.Dir, io: Io, workspace: []const
         .overwrite => |w| blk: {
             const body = readBlob(allocator, dir, io, w.slot) orelse break :blk try allocator.dupe(u8, "undo: missing snapshot\n");
             defer allocator.free(body);
-            try fs.write(dir, io, allocator, workspace, w.path, body);
+            try fs.write(dir, io, allocator, access, w.path, body);
             break :blk try std.fmt.allocPrint(allocator, "undid write {s}\n", .{w.path});
         },
         .create => |path| blk: {
@@ -233,7 +233,7 @@ pub fn pop(allocator: std.mem.Allocator, dir: Io.Dir, io: Io, workspace: []const
         .delete => |d| blk: {
             const body = readBlob(allocator, dir, io, d.slot) orelse break :blk try allocator.dupe(u8, "undo: missing snapshot\n");
             defer allocator.free(body);
-            try fs.write(dir, io, allocator, workspace, d.path, body);
+            try fs.write(dir, io, allocator, access, d.path, body);
             break :blk try std.fmt.allocPrint(allocator, "undid delete {s}\n", .{d.path});
         },
         .rename => |r| blk: {
@@ -252,13 +252,13 @@ test "write then undo restores previous body" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const a = std.testing.allocator;
-    try fs.write(tmp.dir, io, a, "ws", "a.txt", "old");
-    recordWrite(a, tmp.dir, io, "ws", "a.txt");
-    try fs.write(tmp.dir, io, a, "ws", "a.txt", "new");
-    const msg = try pop(a, tmp.dir, io, "ws");
+    try fs.write(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt", "old");
+    recordWrite(a, tmp.dir, io, .{ .workspace = "ws" }, "a.txt");
+    try fs.write(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt", "new");
+    const msg = try pop(a, tmp.dir, io, .{ .workspace = "ws" });
     defer a.free(msg);
     try std.testing.expect(std.mem.indexOf(u8, msg, "undid write") != null);
-    const got = try fs.read(tmp.dir, io, a, "ws", "a.txt");
+    const got = try fs.read(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt");
     defer a.free(got);
     try std.testing.expectEqualStrings("old", got);
 }
@@ -268,18 +268,18 @@ test "undo create deletes the file" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const a = std.testing.allocator;
-    recordWrite(a, tmp.dir, io, "ws", "b.txt");
-    try fs.write(tmp.dir, io, a, "ws", "b.txt", "fresh");
-    const msg = try pop(a, tmp.dir, io, "ws");
+    recordWrite(a, tmp.dir, io, .{ .workspace = "ws" }, "b.txt");
+    try fs.write(tmp.dir, io, a, .{ .workspace = "ws" }, "b.txt", "fresh");
+    const msg = try pop(a, tmp.dir, io, .{ .workspace = "ws" });
     defer a.free(msg);
     try std.testing.expect(std.mem.indexOf(u8, msg, "undid create") != null);
-    try std.testing.expectError(error.FileNotFound, fs.read(tmp.dir, io, a, "ws", "b.txt"));
+    try std.testing.expectError(error.FileNotFound, fs.read(tmp.dir, io, a, .{ .workspace = "ws" }, "b.txt"));
 }
 
 test "pop on empty says nothing to undo" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const msg = try pop(std.testing.allocator, tmp.dir, std.testing.io, "ws");
+    const msg = try pop(std.testing.allocator, tmp.dir, std.testing.io, .{ .workspace = "ws" });
     defer std.testing.allocator.free(msg);
     try std.testing.expectEqualStrings("nothing to undo\n", msg);
 }
@@ -289,16 +289,16 @@ test "popTo restores down to a recorded depth" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const a = std.testing.allocator;
-    try fs.write(tmp.dir, io, a, "ws", "a.txt", "one");
-    recordWrite(a, tmp.dir, io, "ws", "a.txt");
-    try fs.write(tmp.dir, io, a, "ws", "a.txt", "two");
+    try fs.write(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt", "one");
+    recordWrite(a, tmp.dir, io, .{ .workspace = "ws" }, "a.txt");
+    try fs.write(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt", "two");
     try std.testing.expectEqual(@as(usize, 1), depth(a, tmp.dir, io));
-    recordWrite(a, tmp.dir, io, "ws", "a.txt");
-    try fs.write(tmp.dir, io, a, "ws", "a.txt", "three");
+    recordWrite(a, tmp.dir, io, .{ .workspace = "ws" }, "a.txt");
+    try fs.write(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt", "three");
     try std.testing.expectEqual(@as(usize, 2), depth(a, tmp.dir, io));
-    const msg = try popTo(a, tmp.dir, io, "ws", 0);
+    const msg = try popTo(a, tmp.dir, io, .{ .workspace = "ws" }, 0);
     defer a.free(msg);
-    const got = try fs.read(tmp.dir, io, a, "ws", "a.txt");
+    const got = try fs.read(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt");
     defer a.free(got);
     try std.testing.expectEqualStrings("one", got);
 }

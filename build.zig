@@ -95,4 +95,12 @@ pub fn build(b: *std.Build) void {
 
     const fmt_step = b.step("fmt", "Check formatting");
     fmt_step.dependOn(&b.addFmt(.{ .paths = &.{ "src", "tools", "build.zig" }, .check = true }).step);
+
+    const e2e_offline = b.addSystemCommand(&.{
+        "bash", "-c", "OMFX_E2E_OFFLINE=1 python3 scripts/e2e.py",
+    });
+    e2e_offline.setCwd(b.path("."));
+    e2e_offline.step.dependOn(b.getInstallStep());
+    const e2e_offline_step = b.step("e2e-offline", "Run offline end-to-end harness");
+    e2e_offline_step.dependOn(&e2e_offline.step);
 }

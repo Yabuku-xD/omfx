@@ -5,6 +5,7 @@ const std = @import("std");
 const Io = std.Io;
 const board = @import("board.zig");
 const snip = @import("packet_snip.zig");
+const todos = @import("todos.zig");
 
 const log = std.log.scoped(.handoff);
 
@@ -29,6 +30,7 @@ pub fn build(
     workspace: []const u8,
     id: []const u8,
     input: Input,
+    tasks: *const todos.List,
 ) !Built {
     const goal = snip.clipGoal(input.goal);
     const tail = board.loadTail(allocator, io, workspace);
@@ -49,7 +51,7 @@ pub fn build(
 
     var todo_buf: std.ArrayList(u8) = .empty;
     defer todo_buf.deinit(allocator);
-    try snip.appendTodos(allocator, &todo_buf);
+    try snip.appendTodos(allocator, tasks, &todo_buf);
 
     var recall_buf: std.ArrayList(u8) = .empty;
     defer recall_buf.deinit(allocator);
@@ -146,7 +148,7 @@ test "build stub has no last_reply dump" {
         .goal = "ship handoff",
         .last_tool = "write",
         .last_reply = "SECRET_SHOULD_NOT_APPEAR " ** 20,
-    });
+    }, &.{});
     defer a.free(built.stub);
     defer a.free(built.packet);
     defer a.free(built.rel_path);

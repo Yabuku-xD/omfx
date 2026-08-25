@@ -657,7 +657,8 @@ test "a todo card keeps its own styling and skips the preview cap" {
         try body.print(a, "\"task {d}\"", .{i});
     }
     try body.appendSlice(a, "]}");
-    const card = try todos.set(a, body.items);
+    var list: todos.List = .{};
+    const card = try list.applyJson(a, body.items);
     defer a.free(card);
 
     const out = try formatTool(a, 80, "todo", "", true, card);

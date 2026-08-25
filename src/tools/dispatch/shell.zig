@@ -50,7 +50,7 @@ pub fn run(
                     break :blk try allocator.dupe(u8, "read_result: bad job id\n");
                 const path = try jobs.logRel(allocator, n);
                 defer allocator.free(path);
-                const raw = fs.read(dir, io, allocator, workspace, path) catch
+                const raw = fs.read(dir, io, allocator, .{ .workspace = workspace }, path) catch
                     break :blk try std.fmt.allocPrint(allocator, "read_result: no job log for {d}\n", .{n});
                 defer allocator.free(raw);
                 if (hooks.hasSecret(raw)) {

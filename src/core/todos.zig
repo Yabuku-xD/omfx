@@ -1,6 +1,6 @@
 //! The turn's task list: what the model said it would do, and how far it got.
 //!
-//! Held in memory for the life of the process, like `pathing`'s access rules.
+//! Held per session and threaded explicitly through dispatch and the REPL.
 //! It is a display of the model's stated plan, not a durable record -- nothing
 //! reads it back after a restart, so persisting it would only invite someone to
 //! trust a stale one.
@@ -84,6 +84,15 @@ pub const List = struct {
         return .{ .done = done, .total = self.n };
     }
 
+    /// The task the model says it is on, for the activity line. Empty when the
+    /// model has not posted a list, or has nothing in progress.
+    pub fn inProgress(self: *const List) []const u8 {
+        for (self.items[0..self.n]) |*item| {
+            if (item.status == .in_progress) return item.slice();
+        }
+        return "";
+    }
+
     /// The card shown in the transcript. Plain text plus SGR, no cursor moves:
     /// it scrolls with everything else rather than pinning itself anywhere.
     pub fn render(self: *const List, allocator: std.mem.Allocator) ![]u8 {
@@ -152,65 +161,29 @@ pub const List = struct {
     }
 };
 
-var active: *List = &fallback;
-var fallback: List = .{};
-
-pub const Scope = struct {
-    prev: *List,
-
-    pub fn enter(list: *List) Scope {
-        const s: Scope = .{ .prev = active };
-        active = list;
-        return s;
-    }
-
-    pub fn exit(self: Scope) void {
-        active = self.prev;
-    }
-};
-
-/// The task the model says it is on, for the activity line. Empty when the
-/// model has not posted a list, or has nothing in progress.
-pub fn inProgress() []const u8 {
-    for (active.items[0..active.n]) |*item| {
-        if (item.status == .in_progress) return item.slice();
-    }
-    return "";
-}
-
-pub fn get() *const List {
-    return active;
-}
-
-/// Replaces the whole list, the way the model always sends it: one authoritative
-/// snapshot per call. Merging partial updates would need stable ids that the
-/// model has no reason to keep straight.
-pub fn set(allocator: std.mem.Allocator, args_json: []const u8) ![]u8 {
-    return active.applyJson(allocator, args_json);
-}
-
 test "set parses objects, bare strings, and status words" {
     const a = std.testing.allocator;
-    const out = try set(a,
+    var list: List = .{};
+    const out = try list.applyJson(a,
         \\{"todos":[{"content":"one","status":"completed"},{"content":"two","status":"in_progress"},"three"]}
     );
     defer a.free(out);
-    const l = get();
-    try std.testing.expectEqual(@as(usize, 3), l.n);
-    try std.testing.expectEqual(Status.done, l.items[0].status);
-    try std.testing.expectEqual(Status.in_progress, l.items[1].status);
-    try std.testing.expectEqual(Status.pending, l.items[2].status);
+    try std.testing.expectEqual(@as(usize, 3), list.n);
+    try std.testing.expectEqual(Status.done, list.items[0].status);
+    try std.testing.expectEqual(Status.in_progress, list.items[1].status);
+    try std.testing.expectEqual(Status.pending, list.items[2].status);
     try std.testing.expect(std.mem.indexOf(u8, out, "Tasks 1/3") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "three") != null);
 }
 
 test "set replaces rather than appends" {
     const a = std.testing.allocator;
-    const first = try set(a, "{\"todos\":[\"wire the parser\",\"drop the shim\"]}");
+    var list: List = .{};
+    const first = try list.applyJson(a, "{\"todos\":[\"wire the parser\",\"drop the shim\"]}");
     a.free(first);
-    const second = try set(a, "{\"todos\":[\"ship it\"]}");
+    const second = try list.applyJson(a, "{\"todos\":[\"ship it\"]}");
     defer a.free(second);
-    try std.testing.expectEqual(@as(usize, 1), get().n);
+    try std.testing.expectEqual(@as(usize, 1), list.n);
     try std.testing.expect(std.mem.indexOf(u8, second, "wire the parser") == null);
     try std.testing.expect(std.mem.indexOf(u8, second, "ship it") != null);
 }
@@ -226,31 +199,34 @@ test "an over-long list says what it dropped" {
         try body.print(a, "\"task {d}\"", .{i});
     }
     try body.appendSlice(a, "]}");
-    const out = try set(a, body.items);
+    var list: List = .{};
+    const out = try list.applyJson(a, body.items);
     defer a.free(out);
-    try std.testing.expectEqual(max_items, get().n);
-    try std.testing.expectEqual(@as(usize, 3), get().dropped);
+    try std.testing.expectEqual(max_items, list.n);
+    try std.testing.expectEqual(@as(usize, 3), list.dropped);
     try std.testing.expect(std.mem.indexOf(u8, out, "max_items=20") != null);
 }
 
 test "bad json is an error, not an empty list" {
     const a = std.testing.allocator;
-    const keep = try set(a, "{\"todos\":[\"keep\"]}");
+    var list: List = .{};
+    const keep = try list.applyJson(a, "{\"todos\":[\"keep\"]}");
     a.free(keep);
-    try std.testing.expectError(error.BadTodos, set(a, "not json"));
-    try std.testing.expectError(error.BadTodos, set(a, "{\"nope\":1}"));
-    try std.testing.expectEqual(@as(usize, 1), get().n);
+    try std.testing.expectError(error.BadTodos, list.applyJson(a, "not json"));
+    try std.testing.expectError(error.BadTodos, list.applyJson(a, "{\"nope\":1}"));
+    try std.testing.expectEqual(@as(usize, 1), list.n);
 }
 
 test "inProgress names the active task, or nothing" {
     const a = std.testing.allocator;
-    const out = try set(a,
+    var list: List = .{};
+    const out = try list.applyJson(a,
         \\{"todos":[{"content":"read the parser","status":"completed"},{"content":"wire the panel","status":"in_progress"},{"content":"ship","status":"pending"}]}
     );
     defer a.free(out);
-    try std.testing.expectEqualStrings("wire the panel", inProgress());
+    try std.testing.expectEqualStrings("wire the panel", list.inProgress());
 
-    const none = try set(a, "{\"todos\":[{\"content\":\"only pending\",\"status\":\"pending\"}]}");
+    const none = try list.applyJson(a, "{\"todos\":[{\"content\":\"only pending\",\"status\":\"pending\"}]}");
     defer a.free(none);
-    try std.testing.expectEqualStrings("", inProgress());
+    try std.testing.expectEqualStrings("", list.inProgress());
 }

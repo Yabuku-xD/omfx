@@ -33,7 +33,8 @@ pub fn rejectIfNewlyBroken(
     const written = dir.readFileAlloc(io, rel, allocator, .limited(fs.max_read_bytes)) catch return null;
     defer allocator.free(written);
 
-    const rewound = undo.popTo(allocator, dir, io, workspace, mark) catch return null;
+    const access: @import("pathing.zig").Access = .{ .workspace = workspace };
+    const rewound = undo.popTo(allocator, dir, io, access, mark) catch return null;
     allocator.free(rewound);
 
     const before = diag.afterWrite(allocator, io, workspace, dir, rel) catch return null;
@@ -42,8 +43,8 @@ pub fn rejectIfNewlyBroken(
     if (isFindings(before)) {
         // Already broken before this edit. Put the edit back and let the
         // ordinary report carry the news.
-        undo.recordWrite(allocator, dir, io, workspace, rel);
-        fs.write(dir, io, allocator, workspace, rel, written) catch |err| {
+        undo.recordWrite(allocator, dir, io, access, rel);
+        fs.write(dir, io, allocator, access, rel, written) catch |err| {
             log.warn("restoring {s} after a false rejection: {s}", .{ rel, @errorName(err) });
         };
         return null;
@@ -88,11 +89,11 @@ test "an edit that breaks a good file is undone" {
     const ws = try @import("pathing.zig").testWorkspace(a, &tmp);
     defer a.free(ws);
 
-    try fs.write(tmp.dir, io, a, ws, "m.zig", "pub fn a() void {}\n");
+    try fs.write(tmp.dir, io, a, .{ .workspace = ws }, "m.zig", "pub fn a() void {}\n");
     const mark = undo.depth(a, tmp.dir, io);
 
-    undo.recordWrite(a, tmp.dir, io, ws, "m.zig");
-    try fs.write(tmp.dir, io, a, ws, "m.zig", "pub fn a() void {\n");
+    undo.recordWrite(a, tmp.dir, io, .{ .workspace = ws }, "m.zig");
+    try fs.write(tmp.dir, io, a, .{ .workspace = ws }, "m.zig", "pub fn a() void {\n");
 
     const note = try diag.afterWrite(a, io, ws, tmp.dir, "m.zig");
     defer a.free(note);
@@ -100,7 +101,7 @@ test "an edit that breaks a good file is undone" {
     defer if (msg) |m| a.free(m);
 
     try std.testing.expect(msg != null);
-    const back = try fs.read(tmp.dir, io, a, ws, "m.zig");
+    const back = try fs.read(tmp.dir, io, a, .{ .workspace = ws }, "m.zig");
     defer a.free(back);
     try std.testing.expectEqualStrings("pub fn a() void {}\n", back);
 }
@@ -115,11 +116,11 @@ test "an edit to an already-broken file stands" {
 
     // Broken before the edit and still broken after: the edit is not the
     // cause, so undoing it would strand the model on a file it cannot fix.
-    try fs.write(tmp.dir, io, a, ws, "m.zig", "pub fn a() void {\n");
+    try fs.write(tmp.dir, io, a, .{ .workspace = ws }, "m.zig", "pub fn a() void {\n");
     const mark = undo.depth(a, tmp.dir, io);
 
-    undo.recordWrite(a, tmp.dir, io, ws, "m.zig");
-    try fs.write(tmp.dir, io, a, ws, "m.zig", "pub fn a() void {\n// halfway there\n");
+    undo.recordWrite(a, tmp.dir, io, .{ .workspace = ws }, "m.zig");
+    try fs.write(tmp.dir, io, a, .{ .workspace = ws }, "m.zig", "pub fn a() void {\n// halfway there\n");
 
     const note = try diag.afterWrite(a, io, ws, tmp.dir, "m.zig");
     defer a.free(note);
@@ -127,7 +128,7 @@ test "an edit to an already-broken file stands" {
     defer if (msg) |m| a.free(m);
 
     try std.testing.expect(msg == null);
-    const kept = try fs.read(tmp.dir, io, a, ws, "m.zig");
+    const kept = try fs.read(tmp.dir, io, a, .{ .workspace = ws }, "m.zig");
     defer a.free(kept);
     try std.testing.expect(std.mem.indexOf(u8, kept, "halfway there") != null);
 }

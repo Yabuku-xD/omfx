@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const fs = @import("fs.zig");
+const pathing = @import("pathing.zig");
 const langs = @import("../core/langs.zig");
 const lex = @import("../core/lex.zig");
 
@@ -68,13 +69,13 @@ pub fn splice(
     dir: Io.Dir,
     io: Io,
     allocator: std.mem.Allocator,
-    workspace: []const u8,
+    access: pathing.Access,
     rel: []const u8,
     symbol: []const u8,
     action: Action,
     text: []const u8,
 ) !void {
-    const src = try fs.read(dir, io, allocator, workspace, rel);
+    const src = try fs.read(dir, io, allocator, access, rel);
     defer allocator.free(src);
     if (!bracesOk(src)) return error.StructureBroken;
     var items: [max_symbols]Item = undefined;
@@ -87,7 +88,7 @@ pub fn splice(
     const next = try applySplice(allocator, src, item, action, payload);
     defer allocator.free(next);
     if (!bracesOk(next)) return error.StructureBroken;
-    try fs.write(dir, io, allocator, workspace, rel, next);
+    try fs.write(dir, io, allocator, access, rel, next);
 }
 
 fn unescape(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
@@ -229,9 +230,9 @@ test "splice inserts inside a fn without breaking braces" {
         \\}
         \\
     ;
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "a.zig", src);
-    try splice(tmp.dir, io, std.testing.allocator, "ws", "a.zig", "foo", .inside, "    bar();\n");
-    const got = try fs.read(tmp.dir, io, std.testing.allocator, "ws", "a.zig");
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "a.zig", src);
+    try splice(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "a.zig", "foo", .inside, "    bar();\n");
+    const got = try fs.read(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "a.zig");
     defer std.testing.allocator.free(got);
     try std.testing.expect(std.mem.indexOf(u8, got, "bar();") != null);
     try std.testing.expect(bracesOk(got));
@@ -250,9 +251,9 @@ test "splice delete removes a whole fn" {
         \\}
         \\
     ;
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "a.zig", src);
-    try splice(tmp.dir, io, std.testing.allocator, "ws", "a.zig", "foo", .delete, "");
-    const got = try fs.read(tmp.dir, io, std.testing.allocator, "ws", "a.zig");
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "a.zig", src);
+    try splice(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "a.zig", "foo", .delete, "");
+    const got = try fs.read(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "a.zig");
     defer std.testing.allocator.free(got);
     try std.testing.expect(std.mem.indexOf(u8, got, "foo") == null);
     try std.testing.expect(std.mem.indexOf(u8, got, "fn bar") != null);

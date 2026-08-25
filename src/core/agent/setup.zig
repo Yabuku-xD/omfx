@@ -18,6 +18,8 @@ const pclient = @import("../../providers/client.zig");
 const memory_mod = @import("../../tools/memory.zig");
 const repomap = @import("../repomap.zig");
 const sink = @import("../sink.zig");
+const pathing = @import("../../tools/pathing.zig");
+const todos = @import("../todos.zig");
 
 pub const max_read_paths: usize = 64;
 
@@ -146,6 +148,8 @@ pub const Run = struct {
     auth_json: []const u8 = "",
     session_rules: []const permissions.Rule = &.{},
     failures: usize = 0,
+    path_access: pathing.Access = .{ .workspace = "" },
+    tasks: ?*todos.List = null,
 };
 
 /// HTTP failures collapse here. A peer re-enters `chatOnce` from `chatTurn`, so
@@ -528,7 +532,6 @@ test "a clean verify records a playbook entry without a board" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const pathing = @import("../../tools/pathing.zig");
     const ws = try pathing.testWorkspace(a, &tmp);
     defer a.free(ws);
 
@@ -549,7 +552,6 @@ test "a failed verify still records a harmful entry" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const pathing = @import("../../tools/pathing.zig");
     const ws = try pathing.testWorkspace(a, &tmp);
     defer a.free(ws);
 

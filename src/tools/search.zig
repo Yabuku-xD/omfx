@@ -217,7 +217,7 @@ pub fn glob(
     dir: Io.Dir,
     io: Io,
     allocator: std.mem.Allocator,
-    workspace: []const u8,
+    access: pathing.Access,
     pattern: []const u8,
     root: []const u8,
 ) ![]u8 {
@@ -231,7 +231,7 @@ pub fn glob(
     while (try w.next()) |rel| {
         defer allocator.free(rel);
         if (!matchPath(pattern, rel)) continue;
-        pathing.assertInside(workspace, rel) catch continue;
+        pathing.assertInside(access, rel) catch continue;
         try out.appendSlice(allocator, rel);
         try out.append(allocator, '\n');
         n += 1;
@@ -258,7 +258,7 @@ pub fn grep(
     dir: Io.Dir,
     io: Io,
     allocator: std.mem.Allocator,
-    workspace: []const u8,
+    access: pathing.Access,
     needle: []const u8,
     file_glob: []const u8,
     root: []const u8,
@@ -275,7 +275,7 @@ pub fn grep(
     while (try w.next()) |rel| {
         defer allocator.free(rel);
         if (file_glob.len > 0 and !matchPath(file_glob, rel)) continue;
-        pathing.assertInside(workspace, rel) catch continue;
+        pathing.assertInside(access, rel) catch continue;
         const body = dir.readFileAlloc(io, rel, allocator, .limited(max_file_bytes)) catch continue;
         defer allocator.free(body);
         if (binary(body)) continue;
@@ -309,14 +309,14 @@ pub fn grep(
     return out.toOwnedSlice(allocator);
 }
 
-pub fn delete(dir: Io.Dir, io: Io, workspace: []const u8, rel: []const u8) !void {
-    try pathing.assertInside(workspace, rel);
+pub fn delete(dir: Io.Dir, io: Io, access: pathing.Access, rel: []const u8) !void {
+    try pathing.assertInside(access, rel);
     try dir.deleteFile(io, rel);
 }
 
-pub fn rename(dir: Io.Dir, io: Io, workspace: []const u8, from: []const u8, to: []const u8) !void {
-    try pathing.assertInside(workspace, from);
-    try pathing.assertInside(workspace, to);
+pub fn rename(dir: Io.Dir, io: Io, access: pathing.Access, from: []const u8, to: []const u8) !void {
+    try pathing.assertInside(access, from);
+    try pathing.assertInside(access, to);
     try Io.Dir.rename(dir, from, dir, to, io);
 }
 
@@ -324,10 +324,10 @@ pub fn semanticSearch(
     dir: Io.Dir,
     io: Io,
     allocator: std.mem.Allocator,
-    workspace: []const u8,
+    access: pathing.Access,
     query: []const u8,
 ) ![]u8 {
-    _ = workspace;
+    _ = access;
     return repomap.search(allocator, dir, io, query);
 }
 
@@ -352,9 +352,9 @@ test "glob names its hit cap" {
     var name_buf: [16]u8 = undefined;
     while (i < max_glob_hits + 1) : (i += 1) {
         const name = try std.fmt.bufPrint(&name_buf, "f{d}.txt", .{i});
-        try fs.write(tmp.dir, io, std.testing.allocator, "ws", name, "x");
+        try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, name, "x");
     }
-    const got = try glob(tmp.dir, io, std.testing.allocator, "ws", "*.txt", "");
+    const got = try glob(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "*.txt", "");
     defer std.testing.allocator.free(got);
     var cap_buf: [64]u8 = undefined;
     const cap = try std.fmt.bufPrint(&cap_buf, "truncated at {d} files", .{max_glob_hits});
@@ -366,10 +366,10 @@ test "glob after grep on the same dir" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const fs = @import("fs.zig");
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "a.txt", "hello");
-    const g1 = try grep(tmp.dir, io, std.testing.allocator, "ws", "hello", "*", "");
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "a.txt", "hello");
+    const g1 = try grep(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "hello", "*", "");
     defer std.testing.allocator.free(g1);
-    const g2 = try glob(tmp.dir, io, std.testing.allocator, "ws", "*.txt", "");
+    const g2 = try glob(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "*.txt", "");
     defer std.testing.allocator.free(g2);
     try std.testing.expect(std.mem.indexOf(u8, g2, "a.txt") != null);
 }
@@ -379,9 +379,9 @@ test "grep finds needle" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const fs = @import("fs.zig");
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "a.txt", "hello world");
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "b.txt", "nope");
-    const got = try grep(tmp.dir, io, std.testing.allocator, "ws", "hello", "*.txt", "");
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "a.txt", "hello world");
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "b.txt", "nope");
+    const got = try grep(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "hello", "*.txt", "");
     defer std.testing.allocator.free(got);
     try std.testing.expect(std.mem.indexOf(u8, got, "a.txt") != null);
     try std.testing.expect(std.mem.indexOf(u8, got, "b.txt") == null);
@@ -392,8 +392,8 @@ test "grep reports path, line number, and the matching text" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const fs = @import("fs.zig");
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "a.txt", "one\ntwo\n  needle here\nfour\n");
-    const got = try grep(tmp.dir, io, std.testing.allocator, "ws", "needle", "*", "");
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "a.txt", "one\ntwo\n  needle here\nfour\n");
+    const got = try grep(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "needle", "*", "");
     defer std.testing.allocator.free(got);
     try std.testing.expectEqualStrings("a.txt:3: needle here\n", got);
 }
@@ -403,13 +403,13 @@ test "grep and glob descend into subdirectories" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const fs = @import("fs.zig");
-    try fs.mkdir(tmp.dir, io, "ws", "src");
-    try fs.mkdir(tmp.dir, io, "ws", "src/cli");
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "src/cli/tui.zig", "pub const Layout = 1;\n");
-    const hit = try grep(tmp.dir, io, std.testing.allocator, "ws", "Layout", "*", "");
+    try fs.mkdir(tmp.dir, io, .{ .workspace = "ws" }, "src");
+    try fs.mkdir(tmp.dir, io, .{ .workspace = "ws" }, "src/cli");
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "src/cli/tui.zig", "pub const Layout = 1;\n");
+    const hit = try grep(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "Layout", "*", "");
     defer std.testing.allocator.free(hit);
     try std.testing.expect(std.mem.indexOf(u8, hit, "src/cli/tui.zig:1:") != null);
-    const found = try glob(tmp.dir, io, std.testing.allocator, "ws", "**/*.zig", "");
+    const found = try glob(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "**/*.zig", "");
     defer std.testing.allocator.free(found);
     try std.testing.expect(std.mem.indexOf(u8, found, "src/cli/tui.zig") != null);
 }
@@ -419,15 +419,15 @@ test "grep honours a path root and says where it looked" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const fs = @import("fs.zig");
-    try fs.mkdir(tmp.dir, io, "ws", "src");
-    try fs.mkdir(tmp.dir, io, "ws", "docs");
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "src/a.zig", "Layout\n");
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "docs/b.md", "Layout\n");
-    const only = try grep(tmp.dir, io, std.testing.allocator, "ws", "Layout", "*", "src");
+    try fs.mkdir(tmp.dir, io, .{ .workspace = "ws" }, "src");
+    try fs.mkdir(tmp.dir, io, .{ .workspace = "ws" }, "docs");
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "src/a.zig", "Layout\n");
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "docs/b.md", "Layout\n");
+    const only = try grep(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "Layout", "*", "src");
     defer std.testing.allocator.free(only);
     try std.testing.expect(std.mem.indexOf(u8, only, "src/a.zig") != null);
     try std.testing.expect(std.mem.indexOf(u8, only, "docs/b.md") == null);
-    const miss = try grep(tmp.dir, io, std.testing.allocator, "ws", "Layout", "*", "docs/nested");
+    const miss = try grep(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "Layout", "*", "docs/nested");
     defer std.testing.allocator.free(miss);
     try std.testing.expect(std.mem.indexOf(u8, miss, "docs/nested") != null);
 }
@@ -437,11 +437,11 @@ test "walk skips generated trees and binaries" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const fs = @import("fs.zig");
-    try fs.mkdir(tmp.dir, io, "ws", "node_modules");
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "node_modules/dep.js", "needle\n");
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "blob.bin", "needle\x00\n");
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "keep.txt", "needle\n");
-    const got = try grep(tmp.dir, io, std.testing.allocator, "ws", "needle", "*", "");
+    try fs.mkdir(tmp.dir, io, .{ .workspace = "ws" }, "node_modules");
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "node_modules/dep.js", "needle\n");
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "blob.bin", "needle\x00\n");
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "keep.txt", "needle\n");
+    const got = try grep(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "needle", "*", "");
     defer std.testing.allocator.free(got);
     try std.testing.expectEqualStrings("keep.txt:1: needle\n", got);
 }
@@ -451,9 +451,9 @@ test "semantic search ranks by tokens" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const fs = @import("fs.zig");
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "alpha.zig", "pub fn agentLoop() void {}\n");
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "beta.zig", "pub fn unrelated() void {}\n");
-    const got = try semanticSearch(tmp.dir, io, std.testing.allocator, "ws", "agent loop");
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "alpha.zig", "pub fn agentLoop() void {}\n");
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "beta.zig", "pub fn unrelated() void {}\n");
+    const got = try semanticSearch(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "agent loop");
     defer std.testing.allocator.free(got);
     try std.testing.expect(std.mem.indexOf(u8, got, "alpha.zig") != null);
 }

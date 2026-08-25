@@ -30,6 +30,7 @@ const auth = @import("../providers/auth.zig");
 const types = @import("../providers/types.zig");
 const models = @import("../providers/models.zig");
 const registry = @import("../providers/registry.zig");
+const todo_mod = @import("../core/todos.zig");
 const relay = @import("../tools/relay.zig");
 const mcp = @import("../tools/mcp.zig");
 const web_search = @import("../tools/web_search.zig");
@@ -333,6 +334,8 @@ test "bench: slash commands dispatch" {
     const reads = agent.Reads.init(a);
     var state = State{ .mode = .ask, .reads = reads };
     defer state.deinit(a);
+    var read_extra: []const []const u8 = &.{};
+    var tasks = todo_mod.List{};
     var ctx = Ctx{
         .gpa = a,
         .arena = arena,
@@ -346,6 +349,8 @@ test "bench: slash commands dispatch" {
         .flag_model = "grok-4.5",
         .shown = &shown,
         .state = &state,
+        .read_extra = &read_extra,
+        .tasks = &tasks,
     };
 
     const cases = [_][]const u8{

@@ -1,0 +1,24 @@
+name: e2e-live
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: zig build
+      - run: python3 scripts/e2e.py
+        env:
+          OMFX_PROVIDER: commandcode
+          OMFX_MODEL: deepseek/deepseek-v4-flash
+          COMMANDCODE_API_KEY: ${{ secrets.COMMANDCODE_API_KEY }}

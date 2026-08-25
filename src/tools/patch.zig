@@ -90,7 +90,7 @@ pub fn apply(
     allocator: std.mem.Allocator,
     dir: Io.Dir,
     io: Io,
-    workspace: []const u8,
+    access: pathing.Access,
     spec: []const u8,
 ) Error![]u8 {
     if (std.mem.trim(u8, spec, " \t\r\n").len == 0) return error.EmptyPatch;
@@ -113,7 +113,7 @@ pub fn apply(
     var applied: usize = 0;
     errdefer {
         if (applied > 0) {
-            const msg = undo.popTo(allocator, dir, io, workspace, mark) catch null;
+            const msg = undo.popTo(allocator, dir, io, access, mark) catch null;
             if (msg) |m| allocator.free(m);
         }
     }
@@ -121,7 +121,7 @@ pub fn apply(
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     for (steps[0..n]) |step| {
-        try applyStep(allocator, dir, io, workspace, step, &out);
+        try applyStep(allocator, dir, io, access, step, &out);
         applied += 1;
     }
     return out.toOwnedSlice(allocator);
@@ -140,7 +140,7 @@ pub fn applyEdits(
     allocator: std.mem.Allocator,
     dir: Io.Dir,
     io: Io,
-    workspace: []const u8,
+    access: pathing.Access,
     path: []const u8,
     edits: []const Edit,
 ) Error![]u8 {
@@ -148,13 +148,13 @@ pub fn applyEdits(
     if (edits.len > max_ops) return error.ApplyFailed;
     const clean = std.mem.trim(u8, path, " \t\r");
     if (clean.len == 0) return error.MissingPath;
-    try pathing.assertInside(workspace, clean);
+    try pathing.assertInside(access, clean);
 
     const mark = undo.depth(allocator, dir, io);
     var applied: usize = 0;
     errdefer {
         if (applied > 0) {
-            const msg = undo.popTo(allocator, dir, io, workspace, mark) catch null;
+            const msg = undo.popTo(allocator, dir, io, access, mark) catch null;
             if (msg) |m| allocator.free(m);
         }
     }
@@ -163,8 +163,8 @@ pub fn applyEdits(
     errdefer out.deinit(allocator);
     for (edits) |e| {
         if (e.old.len == 0) return error.MissingHunk;
-        undo.recordWrite(allocator, dir, io, workspace, clean);
-        fs.edit(dir, io, allocator, workspace, clean, e.old, e.new) catch |err| switch (err) {
+        undo.recordWrite(allocator, dir, io, access, clean);
+        fs.edit(dir, io, allocator, access, clean, e.old, e.new) catch |err| switch (err) {
             error.OldStringNotUnique => return error.OldStringNotUnique,
             error.OldStringNotFound => return error.OldStringNotFound,
             error.PathEscape => return error.PathEscape,
@@ -181,7 +181,7 @@ fn applyStep(
     allocator: std.mem.Allocator,
     dir: Io.Dir,
     io: Io,
-    workspace: []const u8,
+    access: pathing.Access,
     step: Step,
     out: *std.ArrayList(u8),
 ) Error!void {
@@ -189,7 +189,7 @@ fn applyStep(
         .update => |u| {
             const path = std.mem.trim(u8, u.path, " \t\r");
             if (path.len == 0) return error.MissingPath;
-            try pathing.assertInside(workspace, path);
+            try pathing.assertInside(access, path);
             const old = std.mem.trim(u8, u.old, " \t\r\n");
             if (old.len == 0) return error.MissingHunk;
             switch (u.hash) {
@@ -197,8 +197,8 @@ fn applyStep(
                 .expect => |want| if (hashOf(old) != want) return error.HashMismatch,
                 .bad => return error.HashMismatch,
             }
-            undo.recordWrite(allocator, dir, io, workspace, path);
-            fs.edit(dir, io, allocator, workspace, path, old, u.new) catch |err| switch (err) {
+            undo.recordWrite(allocator, dir, io, access, path);
+            fs.edit(dir, io, allocator, access, path, old, u.new) catch |err| switch (err) {
                 error.OldStringNotUnique => return error.OldStringNotUnique,
                 error.OldStringNotFound => return error.OldStringNotFound,
                 error.PathEscape => return error.PathEscape,
@@ -212,9 +212,9 @@ fn applyStep(
         .add => |a| {
             const path = std.mem.trim(u8, a.path, " \t\r");
             if (path.len == 0) return error.MissingPath;
-            try pathing.assertInside(workspace, path);
-            undo.recordWrite(allocator, dir, io, workspace, path);
-            fs.write(dir, io, allocator, workspace, path, a.contents) catch return error.ApplyFailed;
+            try pathing.assertInside(access, path);
+            undo.recordWrite(allocator, dir, io, access, path);
+            fs.write(dir, io, allocator, access, path, a.contents) catch return error.ApplyFailed;
             try out.appendSlice(allocator, "added ");
             try out.appendSlice(allocator, path);
             try out.append(allocator, '\n');
@@ -222,8 +222,8 @@ fn applyStep(
         .delete => |raw_path| {
             const path = std.mem.trim(u8, raw_path, " \t\r");
             if (path.len == 0) return error.MissingPath;
-            try pathing.assertInside(workspace, path);
-            undo.recordDelete(allocator, dir, io, workspace, path);
+            try pathing.assertInside(access, path);
+            undo.recordDelete(allocator, dir, io, access, path);
             dir.deleteFile(io, path) catch {
                 dir.deleteDir(io, path) catch return error.ApplyFailed;
             };
@@ -307,7 +307,7 @@ test "apply unique hunk and reject a bad hash" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const a = std.testing.allocator;
-    try fs.write(tmp.dir, io, a, "ws", "a.txt", "hello world\n");
+    try fs.write(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt", "hello world\n");
     const spec =
         \\*** Update File: a.txt
         \\hello world
@@ -315,17 +315,17 @@ test "apply unique hunk and reject a bad hash" {
         \\hello there
         \\
     ;
-    const msg = try apply(a, tmp.dir, io, "ws", spec);
+    const msg = try apply(a, tmp.dir, io, .{ .workspace = "ws" }, spec);
     defer a.free(msg);
     try std.testing.expect(std.mem.indexOf(u8, msg, "patched a.txt") != null);
-    const got = try fs.read(tmp.dir, io, a, "ws", "a.txt");
+    const got = try fs.read(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt");
     defer a.free(got);
     try std.testing.expect(std.mem.indexOf(u8, got, "hello there") != null);
 
     var bad: std.ArrayList(u8) = .empty;
     defer bad.deinit(a);
     try bad.appendSlice(a, "*** Update File: a.txt\n*** Hash: 00000000\nhello there\n*** To\nnope\n");
-    try std.testing.expectError(error.HashMismatch, apply(a, tmp.dir, io, "ws", bad.items));
+    try std.testing.expectError(error.HashMismatch, apply(a, tmp.dir, io, .{ .workspace = "ws" }, bad.items));
 }
 
 test "apply maps a non-unique old string" {
@@ -333,7 +333,7 @@ test "apply maps a non-unique old string" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const a = std.testing.allocator;
-    try fs.write(tmp.dir, io, a, "ws", "a.txt", "x x\n");
+    try fs.write(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt", "x x\n");
     const spec =
         \\*** Update File: a.txt
         \\x
@@ -341,7 +341,7 @@ test "apply maps a non-unique old string" {
         \\y
         \\
     ;
-    try std.testing.expectError(error.OldStringNotUnique, apply(a, tmp.dir, io, "ws", spec));
+    try std.testing.expectError(error.OldStringNotUnique, apply(a, tmp.dir, io, .{ .workspace = "ws" }, spec));
 }
 
 test "add and delete files" {
@@ -355,7 +355,7 @@ test "add and delete files" {
         \\*** Delete File: n.txt
         \\
     ;
-    const msg = try apply(a, tmp.dir, io, "ws", spec);
+    const msg = try apply(a, tmp.dir, io, .{ .workspace = "ws" }, spec);
     defer a.free(msg);
     try std.testing.expect(std.mem.indexOf(u8, msg, "added n.txt") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg, "deleted n.txt") != null);
@@ -366,8 +366,8 @@ test "second hunk fail rolls back the first" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const a = std.testing.allocator;
-    try fs.write(tmp.dir, io, a, "ws", "a.txt", "alpha\n");
-    try fs.write(tmp.dir, io, a, "ws", "b.txt", "beta\n");
+    try fs.write(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt", "alpha\n");
+    try fs.write(tmp.dir, io, a, .{ .workspace = "ws" }, "b.txt", "beta\n");
     const spec =
         \\*** Update File: a.txt
         \\alpha
@@ -379,8 +379,8 @@ test "second hunk fail rolls back the first" {
         \\nope
         \\
     ;
-    try std.testing.expectError(error.OldStringNotFound, apply(a, tmp.dir, io, "ws", spec));
-    const got = try fs.read(tmp.dir, io, a, "ws", "a.txt");
+    try std.testing.expectError(error.OldStringNotFound, apply(a, tmp.dir, io, .{ .workspace = "ws" }, spec));
+    const got = try fs.read(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt");
     defer a.free(got);
     try std.testing.expect(std.mem.indexOf(u8, got, "alpha") != null);
     try std.testing.expect(std.mem.indexOf(u8, got, "ALPHA") == null);
@@ -391,15 +391,15 @@ test "applyEdits applies every hunk in order" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const a = std.testing.allocator;
-    try fs.write(tmp.dir, io, a, "ws", "a.txt", "one\ntwo\nthree\n");
+    try fs.write(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt", "one\ntwo\nthree\n");
     const edits = [_]Edit{
         .{ .old = "one", .new = "1" },
         .{ .old = "three", .new = "3" },
     };
-    const msg = try applyEdits(a, tmp.dir, io, "ws", "a.txt", &edits);
+    const msg = try applyEdits(a, tmp.dir, io, .{ .workspace = "ws" }, "a.txt", &edits);
     defer a.free(msg);
     try std.testing.expect(std.mem.indexOf(u8, msg, "2 hunks") != null);
-    const got = try fs.read(tmp.dir, io, a, "ws", "a.txt");
+    const got = try fs.read(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt");
     defer a.free(got);
     try std.testing.expectEqualStrings("1\ntwo\n3\n", got);
 }
@@ -409,14 +409,14 @@ test "applyEdits sees what an earlier hunk wrote" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const a = std.testing.allocator;
-    try fs.write(tmp.dir, io, a, "ws", "a.txt", "alpha\n");
+    try fs.write(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt", "alpha\n");
     const edits = [_]Edit{
         .{ .old = "alpha", .new = "beta" },
         .{ .old = "beta", .new = "gamma" },
     };
-    const msg = try applyEdits(a, tmp.dir, io, "ws", "a.txt", &edits);
+    const msg = try applyEdits(a, tmp.dir, io, .{ .workspace = "ws" }, "a.txt", &edits);
     defer a.free(msg);
-    const got = try fs.read(tmp.dir, io, a, "ws", "a.txt");
+    const got = try fs.read(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt");
     defer a.free(got);
     try std.testing.expectEqualStrings("gamma\n", got);
 }
@@ -426,13 +426,13 @@ test "applyEdits rolls the file back when a later hunk misses" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const a = std.testing.allocator;
-    try fs.write(tmp.dir, io, a, "ws", "a.txt", "one\ntwo\n");
+    try fs.write(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt", "one\ntwo\n");
     const edits = [_]Edit{
         .{ .old = "one", .new = "1" },
         .{ .old = "nowhere", .new = "x" },
     };
-    try std.testing.expectError(error.OldStringNotFound, applyEdits(a, tmp.dir, io, "ws", "a.txt", &edits));
-    const got = try fs.read(tmp.dir, io, a, "ws", "a.txt");
+    try std.testing.expectError(error.OldStringNotFound, applyEdits(a, tmp.dir, io, .{ .workspace = "ws" }, "a.txt", &edits));
+    const got = try fs.read(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt");
     defer a.free(got);
     try std.testing.expectEqualStrings("one\ntwo\n", got);
 }
@@ -442,7 +442,7 @@ test "applyEdits refuses an empty old_string" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const a = std.testing.allocator;
-    try fs.write(tmp.dir, io, a, "ws", "a.txt", "one\n");
+    try fs.write(tmp.dir, io, a, .{ .workspace = "ws" }, "a.txt", "one\n");
     const edits = [_]Edit{.{ .old = "", .new = "x" }};
-    try std.testing.expectError(error.MissingHunk, applyEdits(a, tmp.dir, io, "ws", "a.txt", &edits));
+    try std.testing.expectError(error.MissingHunk, applyEdits(a, tmp.dir, io, .{ .workspace = "ws" }, "a.txt", &edits));
 }

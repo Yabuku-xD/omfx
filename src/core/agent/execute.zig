@@ -7,6 +7,8 @@ const dispatch = @import("../../tools/dispatch.zig");
 const diag = @import("../../tools/diag.zig");
 const gate = @import("../../tools/gate.zig");
 const undo = @import("../../tools/undo.zig");
+const pathing = @import("../../tools/pathing.zig");
+const todos = @import("../todos.zig");
 const sse = @import("../../providers/sse.zig");
 const types = @import("../../providers/types.zig");
 const Tool = @import("../tool.zig");
@@ -58,6 +60,8 @@ pub const AdmitArgs = struct {
     auth_json: []const u8,
     explored: bool,
     same: usize,
+    path_access: pathing.Access,
+    tasks: ?*todos.List,
     asst_text: []u8,
     tool_name: []u8,
     tool_args: []u8,
@@ -130,6 +134,8 @@ pub fn executeAdmitted(a: AdmitArgs) !AdmitOutcome {
                 .max_peer_depth = a.depth_cap,
                 .lookup = a.lookup,
                 .auth_json = a.auth_json,
+                .path_access = a.path_access,
+                .tasks = a.tasks,
             }) catch |err|
                 try std.fmt.allocPrint(allocator, "Note (kept):\n(FAIL peer {s})\n", .{@errorName(err)});
         }
@@ -154,7 +160,7 @@ pub fn executeAdmitted(a: AdmitArgs) !AdmitOutcome {
             result = try setup.Guard.blockMessage(allocator, tool_name, p);
         } else {
             const mark = undo.depth(allocator, a.dir, a.io);
-            result = dispatch.run(a.dir, a.io, allocator, a.workspace, tool_name, tool_args, a.home) catch |err| blk: {
+            result = dispatch.run(a.dir, a.io, allocator, a.path_access, tool_name, tool_args, a.home, a.tasks) catch |err| blk: {
                 break :blk try std.fmt.allocPrint(allocator, "tool error: {s}", .{@errorName(err)});
             };
             a.reads.guard.record(p);
@@ -179,7 +185,7 @@ pub fn executeAdmitted(a: AdmitArgs) !AdmitOutcome {
             }
         }
     } else {
-        result = dispatch.run(a.dir, a.io, allocator, a.workspace, tool_name, tool_args, a.home) catch |err| blk: {
+        result = dispatch.run(a.dir, a.io, allocator, a.path_access, tool_name, tool_args, a.home, a.tasks) catch |err| blk: {
             break :blk try std.fmt.allocPrint(allocator, "tool error: {s}", .{@errorName(err)});
         };
         if (path) |p| {

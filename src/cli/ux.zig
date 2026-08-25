@@ -21,6 +21,7 @@ const progress = @import("progress.zig");
 const toast = @import("toast.zig");
 const panel = @import("panel.zig");
 const virt = @import("virt.zig");
+const todo_mod = @import("../core/todos.zig");
 
 const Flow = cmds.Flow;
 const PanelKind = cmds.PanelKind;
@@ -37,6 +38,7 @@ const Harness = struct {
     aw: std.Io.Writer.Allocating,
     shown: tui.Transcript,
     state: State,
+    tasks: todo_mod.List,
     ctx: Ctx,
 
     fn initInPlace(h: *Harness, gpa: std.mem.Allocator) !void {
@@ -54,6 +56,8 @@ const Harness = struct {
         h.shown = tui.Transcript.init(gpa, 100);
         const reads = agent.Reads.init(gpa);
         h.state = State{ .mode = config.PermissionMode.ask, .reads = reads, .cols = 100 };
+        var read_extra: []const []const u8 = &.{};
+        h.tasks = todo_mod.List{};
         h.ctx = Ctx{
             .gpa = gpa,
             .arena = h.arena.allocator(),
@@ -67,6 +71,8 @@ const Harness = struct {
             .flag_model = null,
             .shown = &h.shown,
             .state = &h.state,
+            .read_extra = &read_extra,
+            .tasks = &h.tasks,
         };
     }
 

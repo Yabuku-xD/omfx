@@ -139,7 +139,7 @@ pub fn runTurn(
         var cred_ctx = sess.cmdCtx();
         cmds.refreshInto(&cred_ctx, false);
     }
-    const model_prompt = try mention.expand(arena, Io.Dir.cwd(), io, workspace, prompt_text);
+    const model_prompt = try mention.expand(arena, Io.Dir.cwd(), io, sess.pathAccess(), prompt_text);
     const shown = try vision.display(arena, Io.Dir.cwd(), io, workspace, prompt_text);
     const composer = try std.fmt.allocPrint(arena, "{s}{s}", .{ state.composer, shown });
     if (state.statusline) {
@@ -225,6 +225,7 @@ pub fn runTurn(
         .runs = &sess.runs,
         .arena = arena,
         .scroll = &sess.scroll,
+        .tasks = &sess.tasks,
     });
     live.startSpin();
     defer live.stopSpin();
@@ -279,6 +280,8 @@ pub fn runTurn(
             .auth_json = auth_json,
             .session_rules = state.sessionRuleSlice(),
             .failures = sess.stuck,
+            .path_access = sess.pathAccess(),
+            .tasks = &sess.tasks,
         },
     ) catch |err| blk: {
         reply_owned = false;

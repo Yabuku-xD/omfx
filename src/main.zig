@@ -189,10 +189,9 @@ pub fn main(init: std.process.Init) !void {
             if (skills_expanded) |expanded| {
                 prompt_text = expanded;
             }
-            prompt_text = try omfx.mention.expand(arena, Io.Dir.cwd(), io, workspace, prompt_text);
             const skill_roots = try omfx.skills.readAccessRoots(arena, io, home, workspace);
-            omfx.tools.pathing.setAccess(.{ .workspace = workspace, .read_extra = skill_roots });
-            defer omfx.tools.pathing.setAccess(.{ .workspace = "" });
+            const path_access = omfx.tools.pathing.Access{ .workspace = workspace, .read_extra = skill_roots };
+            prompt_text = try omfx.mention.expand(arena, Io.Dir.cwd(), io, path_access, prompt_text);
             const stdin_tty = Io.File.stdin().isTty(io) catch false;
             const can_prompt = parsed.prompt_permissions and stdin_tty;
             var cfg = omfx.settings.load(gpa, io, home);
@@ -239,6 +238,7 @@ pub fn main(init: std.process.Init) !void {
                     .max_peer_depth = peer_depth,
                     .lookup = lookup,
                     .auth_json = auth_json,
+                    .path_access = path_access,
                 },
             ) catch |err| {
                 if (parsed.json) {

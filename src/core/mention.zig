@@ -114,10 +114,10 @@ fn loadOne(
     allocator: std.mem.Allocator,
     dir: Io.Dir,
     io: Io,
-    workspace: []const u8,
+    access: pathing.Access,
     rel: []const u8,
 ) !Attach {
-    pathing.assertInside(workspace, rel) catch {
+    pathing.assertInside(access, rel) catch {
         return .{ .note = try std.fmt.allocPrint(allocator, "(@{s}: outside workspace)\n", .{rel}) };
     };
     if (pathing.isSecret(rel)) {
@@ -142,7 +142,7 @@ pub fn expand(
     allocator: std.mem.Allocator,
     dir: Io.Dir,
     io: Io,
-    workspace: []const u8,
+    access: pathing.Access,
     src: []const u8,
 ) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -170,7 +170,7 @@ pub fn expand(
         }
         const rel = try unescape(allocator, raw);
         defer allocator.free(rel);
-        const block = try loadOne(allocator, dir, io, workspace, rel);
+        const block = try loadOne(allocator, dir, io, access, rel);
         defer block.deinit(allocator);
         try out.appendSlice(allocator, block.text());
         used += 1;
@@ -198,7 +198,7 @@ test "expand injects a file and leaves unknown tokens" {
         try w.interface.writeAll("hello from note\n");
         try w.interface.flush();
     }
-    const got = try expand(std.testing.allocator, tmp.dir, io, ".", "see @note.txt please");
+    const got = try expand(std.testing.allocator, tmp.dir, io, .{ .workspace = "." }, "see @note.txt please");
     defer std.testing.allocator.free(got);
     try std.testing.expect(std.mem.indexOf(u8, got, "hello from note") != null);
     try std.testing.expect(std.mem.indexOf(u8, got, "--- @note.txt ---") != null);
@@ -208,7 +208,7 @@ test "expand injects a file and leaves unknown tokens" {
 test "expand skips @word without a path" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const got = try expand(std.testing.allocator, tmp.dir, std.testing.io, ".", "ask @alice later");
+    const got = try expand(std.testing.allocator, tmp.dir, std.testing.io, .{ .workspace = "." }, "ask @alice later");
     defer std.testing.allocator.free(got);
     try std.testing.expectEqualStrings("ask @alice later", got);
 }
@@ -225,7 +225,7 @@ test "expand refuses a secret env file" {
         try w.interface.writeAll("SECRET=1\n");
         try w.interface.flush();
     }
-    const got = try expand(std.testing.allocator, tmp.dir, io, ".", "leak @.env");
+    const got = try expand(std.testing.allocator, tmp.dir, io, .{ .workspace = "." }, "leak @.env");
     defer std.testing.allocator.free(got);
     try std.testing.expect(std.mem.indexOf(u8, got, "SECRET=1") == null);
     try std.testing.expect(std.mem.indexOf(u8, got, "secret") != null);

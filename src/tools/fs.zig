@@ -14,10 +14,10 @@ pub fn read(
     dir: Io.Dir,
     io: Io,
     allocator: std.mem.Allocator,
-    workspace: []const u8,
+    access: pathing.Access,
     rel: []const u8,
 ) ![]u8 {
-    try pathing.assertReadable(workspace, rel);
+    try pathing.assertReadable(access, rel);
     // Absolute skill paths live outside the workspace Dir; open via cwd.
     const open_dir = if (std.fs.path.isAbsolute(rel)) Io.Dir.cwd() else dir;
     // A FIFO, a socket, or a character device has no end: reading one parks the
@@ -34,10 +34,10 @@ pub fn readDirHint(
     dir: Io.Dir,
     io: Io,
     allocator: std.mem.Allocator,
-    workspace: []const u8,
+    access: pathing.Access,
     rel: []const u8,
 ) ![]u8 {
-    const listing = try list(dir, io, allocator, workspace, rel);
+    const listing = try list(dir, io, allocator, access, rel);
     defer allocator.free(listing);
     return std.fmt.allocPrint(
         allocator,
@@ -90,12 +90,12 @@ pub fn write(
     dir: Io.Dir,
     io: Io,
     allocator: std.mem.Allocator,
-    workspace: []const u8,
+    access: pathing.Access,
     rel: []const u8,
     contents: []const u8,
 ) !void {
     _ = allocator;
-    try pathing.assertInside(workspace, rel);
+    try pathing.assertInside(access, rel);
     if (std.fs.path.dirname(rel)) |parent| {
         if (parent.len > 0) try dir.createDirPath(io, parent);
     }
@@ -111,33 +111,33 @@ pub fn edit(
     dir: Io.Dir,
     io: Io,
     allocator: std.mem.Allocator,
-    workspace: []const u8,
+    access: pathing.Access,
     rel: []const u8,
     old: []const u8,
     new: []const u8,
 ) !void {
-    const body = try read(dir, io, allocator, workspace, rel);
+    const body = try read(dir, io, allocator, access, rel);
     defer allocator.free(body);
     const first = std.mem.indexOf(u8, body, old) orelse return error.OldStringNotFound;
     if (std.mem.indexOfPos(u8, body, first + old.len, old) != null) return error.OldStringNotUnique;
     const updated = try std.mem.concat(allocator, u8, &.{ body[0..first], new, body[first + old.len ..] });
     defer allocator.free(updated);
-    try write(dir, io, allocator, workspace, rel, updated);
+    try write(dir, io, allocator, access, rel, updated);
 }
 
 test "read write edit in temp workspace" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const io = std.testing.io;
-    const ws = "ws";
+    const access: pathing.Access = .{ .workspace = "ws" };
 
-    try write(tmp.dir, io, std.testing.allocator, ws, "a.txt", "hello");
-    const got = try read(tmp.dir, io, std.testing.allocator, ws, "a.txt");
+    try write(tmp.dir, io, std.testing.allocator, access, "a.txt", "hello");
+    const got = try read(tmp.dir, io, std.testing.allocator, access, "a.txt");
     defer std.testing.allocator.free(got);
     try std.testing.expectEqualStrings("hello", got);
 
-    try edit(tmp.dir, io, std.testing.allocator, ws, "a.txt", "hello", "hello world");
-    const got2 = try read(tmp.dir, io, std.testing.allocator, ws, "a.txt");
+    try edit(tmp.dir, io, std.testing.allocator, access, "a.txt", "hello", "hello world");
+    const got2 = try read(tmp.dir, io, std.testing.allocator, access, "a.txt");
     defer std.testing.allocator.free(got2);
     try std.testing.expectEqualStrings("hello world", got2);
 }
@@ -146,10 +146,11 @@ test "edit non-unique old_string fails" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const io = std.testing.io;
-    try write(tmp.dir, io, std.testing.allocator, "ws", "a.txt", "x x");
+    const access: pathing.Access = .{ .workspace = "ws" };
+    try write(tmp.dir, io, std.testing.allocator, access, "a.txt", "x x");
     try std.testing.expectError(
         error.OldStringNotUnique,
-        edit(tmp.dir, io, std.testing.allocator, "ws", "a.txt", "x", "y"),
+        edit(tmp.dir, io, std.testing.allocator, access, "a.txt", "x", "y"),
     );
 }
 
@@ -157,11 +158,11 @@ pub fn list(
     dir: Io.Dir,
     io: Io,
     allocator: std.mem.Allocator,
-    workspace: []const u8,
+    access: pathing.Access,
     rel: []const u8,
 ) ![]u8 {
     const path = if (rel.len == 0 or std.mem.eql(u8, rel, ".") or std.mem.eql(u8, rel, "./")) "." else rel;
-    if (!std.mem.eql(u8, path, ".")) try pathing.assertReadable(workspace, path);
+    if (!std.mem.eql(u8, path, ".")) try pathing.assertReadable(access, path);
     const open_dir = if (std.fs.path.isAbsolute(path)) Io.Dir.cwd() else dir;
     var child = open_dir.openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
         // Models often `list` a file; NotDir alone reads as a crash, not a hint.
@@ -195,12 +196,12 @@ pub fn list(
 pub fn copy(
     dir: Io.Dir,
     io: Io,
-    workspace: []const u8,
+    access: pathing.Access,
     from: []const u8,
     to: []const u8,
 ) !void {
-    try pathing.assertInside(workspace, from);
-    try pathing.assertInside(workspace, to);
+    try pathing.assertInside(access, from);
+    try pathing.assertInside(access, to);
     if (std.fs.path.dirname(to)) |parent| {
         if (parent.len > 0) try dir.createDirPath(io, parent);
     }
@@ -210,10 +211,10 @@ pub fn copy(
 pub fn mkdir(
     dir: Io.Dir,
     io: Io,
-    workspace: []const u8,
+    access: pathing.Access,
     rel: []const u8,
 ) !void {
-    try pathing.assertInside(workspace, rel);
+    try pathing.assertInside(access, rel);
     try dir.createDirPath(io, rel);
 }
 
@@ -221,10 +222,10 @@ pub fn info(
     dir: Io.Dir,
     io: Io,
     allocator: std.mem.Allocator,
-    workspace: []const u8,
+    access: pathing.Access,
     rel: []const u8,
 ) ![]u8 {
-    try pathing.assertInside(workspace, rel);
+    try pathing.assertInside(access, rel);
     if (dir.openDir(io, rel, .{})) |d_val| {
         var d = d_val;
         d.close(io);
@@ -261,9 +262,10 @@ pub fn openPath(io: Io, abs: []const u8) void {
 test "path escape denied before io" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    const access: pathing.Access = .{ .workspace = "ws" };
     try std.testing.expectError(
         error.PathEscape,
-        read(tmp.dir, std.testing.io, std.testing.allocator, "ws", "../etc/passwd"),
+        read(tmp.dir, std.testing.io, std.testing.allocator, access, "../etc/passwd"),
     );
 }
 
@@ -271,20 +273,21 @@ test "list copy mkdir info" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const io = std.testing.io;
-    try write(tmp.dir, io, std.testing.allocator, "ws", "a.txt", "hello");
-    try mkdir(tmp.dir, io, "ws", "sub");
-    try copy(tmp.dir, io, "ws", "a.txt", "sub/b.txt");
-    const listing = try list(tmp.dir, io, std.testing.allocator, "ws", ".");
+    const access: pathing.Access = .{ .workspace = "ws" };
+    try write(tmp.dir, io, std.testing.allocator, access, "a.txt", "hello");
+    try mkdir(tmp.dir, io, access, "sub");
+    try copy(tmp.dir, io, access, "a.txt", "sub/b.txt");
+    const listing = try list(tmp.dir, io, std.testing.allocator, access, ".");
     defer std.testing.allocator.free(listing);
     try std.testing.expect(std.mem.indexOf(u8, listing, "a.txt") != null);
-    const inf = try info(tmp.dir, io, std.testing.allocator, "ws", "a.txt");
+    const inf = try info(tmp.dir, io, std.testing.allocator, access, "a.txt");
     defer std.testing.allocator.free(inf);
     try std.testing.expect(std.mem.indexOf(u8, inf, "file") != null);
     try std.testing.expect(std.mem.indexOf(u8, inf, "bytes") != null);
-    const nested = try list(tmp.dir, io, std.testing.allocator, "ws", "sub");
+    const nested = try list(tmp.dir, io, std.testing.allocator, access, "sub");
     defer std.testing.allocator.free(nested);
     try std.testing.expect(std.mem.indexOf(u8, nested, "b.txt") != null);
-    const on_file = try list(tmp.dir, io, std.testing.allocator, "ws", "a.txt");
+    const on_file = try list(tmp.dir, io, std.testing.allocator, access, "a.txt");
     defer std.testing.allocator.free(on_file);
     try std.testing.expect(std.mem.indexOf(u8, on_file, "is a file") != null);
     try std.testing.expect(std.mem.indexOf(u8, on_file, "read") != null);
@@ -294,8 +297,9 @@ test "list on a file explains to use read" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const io = std.testing.io;
-    try write(tmp.dir, io, std.testing.allocator, "ws", "a.txt", "hello");
-    const msg = try list(tmp.dir, io, std.testing.allocator, "ws", "a.txt");
+    const access: pathing.Access = .{ .workspace = "ws" };
+    try write(tmp.dir, io, std.testing.allocator, access, "a.txt", "hello");
+    const msg = try list(tmp.dir, io, std.testing.allocator, access, "a.txt");
     defer std.testing.allocator.free(msg);
     try std.testing.expect(std.mem.indexOf(u8, msg, "is a file") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg, "read") != null);
@@ -305,10 +309,11 @@ test "read on a directory explains to use list" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const io = std.testing.io;
-    try mkdir(tmp.dir, io, "ws", "sub");
-    try write(tmp.dir, io, std.testing.allocator, "ws", "sub/a.txt", "x");
-    try std.testing.expectError(error.NotAFile, read(tmp.dir, io, std.testing.allocator, "ws", "sub"));
-    const msg = try readDirHint(tmp.dir, io, std.testing.allocator, "ws", "sub");
+    const access: pathing.Access = .{ .workspace = "ws" };
+    try mkdir(tmp.dir, io, access, "sub");
+    try write(tmp.dir, io, std.testing.allocator, access, "sub/a.txt", "x");
+    try std.testing.expectError(error.NotAFile, read(tmp.dir, io, std.testing.allocator, access, "sub"));
+    const msg = try readDirHint(tmp.dir, io, std.testing.allocator, access, "sub");
     defer std.testing.allocator.free(msg);
     try std.testing.expect(std.mem.indexOf(u8, msg, "is a folder") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg, "list") != null);
@@ -319,8 +324,9 @@ test "write creates missing parent directories" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const io = std.testing.io;
-    try write(tmp.dir, io, std.testing.allocator, "ws", "deep/nested/f.txt", "x");
-    const got = try read(tmp.dir, io, std.testing.allocator, "ws", "deep/nested/f.txt");
+    const access: pathing.Access = .{ .workspace = "ws" };
+    try write(tmp.dir, io, std.testing.allocator, access, "deep/nested/f.txt", "x");
+    const got = try read(tmp.dir, io, std.testing.allocator, access, "deep/nested/f.txt");
     defer std.testing.allocator.free(got);
     try std.testing.expectEqualStrings("x", got);
 }

@@ -29,7 +29,6 @@ const web_search = @import("../../tools/web_search.zig");
 const undo = @import("../../tools/undo.zig");
 const git_work = @import("../../tools/git_work.zig");
 const jobs = @import("../../tools/jobs.zig");
-const pathing = @import("../../tools/pathing.zig");
 const isolate = @import("../../tools/isolate.zig");
 const diagram = @import("../../core/diagram.zig");
 const peer_router = @import("../../core/peer_router.zig");
@@ -59,6 +58,7 @@ const settle = cmd_ctx.settle;
 const readAuth = cmd_ctx.readAuth;
 const refreshInto = cmd_ctx.refreshInto;
 const persistChat = cmd_ctx.persistChat;
+const pathAccess = cmd_ctx.pathAccess;
 const doEffort = model_pick.doEffort;
 const doModels = model_pick.doModels;
 const auto_effort = model_pick.auto_effort;
@@ -214,7 +214,7 @@ pub fn run(ctx: *Ctx, cmd: slash.Name, rest: []const u8) !Flow {
         .mcp => try doMcp(ctx, rest),
         .workspace => if (rest.len == 0) return .{ .panel = .workspace } else try doWorkspace(ctx, rest),
         .undo => {
-            const msg = try undo.pop(ctx.gpa, Io.Dir.cwd(), ctx.io, ctx.workspace);
+            const msg = try undo.pop(ctx.gpa, Io.Dir.cwd(), ctx.io, pathAccess(ctx));
             defer ctx.gpa.free(msg);
             const git_note = try git_work.undoOmfxCommit(ctx.gpa, ctx.io, ctx.workspace);
             defer ctx.gpa.free(git_note);
@@ -267,7 +267,7 @@ fn doReload(ctx: *Ctx) !void {
     if (cfg.composer.len > 0) ctx.state.composer = try ctx.arena.dupe(u8, cfg.composer);
     ctx.state.extra_n = 0;
     for (cfg.workspace_dirs) |d| ctx.state.appendExtra(try ctx.arena.dupe(u8, d)) catch break;
-    pathing.refreshAll(ctx.workspace, ctx.state.extraSlice(), skills.readAccessRoots(ctx.arena, ctx.io, ctx.home, ctx.workspace) catch &.{});
+    ctx.read_extra.* = skills.readAccessRoots(ctx.arena, ctx.io, ctx.home, ctx.workspace) catch &.{};
     relay.ensure(ctx.gpa, ctx.io, port);
     model_signals.ensure(ctx.gpa, ctx.io, ctx.home);
     const names = skills.listAllNames(ctx.gpa, ctx.io, Io.Dir.cwd(), ctx.home, ctx.workspace) catch try ctx.gpa.alloc([]const u8, 0);
@@ -315,6 +315,7 @@ fn doPeers(ctx: *Ctx, rest: []const u8) !void {
         .lookup = ctx.lookup,
         .auth_json = json,
         .session_rules = ctx.state.sessionRuleSlice(),
+        .path_access = pathAccess(ctx),
     }) catch |err| blk: {
         reply_owned = false;
         break :blk try std.fmt.allocPrint(ctx.arena, "error: {s}\n", .{@errorName(err)});
@@ -815,7 +816,7 @@ pub fn startWebPick(ctx: *Ctx, rest: []const u8) !void {
 fn persistExtra(ctx: *Ctx) !void {
     try settings.setWorkspaceDirs(ctx.gpa, ctx.io, ctx.home, ctx.state.extraSlice());
     const skill_roots = skills.readAccessRoots(ctx.arena, ctx.io, ctx.home, ctx.workspace) catch &.{};
-    pathing.refreshAll(ctx.workspace, ctx.state.extraSlice(), skill_roots);
+    ctx.read_extra.* = skill_roots;
 }
 
 fn doWorkspace(ctx: *Ctx, rest: []const u8) !void {
@@ -1213,7 +1214,7 @@ fn doRewind(ctx: *Ctx, rest: []const u8) !void {
                 try emit(ctx, try std.fmt.allocPrint(ctx.arena, "rewind session: {s}\n", .{@errorName(err)}));
                 return;
             };
-            const files = try undo.popTo(ctx.gpa, Io.Dir.cwd(), ctx.io, ctx.workspace, mark.undo_n);
+            const files = try undo.popTo(ctx.gpa, Io.Dir.cwd(), ctx.io, pathAccess(ctx), mark.undo_n);
             defer ctx.gpa.free(files);
             const path = try session.sessionPath(ctx.arena, ctx.home, session.resolveId("last"));
             const blob = Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.arena, .limited(1_000_000)) catch "";
@@ -1272,7 +1273,7 @@ fn doHandoff(ctx: *Ctx, rest: []const u8) !void {
         .goal = goal,
         .last_tool = ctx.state.last_tool,
         .last_reply = ctx.state.last_reply,
-    }) catch |err| {
+    }, ctx.tasks) catch |err| {
         try emit(ctx, try std.fmt.allocPrint(ctx.arena, "handoff failed: {s}\n", .{@errorName(err)}));
         return;
     };
@@ -1391,7 +1392,7 @@ fn doCheckpoint(ctx: *Ctx, rest: []const u8, status: checkpoint_mod.Status) !voi
         .mode = ctx.state.mode.asSlice(),
         .plan = ctx.state.plan.asSlice(),
         .git_sha = git_sha,
-    }) catch |err| {
+    }, ctx.tasks) catch |err| {
         try emit(ctx, try std.fmt.allocPrint(ctx.arena, "checkpoint failed: {s}\n", .{@errorName(err)}));
         return;
     };

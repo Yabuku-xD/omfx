@@ -245,7 +245,7 @@ test "attach picks image paths from the prompt" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const png = "\x89PNG\r\n\x1a\n" ++ "0123456789";
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "shot.png", png);
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "shot.png", png);
     const images = try attach(std.testing.allocator, tmp.dir, io, "ws", "look at shot.png and README.md");
     defer free(std.testing.allocator, images);
     try std.testing.expectEqual(@as(usize, 1), images.len);
@@ -257,7 +257,7 @@ test "attach skips non-images and secrets" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const io = std.testing.io;
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "notes.txt", "hello");
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "notes.txt", "hello");
     const images = try attach(std.testing.allocator, tmp.dir, io, "ws", "read notes.txt and .env");
     defer free(std.testing.allocator, images);
     try std.testing.expectEqual(@as(usize, 0), images.len);
@@ -275,8 +275,8 @@ test "display uses Image and URL placeholders" {
     defer tmp.cleanup();
     const io = std.testing.io;
     const png = "\x89PNG\r\n\x1a\n" ++ "0123456789";
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "shot.png", png);
-    try fs.write(tmp.dir, io, std.testing.allocator, "ws", "other.png", png);
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "shot.png", png);
+    try fs.write(tmp.dir, io, std.testing.allocator, .{ .workspace = "ws" }, "other.png", png);
     const shown = try display(
         std.testing.allocator,
         tmp.dir,

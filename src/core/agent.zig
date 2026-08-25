@@ -314,6 +314,8 @@ fn chatTurn(
                         .cfg = cfg,
                         .lookup = run.lookup,
                         .auth_json = run.auth_json,
+                        .path_access = run.path_access,
+                        .tasks = run.tasks,
                         .explored = explored,
                         .same = same,
                         .asst_text = asst_text,
@@ -373,7 +375,7 @@ fn chatTurn(
                         host.toolOut(ex.name, ex_path, true, deny_msg);
                         continue;
                     }
-                    const extra_res = dispatch.run(dir, io, allocator, workspace, ex.name, ex.args, home) catch |err|
+                    const extra_res = dispatch.run(dir, io, allocator, run.path_access, ex.name, ex.args, home, run.tasks) catch |err|
                         try std.fmt.allocPrint(allocator, "tool error: {s}", .{@errorName(err)});
                     host.toolOut(ex.name, ex_path, true, extra_res);
                     const joined = try std.fmt.allocPrint(allocator, "{s}\nTool {s} result:\n{s}", .{ result, ex.name, extra_res });

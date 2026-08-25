@@ -21,20 +21,7 @@ const nowMs = session_mod.nowMs;
 pub const startSel = dispatch_mod.startSel;
 pub const openSearchPanel = dispatch_mod.openSearchPanel;
 
-pub const Deps = struct {
-    gpa: std.mem.Allocator,
-    arena: std.mem.Allocator,
-    io: Io,
-    stdout: *Io.Writer,
-    home: []const u8,
-    workspace: []const u8,
-    lookup: env.Lookup,
-    model_name: []const u8,
-    stdin: *Io.Reader,
-    slash_buf: *[tui.max_slash_hits]slash.Spec,
-    exit_eof: *bool,
-    at_store: *[32][96]u8,
-};
+pub const Deps = dispatch_mod.Deps;
 
 pub fn refilterPanel(sess: *Session) void {
     const kind = sess.panel_kind orelse return;
@@ -204,7 +191,7 @@ pub fn run(sess: *Session, deps: Deps) !void {
             break :blk tui.Event.enter;
         } else tui.pollEvent(deps.stdin, 64);
 
-        switch (try dispatch_mod.handleEvent(sess, @ptrCast(&deps), ev)) {
+        switch (try dispatch_mod.handleEvent(sess, &deps, ev)) {
             .continue_loop => {},
             .break_loop => break,
         }

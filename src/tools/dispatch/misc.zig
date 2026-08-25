@@ -5,6 +5,7 @@ const git_work = @import("../git_work.zig");
 const search = @import("../search.zig");
 const pathing = @import("../pathing.zig");
 const tool = @import("../../core/tool.zig");
+const todos = @import("../../core/todos.zig");
 const Args = @import("args.zig").Args;
 
 pub fn run(
@@ -12,22 +13,24 @@ pub fn run(
     dir: Io.Dir,
     io: Io,
     allocator: std.mem.Allocator,
-    workspace: []const u8,
+    access: pathing.Access,
     home: []const u8,
     args: Args,
     args_json: []const u8,
+    tasks: ?*todos.List,
 ) ![]u8 {
+    const workspace = access.workspace;
     return switch (kind) {
         .semantic_search => blk: {
             const q = args.str("query") orelse args.str("q") orelse return error.EmptyNeedle;
             if (q.len == 0) return error.EmptyNeedle;
-            break :blk try search.semanticSearch(dir, io, allocator, workspace, q);
+            break :blk try search.semanticSearch(dir, io, allocator, access, q);
         },
         .open_file => blk: {
             const path = args.str("path") orelse return error.MissingPath;
             if (path.len == 0) return error.MissingPath;
-            try pathing.assertInside(workspace, path);
-            const abs = try pathing.joinWorkspace(allocator, workspace, path);
+            try pathing.assertInside(access, path);
+            const abs = try pathing.joinWorkspace(allocator, access, path);
             defer allocator.free(abs);
             fs.openPath(io, abs);
             break :blk try std.fmt.allocPrint(allocator, "opened {s}", .{path});
@@ -47,14 +50,13 @@ pub fn run(
             break :blk try b.run(allocator, io, workspace, action, line);
         },
         .todo => blk: {
-            const todos = @import("../../core/todos.zig");
-            break :blk try todos.set(allocator, args_json);
+            break :blk try tasks.?.applyJson(allocator, args_json);
         },
         .patch => blk: {
             const spec = args.str("patch") orelse args.str("spec") orelse return error.EmptyPatch;
             const patch = @import("../patch.zig");
             git_work.beforeMutate(allocator, io, workspace, home);
-            const out = try patch.apply(allocator, dir, io, workspace, spec);
+            const out = try patch.apply(allocator, dir, io, access, spec);
             git_work.afterMutate(allocator, io, workspace, home, "patch");
             break :blk out;
         },

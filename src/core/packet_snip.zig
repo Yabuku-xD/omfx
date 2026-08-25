@@ -62,8 +62,7 @@ pub fn appendBoardLines(allocator: std.mem.Allocator, notes: []const board.Note,
     if (n == 0) try out.appendSlice(allocator, "(empty)\n");
 }
 
-pub fn appendTodos(allocator: std.mem.Allocator, out: *std.ArrayList(u8)) !void {
-    const list = todos.get();
+pub fn appendTodos(allocator: std.mem.Allocator, list: *const todos.List, out: *std.ArrayList(u8)) !void {
     var n: usize = 0;
     for (list.items[0..list.n]) |*it| {
         if (it.status == .done) continue;
