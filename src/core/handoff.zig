@@ -17,7 +17,6 @@ pub const Input = struct {
 };
 
 pub const Built = struct {
-    /// Thin first user turn (no last_reply dump).
     stub: []u8,
     /// Caller owns; write under `.omfx/handoff/`.
     packet: []u8,

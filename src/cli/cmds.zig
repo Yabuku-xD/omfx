@@ -614,31 +614,6 @@ fn doSandbox(ctx: *Ctx, rest: []const u8) !void {
     }
 }
 
-fn doStatus(ctx: *Ctx) !void {
-    const provider = if (ctx.state.resolved) |r| r.spec.id else "(unset)";
-    const model = if (ctx.state.resolved) |r| r.model else "(unset)";
-    var cfg = settings.load(ctx.gpa, ctx.io, ctx.home);
-    defer cfg.deinit(ctx.gpa);
-    const sb: []const u8 = if (settings.sandboxOff(cfg)) "off" else "on";
-    try emit(ctx, try std.fmt.allocPrint(
-        ctx.arena,
-        "workspace={s}\nprovider={s}\nmodel={s}\npermission={s}\nplan={s}\nsandbox={s}\neffort={s}\nfast={s}\nsession={s}\njobs={d}\nextra_dirs={d}\n",
-        .{
-            ctx.workspace,
-            provider,
-            model,
-            ctx.state.mode.asSlice(),
-            ctx.state.plan.asSlice(),
-            sb,
-            if (ctx.state.effort.len == 0) auto_effort else ctx.state.effort,
-            if (ctx.state.fast) "on" else "off",
-            if (ctx.state.session_title.len > 0) ctx.state.session_title else if (ctx.state.had_turn) "active" else "idle",
-            jobs.count(),
-            ctx.state.extra_n,
-        },
-    ));
-}
-
 fn doStats(ctx: *Ctx) !void {
     const path = try session.sessionPath(ctx.arena, ctx.home, session.resolveId("last"));
     const blob = Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.arena, .limited(1_000_000)) catch "";
@@ -807,23 +782,6 @@ fn doMcp(ctx: *Ctx, rest: []const u8) !void {
     try emit(ctx, msg);
 }
 
-fn doSkills(ctx: *Ctx) !void {
-    const names = skills.listAllNames(ctx.gpa, ctx.io, Io.Dir.cwd(), ctx.home, ctx.workspace) catch {
-        try emit(ctx, "No skills are installed.\n");
-        return;
-    };
-    defer {
-        for (names) |n| ctx.gpa.free(n);
-        ctx.gpa.free(names);
-    }
-    if (names.len == 0) {
-        try emit(ctx, "No skills are installed.\n");
-        return;
-    }
-    ctx.state.pick.open(.skills);
-    for (names) |n| ctx.state.pick.push(n, "skill");
-}
-
 fn configuredLabel(arena: std.mem.Allocator, name: []const u8, on: bool) []const u8 {
     if (!on) return name;
     // Tick leads: the menu clips the title to half width from the start, so a
@@ -906,10 +864,6 @@ pub fn applyPick(ctx: *Ctx, name: []const u8) !Flow {
         .sessions => {
             ctx.state.pick.clear();
             try doResume(ctx, name);
-        },
-        .skills => {
-            ctx.state.pick.clear();
-            try emit(ctx, try std.fmt.allocPrint(ctx.arena, "skill {s}\n", .{name}));
         },
         .mcp => {
             ctx.state.pick.clear();
@@ -1197,7 +1151,6 @@ fn doFeedback(ctx: *Ctx) !void {
 }
 
 const PlanArg = union(enum) {
-    /// Bare `/plan` — turn plan mode on (idempotent).
     enter,
     set: agent.Plan,
     go,
@@ -1569,7 +1522,6 @@ fn doWake(ctx: *Ctx, rest: []const u8) !Flow {
     const owned = try ctx.arena.dupe(u8, stub);
     ctx.state.last_goal = if (owned.len > 80) owned[0..80] else owned;
     try emit(ctx, try std.fmt.allocPrint(ctx.arena, "wake {s}\n", .{id}));
-    // Thin stub becomes the next user turn — no transcript replay into the model.
     return .{ .retry = owned };
 }
 

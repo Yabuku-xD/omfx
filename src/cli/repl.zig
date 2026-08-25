@@ -2642,6 +2642,7 @@ pub fn run(
                 .lookup = lookup,
                 .auth_json = auth_json,
                 .session_rules = state.sessionRuleSlice(),
+                .failures = sess.stuck,
             },
         ) catch |err| blk: {
             reply_owned = false;

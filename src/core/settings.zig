@@ -69,7 +69,6 @@ pub const File = struct {
     telemetry: Toggle = .off,
     /// When on, the model may invoke the peer tool. Manual `/peers` always works.
     peer: Toggle = .off,
-    /// Off by default; commits after successful writes.
     git_auto: Toggle = .off,
     /// With git_auto: snapshot a dirty tree before the first AI edit.
     git_dirty: Toggle = .on,

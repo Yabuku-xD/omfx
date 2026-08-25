@@ -278,6 +278,8 @@ pub const Run = struct {
     auth_json: []const u8 = "",
     /// Ephemeral shrink-only rules; never injected into the system prompt.
     session_rules: []const permissions.Rule = &.{},
+    /// Consecutive unclean turns; same counter autoeffort uses for Hard.
+    failures: usize = 0,
 };
 
 /// HTTP failures collapse here. A peer re-enters `chatOnce` from `chatTurn`, so
@@ -328,15 +330,27 @@ fn seedThread(
 /// reprocesses the entire request. They ride at the head of the user message
 /// instead, where they are the newest bytes rather than the oldest, and the
 /// system prompt stays byte-identical for the life of the session.
+///
+/// Depth is lexical: greetings skip orientation; full map only when the ask
+/// needs the tree (Adaptive-RAG A/B/C — see `orient.zig`).
 fn workspaceState(
     allocator: std.mem.Allocator,
     io: Io,
     dir: Io.Dir,
     workspace: []const u8,
     query: []const u8,
+    depth: context.OrientDepth,
 ) ![]u8 {
+    if (depth == .none) return allocator.dupe(u8, "");
+
     const git_block = try context.gitSnapshot(allocator, io, workspace);
     defer allocator.free(git_block);
+
+    if (depth == .git) {
+        if (git_block.len == 0) return allocator.dupe(u8, "");
+        return std.fmt.allocPrint(allocator, "git:\n{s}", .{git_block});
+    }
+
     // Personalize toward this turn's tokens; still capped at 4k chars.
     const map_block = try repomap.buildFor(allocator, dir, io, query);
     defer allocator.free(map_block);
@@ -413,7 +427,14 @@ fn chatTurn(
         t.tools_bytes = @intCast(@min(pclient.advertisedBytes(endpoint), std.math.maxInt(u32)));
     }
 
-    const state_block = try workspaceState(allocator, io, dir, workspace, user);
+    const state_block = try workspaceState(
+        allocator,
+        io,
+        dir,
+        workspace,
+        user,
+        context.orientDepth(user, run.failures, plan),
+    );
     defer allocator.free(state_block);
     const user_with_state = if (state_block.len == 0)
         try allocator.dupe(u8, user)
@@ -1056,51 +1077,6 @@ fn presentResult(
     return compact.capResult(allocator, joined);
 }
 
-fn snipThread(allocator: std.mem.Allocator, dir: Io.Dir, io: Io, thread: *std.ArrayList(pclient.Message)) !void {
-    const before = compact.snipBefore(thread.items.len);
-    if (before == 0) return;
-    for (thread.items, 0..) |*m, i| {
-        if (!compact.shouldSnipToolResult(m.role, m.content, i, before, 200)) continue;
-        if (std.mem.startsWith(u8, m.content, "cite r")) continue;
-        const n = m.content.len;
-        const name = toolFromFollow(m.content);
-        const id = recall.put(dir, io, name, .none, m.content) catch {
-            const notice = try compact.snippedNotice(allocator, n);
-            allocator.free(m.content);
-            m.content = notice;
-            continue;
-        };
-        const stub = try recall.cite(allocator, .{
-            .id = id,
-            .tool = name,
-            .target = .none,
-            .chars = n,
-        });
-        allocator.free(m.content);
-        m.content = stub;
-    }
-}
-
-fn toolFromFollow(s: []const u8) []const u8 {
-    if (!std.mem.startsWith(u8, s, "Tool ")) return "tool";
-    const rest = s["Tool ".len..];
-    const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse return rest;
-    if (sp == 0) return "tool";
-    return rest[0..sp];
-}
-
-fn microThread(allocator: std.mem.Allocator, thread: *std.ArrayList(pclient.Message)) !void {
-    const before = compact.snipBefore(thread.items.len);
-    if (before == 0) return;
-    for (thread.items, 0..) |*m, i| {
-        if (!compact.shouldMicro(m.role, m.content, i, before)) continue;
-        const n = m.content.len;
-        const notice = try compact.microNotice(allocator, n);
-        allocator.free(m.content);
-        m.content = notice;
-    }
-}
-
 fn billedReview(
     allocator: std.mem.Allocator,
     io: Io,
@@ -1412,7 +1388,7 @@ test "the workspace map still reaches the model, at the head of the turn" {
     try w.interface.flush();
     f.close(io);
 
-    const state = try workspaceState(a, io, tmp.dir, "/no-such-omfx-git-workspace", "startServer");
+    const state = try workspaceState(a, io, tmp.dir, "/no-such-omfx-git-workspace", "startServer", .full);
     defer a.free(state);
     try std.testing.expect(std.mem.indexOf(u8, state, "svc.zig") != null);
 }

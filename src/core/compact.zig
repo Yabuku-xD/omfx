@@ -134,17 +134,6 @@ pub fn planKeepOriginalEx(count: usize, chars: usize) Result {
     return .{ .drop = from };
 }
 
-/// L3 microcompact: shrink long assistant turns in the drop zone. Inspectable, not encrypted.
-pub fn shouldMicro(role: []const u8, text: []const u8, index: usize, snip_before: usize) bool {
-    if (index == 0 or index >= snip_before) return false;
-    if (!std.mem.eql(u8, role, "assistant")) return false;
-    return text.len >= 400;
-}
-
-pub fn microNotice(allocator: std.mem.Allocator, n: usize) ![]u8 {
-    return std.fmt.allocPrint(allocator, "[microcompact {d} chars]\n", .{n});
-}
-
 pub fn stitch(allocator: std.mem.Allocator, turns: []const Turn) !Stitched {
     switch (planKeepOriginalEx(turns.len, charCount(turns))) {
         .keep => return .{ .copy = try allocator.dupe(Turn, turns) },
@@ -171,25 +160,6 @@ pub fn stitch(allocator: std.mem.Allocator, turns: []const Turn) !Stitched {
             };
         },
     }
-}
-
-/// Snip user "Tool " bodies that are not in the kept tail. `min_chars` skips already-small results.
-pub fn shouldSnipToolResult(role: []const u8, text: []const u8, index: usize, snip_before: usize, min_chars: usize) bool {
-    if (index == 0) return false;
-    if (index >= snip_before) return false;
-    if (!std.mem.eql(u8, role, "user")) return false;
-    if (std.mem.startsWith(u8, text, "Note ")) return false;
-    if (!std.mem.startsWith(u8, text, "Tool ")) return false;
-    return text.len >= min_chars;
-}
-
-pub fn snipBefore(count: usize) usize {
-    if (count <= keep_last + 1) return 0;
-    return count - keep_last;
-}
-
-pub fn snippedNotice(allocator: std.mem.Allocator, n: usize) ![]u8 {
-    return std.fmt.allocPrint(allocator, "Tool result snipped ({d} chars). Original prompt and tail kept.\n", .{n});
 }
 
 test "no compact under threshold" {
@@ -230,19 +200,6 @@ test "summary lists cite ids from dropped turns" {
     try std.testing.expect(std.mem.indexOf(u8, s, "drop-secret") == null);
 }
 
-test "snip keeps original and tail tool results" {
-    try std.testing.expect(!shouldSnipToolResult("user", "KEEP-ME", 0, 5, 20));
-    try std.testing.expect(shouldSnipToolResult("user", "Tool read result:\nxxxxxxxxxxxxxxxxxxxx", 2, 5, 20));
-    try std.testing.expect(!shouldSnipToolResult("user", "Tool read result:\nxxxxxxxxxxxxxxxxxxxx", 5, 5, 20));
-    try std.testing.expect(!shouldSnipToolResult("assistant", "Tool read result:\nxxxxxxxxxxxxxxxxxxxx", 2, 5, 20));
-    try std.testing.expect(!shouldSnipToolResult("user", "Tool x", 2, 5, 20));
-}
-
-test "snipBefore leaves original plus last four" {
-    try std.testing.expectEqual(@as(usize, 0), snipBefore(5));
-    try std.testing.expectEqual(@as(usize, 8), snipBefore(12));
-}
-
 test "char budget fires compact under turn threshold" {
     try std.testing.expect(planKeepOriginalEx(4, char_budget + 1) == .drop);
 }
@@ -274,11 +231,6 @@ test "summary is not encrypted_content" {
     const summary = stitched.compacted.summary;
     try std.testing.expect(std.mem.indexOf(u8, summary, "encrypted_content") == null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "earlier turns") != null);
-}
-
-test "board notes are not snipped" {
-    try std.testing.expect(!shouldSnipToolResult("user", "Note (kept):\n[FACT] path=a.zig x", 2, 10, 10));
-    try std.testing.expect(shouldSnipToolResult("user", "Tool read result:\nxxxxxxxxxxxxxxxxxxxx", 2, 10, 10));
 }
 
 test "stitch under threshold is a copy" {

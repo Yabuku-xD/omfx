@@ -22,7 +22,6 @@ pub const Store = struct {
         /// Bytes the run occupies right now: summary alone, or summary + calls.
         len: usize,
         expanded: bool = false,
-        /// Whether the keyboard is on this run.
         selected: bool = false,
         name: []u8,
         details: [][]u8,

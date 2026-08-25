@@ -99,7 +99,6 @@ pub const Fallback = enum {
 };
 
 pub const Rule = struct {
-    /// Match text without `#fallback=…` suffix.
     pattern: []const u8,
     action: DslAction,
     fallback: Fallback = .none,
@@ -124,7 +123,6 @@ pub fn parsePattern(raw: []const u8) struct { pattern: []const u8, fallback: Fal
     return .{ .pattern = raw, .fallback = .none };
 }
 
-/// Encode pattern with optional fallback for settings.json keys.
 pub fn formatPattern(buf: []u8, pattern: []const u8, fallback: Fallback) []const u8 {
     if (fallback == .none) {
         if (pattern.len > buf.len) return pattern;

@@ -604,7 +604,7 @@ pub const perm_sheet = [_]slash.Spec{
     .{ .name = "3", .help = "deny" },
 };
 
-pub const PickKind = enum { none, providers, models, efforts, sessions, skills, mcp, login, web, commands };
+pub const PickKind = enum { none, providers, models, efforts, sessions, mcp, login, web, commands };
 
 /// The most of `s` that fits in `cap` bytes without splitting a rune. A cut
 /// mid-sequence renders as a replacement glyph, which reads as corruption.
@@ -799,7 +799,7 @@ pub const feature_sheet =
     \\slash
     \\  /help /login /logout /models /model /fast /effort /plan /yolo
     \\  /permissions /allowlist /sandbox /status /stats /usage /settings /thinking
-    \\  /web /browser /reload /mcp /skills /init /workspace /undo /copy /diagram
+    \\  /web /browser /reload /mcp /init /workspace /undo /copy /diagram
     \\  /session /resume /clear /reset /rename /compact /rewind /fork
     \\  /peers /background /trace /feedback /quit
     \\tools (via the model, or !cmd for bash)

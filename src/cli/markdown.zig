@@ -671,17 +671,6 @@ fn numeric(c: []const u8) bool {
     return true;
 }
 
-fn tableRule(allocator: std.mem.Allocator, w: u16) FormatError![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, paint.border);
-    var i: u16 = 0;
-    while (i < w) : (i += 1) try out.appendSlice(allocator, "\u{2500}");
-    try out.appendSlice(allocator, paint.reset);
-    try out.append(allocator, '\n');
-    return out.toOwnedSlice(allocator);
-}
-
 /// Whole-reply render. Same renderer the live pane drives, so replay matches.
 pub fn formatAssistant(allocator: std.mem.Allocator, cols: u16, text: []const u8) FormatError![]u8 {
     var md = Markdown{ .cols = cols };
