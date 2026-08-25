@@ -32,8 +32,8 @@ pub const Deps = struct {
     model_name: []const u8,
     stdin: *Io.Reader,
     slash_buf: *[tui.max_slash_hits]slash.Spec,
-    at_store: *[32][96]u8,
     exit_eof: *bool,
+    at_store: *[32][96]u8,
 };
 
 pub fn refilterPanel(sess: *Session) void {
@@ -204,7 +204,7 @@ pub fn run(sess: *Session, deps: Deps) !void {
             break :blk tui.Event.enter;
         } else tui.pollEvent(deps.stdin, 64);
 
-        switch (try dispatch_mod.handleEvent(sess, deps, ev)) {
+        switch (try dispatch_mod.handleEvent(sess, @ptrCast(&deps), ev)) {
             .continue_loop => {},
             .break_loop => break,
         }
