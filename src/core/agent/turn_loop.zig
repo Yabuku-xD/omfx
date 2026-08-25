@@ -7,6 +7,7 @@ const sse = @import("../../providers/sse.zig");
 const sink = @import("../sink.zig");
 const Tool = @import("../tool.zig");
 const playbook = @import("../playbook.zig");
+const setup = @import("setup.zig");
 
 /// Explicit phases for one iteration of the tool-turn loop in `chatTurn`.
 pub const Phase = enum {
@@ -179,6 +180,14 @@ fn denyBody(allocator: std.mem.Allocator, detail: []const u8) ![]u8 {
         try allocator.dupe(u8, "permission denied\n");
 }
 
+fn derivedExempt(tool: []const u8, args: []const u8) bool {
+    if (Tool.Name.fromSlice(tool) == .read_result) return true;
+    var cmd_buf: [permissions.max_command]u8 = undefined;
+    const cmd = permissions.shellCommand(&cmd_buf, args) orelse
+        sse.argStringInto(&cmd_buf, args, "path") orelse "";
+    return permissions.isHarnessPath(cmd);
+}
+
 /// Plan gate, permission admit, prompt, and derived-from-tool-output checks for an incoming call.
 pub fn admitToolCall(a: AdmitArgs) !AdmitOutcome {
     if (a.plan and permissions.blockedByPlan(a.call.name, a.call.args)) {
@@ -194,7 +203,9 @@ pub fn admitToolCall(a: AdmitArgs) !AdmitOutcome {
         var cmd_buf: [permissions.max_command]u8 = undefined;
         const cmd = permissions.shellCommand(&cmd_buf, a.call.args) orelse
             sse.argStringInto(&cmd_buf, a.call.args, "path") orelse "";
-        if (permissions.derivedFromToolOutput(cmd, a.user, a.tool_blob)) {
+        if (!derivedExempt(a.call.name, a.call.args) and
+            permissions.derivedFromToolOutput(cmd, a.user, a.tool_blob))
+        {
             decision = if (a.has_tty) .prompt else .deny;
         }
     }
@@ -223,6 +234,9 @@ pub fn admitToolCall(a: AdmitArgs) !AdmitOutcome {
     switch (decision) {
         .allow, .prompt => return .{ .allow = .{ .one_shot = one_shot } },
         .need_tty, .deny => {
+            if (a.host.cancelled()) {
+                return .{ .stop = try a.allocator.dupe(u8, setup.interrupted_text) };
+            }
             if (a.trace) |t| t.deny_tool(t.ctx, a.call.name, a.call.args);
             var deny_buf: [48]u8 = undefined;
             const deny_line = std.fmt.bufPrint(&deny_buf, "denied {s}", .{a.call.name}) catch "denied tool";
@@ -263,6 +277,7 @@ pub fn recheckAdmitted(a: RecheckArgs) !?[]u8 {
         recheck = if (ans == .deny) .deny else .allow;
     }
     if (recheck != .allow) {
+        if (a.host.cancelled()) return try a.allocator.dupe(u8, setup.interrupted_text);
         var deny_detail_buf: [permissions.max_command]u8 = undefined;
         const deny_detail = toolDetail(&deny_detail_buf, a.tool_args);
         return try denyBody(a.allocator, deny_detail);

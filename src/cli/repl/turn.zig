@@ -289,6 +289,7 @@ pub fn runTurn(
     };
     defer if (reply_owned) gpa.free(reply);
     const cancelled = sess.cancel.load(.acquire);
+    const interrupted = cancelled or (reply_owned and std.mem.eql(u8, reply, agent.interrupted_text));
     if (cancelled) sink.dropSteer();
     const partial = if (cancelled) try arena.dupe(u8, asst_hold.items) else "";
     const streamed_asst = asst_hold.items.len != 0;
@@ -299,7 +300,9 @@ pub fn runTurn(
     live.stopSpin();
     if (!reply_owned) {
         try sess.shown.append(try arena.dupe(u8, reply));
-    } else if (reply.len > 0 and (!streamed_asst or sess.shown.bytes().len == kept)) {
+    } else if (reply.len > 0 and (!streamed_asst or sess.shown.bytes().len == kept) and
+        !std.mem.eql(u8, reply, agent.interrupted_text))
+    {
         try sess.shown.append(try chat.formatAssistant(arena, sess.layout.cols, reply));
     }
     if (diagram.save(gpa, Io.Dir.cwd(), io, reply)) |saved| {
@@ -321,7 +324,7 @@ pub fn runTurn(
     };
     sess.writeIdleTitle();
     try stdout.flush();
-    if (cancelled) {
+    if (interrupted) {
         try recordInterrupted(sess, gpa, arena, io, home, model_prompt, prompt_text, partial, &trace, &ctx);
         sess.paintAll(.idle);
         try stdout.flush();

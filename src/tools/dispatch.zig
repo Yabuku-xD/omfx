@@ -94,6 +94,25 @@ test "read_result redacts secret-shaped recall bodies" {
     try std.testing.expect(std.mem.indexOf(u8, out, "sk-secret-e2e") == null);
 }
 
+test "read serves recall archives by path" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    try tmp.dir.createDirPath(io, ".omfx/recall");
+    {
+        var f = try tmp.dir.createFile(io, ".omfx/recall/r2.txt", .{ .truncate = true });
+        defer f.close(io);
+        var buf: [128]u8 = undefined;
+        var w = f.writer(io, &buf);
+        try w.interface.writeAll("tool=bash path= chars=12\nRECALL_BY_READ\n");
+        try w.interface.flush();
+    }
+    const out = try run(tmp.dir, io, a, .{ .workspace = "ws" }, "read", "{\"path\":\".omfx/recall/r2.txt\"}", "", null);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "RECALL_BY_READ") != null);
+}
+
 test "read_result returns a non-secret recall body" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

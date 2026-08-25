@@ -5,6 +5,8 @@ const undo = @import("../undo.zig");
 const git_work = @import("../git_work.zig");
 const search = @import("../search.zig");
 const pathing = @import("../pathing.zig");
+const recall = @import("../../core/recall.zig");
+const hooks = @import("../../core/hooks.zig");
 const tool = @import("../../core/tool.zig");
 const Args = @import("args.zig").Args;
 
@@ -24,6 +26,17 @@ pub fn run(
             const path = args.str("path") orelse return error.MissingPath;
             const offset = args.usize_("offset") orelse 0;
             const limit = args.usize_("limit") orelse 0;
+            if (recall.idFromPath(path)) |rid| {
+                const raw = recall.load(allocator, dir, io, rid) catch
+                    break :blk try std.fmt.allocPrint(allocator, "missing {s}\n", .{path});
+                defer allocator.free(raw);
+                if (hooks.hasSecret(raw)) {
+                    break :blk try allocator.dupe(u8, "read_result: sensitive; not shown\n");
+                }
+                const masked = try hooks.mask(allocator, raw);
+                defer allocator.free(masked);
+                break :blk try fs.numberLines(allocator, path, masked, offset, limit);
+            }
             const raw = fs.read(dir, io, allocator, access, path) catch |err| switch (err) {
                 error.NotAFile => break :blk try fs.readDirHint(dir, io, allocator, access, path),
                 else => return err,

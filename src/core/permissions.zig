@@ -82,8 +82,8 @@ pub const derived_min: usize = 12;
 /// them as laundered shell commands from untrusted tool text.
 pub fn isHarnessPath(path: []const u8) bool {
     const n = std.mem.trim(u8, path, " \t\r\n");
-    return std.mem.startsWith(u8, n, ".omfx/recall/") or
-        std.mem.startsWith(u8, n, ".omfx/runs/");
+    return std.mem.indexOf(u8, n, ".omfx/recall/") != null or
+        std.mem.indexOf(u8, n, ".omfx/runs/") != null;
 }
 
 /// True when `needle` appears in prior tool output but not in the user's own
@@ -408,6 +408,12 @@ test "derivedFromToolOutput allows harness recall paths" {
     const path = ".omfx/recall/r6.txt";
     try std.testing.expect(isHarnessPath(path));
     try std.testing.expect(!derivedFromToolOutput(path, "what do you see", "cite r6. read " ++ path));
+}
+
+test "isHarnessPath matches absolute recall paths" {
+    const abs = "/Users/demo/ws/.omfx/recall/r6.txt";
+    try std.testing.expect(isHarnessPath(abs));
+    try std.testing.expect(!derivedFromToolOutput(abs, "what do you see", "read " ++ abs));
 }
 
 test "exactKeyHit matches only that action" {

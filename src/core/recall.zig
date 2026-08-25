@@ -125,6 +125,23 @@ pub fn cite(allocator: std.mem.Allocator, item: Cite) std.mem.Allocator.Error![]
     };
 }
 
+const recall_path_needle = ".omfx/recall/r";
+
+/// Parse `rN` from `.omfx/recall/rN.txt` anywhere in a read path.
+pub fn idFromPath(path: []const u8) ?Id {
+    const hit = std.mem.indexOf(u8, path, recall_path_needle) orelse return null;
+    var i = hit + recall_path_needle.len;
+    var v: u16 = 0;
+    var saw = false;
+    while (i < path.len and path[i] >= '0' and path[i] <= '9') : (i += 1) {
+        saw = true;
+        v = v *% 10 + (path[i] - '0');
+    }
+    if (!saw or v == 0) return null;
+    if (i < path.len and !std.mem.startsWith(u8, path[i..], ".txt")) return null;
+    return @enumFromInt(v);
+}
+
 pub fn take(dst: *[max_items]Id, n: *usize, id: Id) void {
     if (n.* >= max_items) return;
     if (@intFromEnum(id) == 0) return;
@@ -180,6 +197,15 @@ test "put then collectIds round trip" {
     var ids: [max_items]Id = undefined;
     try std.testing.expectEqual(@as(usize, 1), collectIds(s, &ids));
     try std.testing.expectEqual(id, ids[0]);
+}
+
+test "idFromPath accepts relative and absolute paths" {
+    try std.testing.expectEqual(@as(?Id, @enumFromInt(6)), idFromPath(".omfx/recall/r6.txt"));
+    try std.testing.expectEqual(
+        @as(?Id, @enumFromInt(6)),
+        idFromPath("/Users/demo/ws/.omfx/recall/r6.txt"),
+    );
+    try std.testing.expect(idFromPath("src/main.zig") == null);
 }
 
 test "put redacts secret-shaped bodies" {
