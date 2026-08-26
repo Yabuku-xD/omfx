@@ -29,6 +29,36 @@ fn isHttpUrl(url: []const u8) bool {
     return std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "http://");
 }
 
+/// Reject loopback, link-local, and common private ranges (SSRF).
+fn denySsrfHost(url: []const u8) bool {
+    const scheme_end = std.mem.indexOf(u8, url, "://") orelse return true;
+    var host = url[scheme_end + 3 ..];
+    if (std.mem.indexOfScalar(u8, host, '/')) |slash| host = host[0..slash];
+    if (std.mem.indexOfScalar(u8, host, '@')) |at| host = host[at + 1 ..];
+    if (std.mem.indexOfScalar(u8, host, ':')) |colon| {
+        if (host.len > 0 and host[0] != '[') host = host[0..colon];
+    }
+    if (host.len > 1 and host[0] == '[' and host[host.len - 1] == ']') {
+        host = host[1 .. host.len - 1];
+    }
+    if (host.len == 0) return true;
+    if (std.ascii.eqlIgnoreCase(host, "localhost")) return true;
+    if (std.mem.eql(u8, host, "::1")) return true;
+    if (std.mem.startsWith(u8, host, "127.")) return true;
+    if (std.mem.startsWith(u8, host, "10.")) return true;
+    if (std.mem.startsWith(u8, host, "192.168.")) return true;
+    if (std.mem.startsWith(u8, host, "169.254.")) return true;
+    if (std.mem.startsWith(u8, host, "0.")) return true;
+    // 172.16.0.0/12
+    if (std.mem.startsWith(u8, host, "172.")) {
+        var rest = host["172.".len..];
+        const dot = std.mem.indexOfScalar(u8, rest, '.') orelse return false;
+        const second = std.fmt.parseInt(u8, rest[0..dot], 10) catch return false;
+        if (second >= 16 and second <= 31) return true;
+    }
+    return false;
+}
+
 pub fn isRedirectStatus(status: u16) bool {
     return status == 301 or status == 302 or status == 303 or status == 307 or status == 308;
 }
@@ -58,7 +88,17 @@ fn originOf(url: []const u8) []const u8 {
 }
 
 pub fn fetch(allocator: std.mem.Allocator, io: Io, url: []const u8) ![]u8 {
+    if (!isHttpUrl(url) or denySsrfHost(url)) return error.InvalidUrl;
+    return fetchRaw(allocator, io, url);
+}
+
+/// Localhost-only HTTP GET for CDP / browser-relay. Caller must gate with `cdp.isLocalhost`.
+pub fn fetchLocal(allocator: std.mem.Allocator, io: Io, url: []const u8) ![]u8 {
     if (!isHttpUrl(url)) return error.InvalidUrl;
+    return fetchRaw(allocator, io, url);
+}
+
+fn fetchRaw(allocator: std.mem.Allocator, io: Io, url: []const u8) ![]u8 {
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
     var aw: std.Io.Writer.Allocating = .init(allocator);
@@ -88,7 +128,7 @@ pub fn fetch(allocator: std.mem.Allocator, io: Io, url: []const u8) ![]u8 {
 }
 
 pub fn scrape(allocator: std.mem.Allocator, io: Io, url: []const u8) ![]u8 {
-    if (!isHttpUrl(url)) return error.InvalidUrl;
+    if (!isHttpUrl(url) or denySsrfHost(url)) return error.InvalidUrl;
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
     var aw: std.Io.Writer.Allocating = .init(allocator);
@@ -350,6 +390,15 @@ test "readablePage includes title and url" {
 
 test "reject non http" {
     try std.testing.expectError(error.InvalidUrl, fetch(std.testing.allocator, std.testing.io, "file:///etc/passwd"));
+}
+
+test "reject ssrf hosts" {
+    try std.testing.expectError(error.InvalidUrl, fetch(std.testing.allocator, std.testing.io, "http://127.0.0.1/"));
+    try std.testing.expectError(error.InvalidUrl, fetch(std.testing.allocator, std.testing.io, "http://localhost:8080/x"));
+    try std.testing.expectError(error.InvalidUrl, fetch(std.testing.allocator, std.testing.io, "http://169.254.169.254/latest"));
+    try std.testing.expectError(error.InvalidUrl, fetch(std.testing.allocator, std.testing.io, "http://10.0.0.1/"));
+    try std.testing.expectError(error.InvalidUrl, fetch(std.testing.allocator, std.testing.io, "http://172.16.5.1/"));
+    try std.testing.expect(!denySsrfHost("https://example.com/a"));
 }
 
 test "303 See Other is a redirect status" {

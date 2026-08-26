@@ -120,6 +120,7 @@ fn chatTurn(
     const peer_denied = (permissions.matchLast(cfg.rules, "peer", "{}") orelse .allow) == .deny;
     var always: [8][]u8 = undefined;
     var always_n: usize = 0;
+    defer for (always[0..always_n]) |k| allocator.free(k);
     var tool_blob: std.ArrayList(u8) = .empty;
     defer tool_blob.deinit(allocator);
     const tool_blob_cap: usize = 64 * 1024;
@@ -155,12 +156,17 @@ fn chatTurn(
     else
         try std.fmt.allocPrint(allocator, "{s}\n{s}", .{ state_block, user });
     defer allocator.free(user_with_state);
+    const surveyed_user = if (turn_loop.wantsRepoSurvey(user))
+        try std.fmt.allocPrint(allocator, "{s}\n{s}", .{ user_with_state, turn_loop.survey_budget_nudge })
+    else
+        try allocator.dupe(u8, user_with_state);
+    defer allocator.free(surveyed_user);
 
     var thread = try setup.seedThread(
         allocator,
         run.prior_user,
         run.prior_assistant,
-        user_with_state,
+        surveyed_user,
         try vision.attach(allocator, dir, io, workspace, user),
     );
 
@@ -222,7 +228,7 @@ fn chatTurn(
             .has_tty = has_tty,
             .rules = cfg.rules,
             .session_rules = run.session_rules,
-            .always = always[0..always_n],
+            .always = always[0..],
             .always_n = &always_n,
             .always_cap = always.len,
             .host = host,
@@ -373,6 +379,12 @@ fn chatTurn(
                     var ex_detail_buf: [permissions.max_command]u8 = undefined;
                     const ex_path = turn_loop.toolDetail(&ex_detail_buf, ex.args);
                     host.tool(ex.name, ex_path, false);
+                    if (plan and permissions.blockedByPlan(ex.name, ex.args)) {
+                        const deny_msg = try std.fmt.allocPrint(allocator, "plan mode: {s} blocked. /plan go to implement.\n", .{ex.name});
+                        defer allocator.free(deny_msg);
+                        host.toolOut(ex.name, ex_path, true, deny_msg);
+                        continue;
+                    }
                     const d = turn_loop.admitCall(liveMode(run), ex.name, ex.args, has_tty, cfg.rules, run.session_rules, always[0..always_n]);
                     if (d != .allow) {
                         const deny_msg = if (ex_path.len != 0)
@@ -412,7 +424,7 @@ fn chatTurn(
                     try std.fmt.allocPrint(allocator, "Tool {s} result:\n{s}Continue.", .{ tool_name, result_nl });
                 allocator.free(result_nl);
 
-                if (orient_streak >= turn_loop.orient_after) {
+                if (orient_streak >= turn_loop.orient_after and orient_streak < turn_loop.orient_stop_after) {
                     const nudged = try std.fmt.allocPrint(allocator, "{s}\n{s}\n", .{ follow_raw, turn_loop.orient_nudge });
                     allocator.free(follow_raw);
                     follow_raw = nudged;
@@ -453,6 +465,7 @@ fn chatTurn(
                 }
                 host.pollCancel();
                 if (host.cancelled()) return allocator.dupe(u8, interrupted_text);
+                if (try turn_loop.checkOrientLoop(allocator, orient_streak)) |stop| return stop;
                 if (try turn_loop.checkTurnLimit(allocator, turns, max_tool_turns)) |stop| return stop;
                 last = (try postOrStop(allocator, io, endpoint, thread.items, sys, flags)) orelse
                     return allocator.dupe(u8, interrupted_text);

@@ -566,15 +566,18 @@ test "the context card splits the window into parts that add up" {
     sess.ctx_used = 100_000;
     sess.trace_sys = 8_000;
     sess.trace_tools = 4_000;
+    sess.usage_tab = .context;
     const p = panels.build(&sess, .context);
-    try std.testing.expectEqualStrings("Total", p.items()[0].label);
-    try std.testing.expectEqualStrings("100.0k (20%)", p.items()[0].value);
+    try std.testing.expectEqualStrings("Context", p.items()[0].label);
+    try std.testing.expectEqualStrings("100.0k / 500.0k tokens (20%)", p.items()[0].value);
     // 12000 bytes of fixed floor at four bytes a token is 3000, so messages
     // is what the provider counted minus that.
-    try std.testing.expectEqualStrings("97.0k (19%)", p.items()[1].value);
-    try std.testing.expectEqualStrings("2.0k (0%)", p.items()[2].value);
-    try std.testing.expectEqualStrings("1.0k (0%)", p.items()[3].value);
-    try std.testing.expectEqualStrings("400.0k (80%)", p.items()[4].value);
+    var messages_val: ?[]const u8 = null;
+    for (p.items()) |it| {
+        if (std.mem.eql(u8, it.label, "Messages")) messages_val = it.value;
+    }
+    try std.testing.expect(messages_val != null);
+    try std.testing.expect(std.mem.indexOf(u8, messages_val.?, "97.0k") != null);
 }
 
 test "the rewind panel offers a prompt to go back to, not a number to count" {

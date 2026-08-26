@@ -110,6 +110,15 @@ pub fn panelKey(sess: *Session, ev: tui.Event) bool {
         .up, .history_prev => p.move(-1),
         .down, .history_next => p.move(1),
         .left, .right => panels.stepPanelValue(sess, ev == .right),
+        .tab => {
+            if (p.tabs.len != 0) {
+                sess.usage_tab = cmds.usageTabNext(sess.usage_tab);
+                sess.panel_opened_ms = nowMs(sess.io);
+                sess.panel = panels.build(sess, .usage);
+                sess.panel_kind = .usage;
+                sess.dirty = true;
+            }
+        },
         .delete => {
             if (sess.panel_kind != .sessions) return true;
             const f = p.current() orelse return true;
@@ -151,6 +160,7 @@ pub fn panelKey(sess: *Session, ev: tui.Event) bool {
             }
         },
         .byte => |b| if (b == ' ') panels.togglePanelField(sess),
+        .release => sess.dragging = false,
         else => {},
     }
     return true;

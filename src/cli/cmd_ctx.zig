@@ -28,7 +28,17 @@ pub const Flow = union(enum) {
     panel: PanelKind,
 };
 
-pub const PanelKind = enum { settings, help, shortcuts, sessions, statusline, status, jobs, workspace, rewind, context, plan, files, peers };
+pub const PanelKind = enum { settings, help, shortcuts, sessions, statusline, status, jobs, workspace, rewind, context, usage, plan, files, peers };
+
+pub const UsageTab = enum { context, limit, session };
+
+pub fn usageTabNext(t: UsageTab) UsageTab {
+    return switch (t) {
+        .context => .limit,
+        .limit => .session,
+        .session => .context,
+    };
+}
 
 pub const max_extra: usize = 8;
 pub const max_jobs: usize = 8;

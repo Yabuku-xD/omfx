@@ -32,7 +32,7 @@ fn pasteApiKey(allocator: std.mem.Allocator, io: Io, home: []const u8, stdout: *
     const key = try readLine(io, allocator);
     defer allocator.free(key);
     if (key.len == 0) return error.Canceled;
-    const obj = try std.fmt.allocPrint(allocator, "{{\"type\":\"api_key\",\"key\":\"{s}\"}}", .{key});
+    const obj = try auth.encodeApiKeyObject(allocator, key);
     defer allocator.free(obj);
     const store = catalog.storeId(spec);
     const path = try writeAuth(allocator, io, home, store, obj);
@@ -95,7 +95,7 @@ fn loginPkce(
 }
 
 pub fn saveApiKey(allocator: std.mem.Allocator, io: Io, home: []const u8, id: []const u8, key: []const u8) ![]u8 {
-    const obj = try std.fmt.allocPrint(allocator, "{{\"type\":\"api_key\",\"key\":\"{s}\"}}", .{key});
+    const obj = try auth.encodeApiKeyObject(allocator, key);
     defer allocator.free(obj);
     return writeAuth(allocator, io, home, id, obj);
 }

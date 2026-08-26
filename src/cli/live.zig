@@ -29,34 +29,8 @@ fn pinTodoChrome(allocator: std.mem.Allocator, cols: u16, list: *const todos.Lis
     return rows[0..n];
 }
 
-fn formatContextPeek(
-    allocator: std.mem.Allocator,
-    cols: u16,
-    state: activity.State,
-    window: u32,
-    rows: [][]const u8,
-) []const []const u8 {
-    _ = cols;
-    if (rows.len < 5) return &.{};
-    const used = if (state.tokens != 0) state.tokens else 0;
-    var n: usize = 0;
-    rows[n] = std.fmt.allocPrint(allocator, "{s}Context (live){s}", .{ ansi.accent_dim, ansi.reset }) catch return &.{};
-    n += 1;
-    rows[n] = std.fmt.allocPrint(allocator, "  used {d} / window {d}", .{ used, window }) catch return rows[0..n];
-    n += 1;
-    rows[n] = std.fmt.allocPrint(allocator, "  cache read {d}  write {d}  fresh {d}", .{
-        state.cache_read,
-        state.cache_write,
-        state.fresh_input,
-    }) catch return rows[0..n];
-    n += 1;
-    rows[n] = std.fmt.allocPrint(allocator, "{s}  click meter again to hide{s}", .{ ansi.muted, ansi.reset }) catch return rows[0..n];
-    n += 1;
-    return rows[0..n];
-}
-
-fn scrollRowsFor(layout: *const tui.Layout, scroll: usize, task_n: usize, peek_n: usize) u16 {
-    const tasks: u16 = @intCast(@min(task_n + peek_n, @as(usize, std.math.maxInt(u16))));
+fn scrollRowsFor(layout: *const tui.Layout, scroll: usize, task_n: usize) u16 {
+    const tasks: u16 = @intCast(@min(task_n, @as(usize, std.math.maxInt(u16))));
     const overlay = tasks + @as(u16, if (tui.jumpVisible(scroll, layout.transcript_rows)) 1 else 0);
     const full = layout.transcript_rows;
     return if (full > overlay) full - overlay else full;
@@ -291,6 +265,13 @@ pub const Live = union(enum) {
         if (sink.takeRunClick()) |click| {
             if (toggleRunClick(self, click.row)) return true;
         }
+        if (sink.takeContextPanel()) {
+            // Do not open a blocking overlay on the paint/spinner thread — that
+            // owns paint_lock and shares stdin with the cancel watcher. Queue
+            // the same panel the idle loop opens; turn.zig runs it after the turn.
+            sink.setPendingCmd("/context");
+            return true;
+        }
         const delta = sink.takeScrollDelta();
         if (delta == 0) return false;
         const up = delta > 0;
@@ -299,7 +280,7 @@ pub const Live = union(enum) {
         const next = tui.stepScroll(
             self.scroll.*,
             self.shown.rowCount(),
-            scrollRowsFor(self.layout, self.scroll.*, footerTaskCount(self.tasks), if (sink.contextPeekOn()) 5 else 0),
+            scrollRowsFor(self.layout, self.scroll.*, footerTaskCount(self.tasks)),
             up,
             step,
         );
@@ -376,11 +357,7 @@ pub const Live = union(enum) {
         if (self.act.state.tokens != 0) footer.context_used = self.act.state.tokens;
         var todo_rows: [todos.max_items][]const u8 = undefined;
         footer.tasks = pinTodoChrome(self.arena, self.layout.cols, self.tasks, &todo_rows);
-        var peek_rows: [6][]const u8 = undefined;
-        footer.peek = if (sink.contextPeekOn())
-            formatContextPeek(self.arena, self.layout.cols, self.act.state, footer.context_window, &peek_rows)
-        else
-            &.{};
+        footer.peek = &.{};
         // Words typed during the turn go into the steer queue. They are drawn
         // as their own row rather than inside the composer: the composer is
         // where the next prompt is written, and a queued message is a message
@@ -454,8 +431,13 @@ pub const Live = union(enum) {
             paintTty(self, .{ .line = src });
             return;
         };
-        defer self.allocator.free(painted);
         paintTty(self, .{ .line = painted });
+        // setTail borrows `painted`; clear before free so the spinner cannot
+        // read a freed preview on the next frame.
+        lockPaint(self);
+        self.shown.clearTail();
+        unlockPaint(self);
+        self.allocator.free(painted);
     }
 
     fn writeShown(self: *Tty, chunk: []const u8) void {

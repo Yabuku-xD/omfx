@@ -13,16 +13,21 @@ const LoopAction = dispatch.LoopAction;
 const Deps = dispatch.Deps;
 
 pub fn startSel(sess: *Session, row: u16, col: u16) void {
-    sess.dragging = true;
     if (tui.jumpVisible(sess.scroll, sess.layout.transcript_rows) and tui.jumpHit(sess.layout, row, col)) {
         sess.dragging = false;
         sess.clearSel();
         return;
     }
-    if (sess.layout.header_rows != 0 and row == 1 and col + 16 > sess.layout.cols) {
-        sess.openPanel(panels.build(sess, .context));
+    if (tui.contextHit(sess.layout, row, col)) {
+        sess.dragging = false;
+        sess.clearSel();
+        sess.usage_tab = .context;
+        sess.openPanel(panels.build(sess, .usage));
+        sess.panel_kind = .usage;
+        sess.dirty = true;
         return;
     }
+    sess.dragging = true;
     const at = sess.selPoint(row, col) orelse {
         sess.clearSel();
         runs_ui.blurScrollback(sess);

@@ -151,6 +151,11 @@ pub fn afterSwitch(sess: *Session, deps: *const Deps, model: []const u8) !LoopAc
             .panel => |kind| {
                 switch (kind) {
                     .help, .shortcuts => pointer.openSearchPanel(sess, kind),
+                    .context, .usage => {
+                        sess.usage_tab = if (kind == .context) .context else .limit;
+                        sess.openPanel(panels.build(sess, kind));
+                        sess.panel_kind = .usage;
+                    },
                     else => {
                         sess.openPanel(panels.build(sess, kind));
                         // Keep the kind so list panels can act on keys

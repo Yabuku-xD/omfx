@@ -197,7 +197,8 @@ pub fn admitToolCall(a: AdmitArgs) !AdmitOutcome {
             .{a.call.name},
         ) };
     }
-    var decision = admitCall(a.mode, a.call.name, a.call.args, a.has_tty, a.rules, a.session_rules, a.always);
+    // Lookups use the filled prefix; writes use full `always` capacity (`always_cap`).
+    var decision = admitCall(a.mode, a.call.name, a.call.args, a.has_tty, a.rules, a.session_rules, a.always[0..a.always_n.*]);
     if (decision == .allow or decision == .prompt) {
         if (derivedBlocks(a.call.name, a.call.args, a.user, a.tool_blob)) {
             decision = if (a.has_tty) .prompt else .deny;
@@ -215,12 +216,14 @@ pub fn admitToolCall(a: AdmitArgs) !AdmitOutcome {
             },
             .always => {
                 decision = .allow;
+                const key = try permissions.exactKey(a.allocator, a.call.name, a.call.args);
                 if (a.always_n.* < a.always_cap) {
-                    const always_mut = @as([][]u8, @constCast(a.always));
-                    always_mut[a.always_n.*] = try permissions.exactKey(a.allocator, a.call.name, a.call.args);
+                    a.always[a.always_n.*] = key;
                     a.always_n.* += 1;
+                    one_shot = try permissions.exactKey(a.allocator, a.call.name, a.call.args);
+                } else {
+                    one_shot = key;
                 }
-                one_shot = try permissions.exactKey(a.allocator, a.call.name, a.call.args);
             },
             .deny => decision = .deny,
         }
@@ -280,10 +283,50 @@ pub fn recheckAdmitted(a: RecheckArgs) !?[]u8 {
 }
 
 pub const orient_after: usize = 3;
+/// Hard stop after this many consecutive orient rounds (nudge alone is not enough).
+pub const orient_stop_after: usize = orient_after + 2;
 
 pub const orient_nudge =
     \\harness: stop re-orienting. Results above already cover the tree. Advance the open todo with one specific next step — do not restate the plan or re-list the repo.
 ;
+
+pub const survey_budget_nudge =
+    \\harness: repo survey — budget ~6 orient tools (README, AGENTS.md, top-level list, one pass over src/), then answer in text. Do not re-read the same path or re-run git status. Use list for directories, not read.
+;
+
+pub fn wantsRepoSurvey(text: []const u8) bool {
+    var buf: [512]u8 = undefined;
+    const n = @min(text.len, buf.len);
+    for (text[0..n], 0..) |c, i| buf[i] = std.ascii.toLower(c);
+    const lower = buf[0..n];
+    const needles = [_][]const u8{
+        "whole project",
+        "entire project",
+        "entire repo",
+        "whole repo",
+        "go through the whole",
+        "go through the entire",
+        "survey the repo",
+        "map the codebase",
+        "walk through the",
+    };
+    for (needles) |needle| {
+        if (std.mem.indexOf(u8, lower, needle) != null) return true;
+    }
+    return false;
+}
+
+/// Returns owned text when the model keeps surveying instead of advancing.
+pub fn checkOrientLoop(allocator: std.mem.Allocator, orient_streak: usize) !?[]u8 {
+    if (orient_streak >= orient_stop_after) {
+        return try std.fmt.allocPrint(
+            allocator,
+            "stopped: re-orient loop ({d} consecutive survey rounds); synthesize from tool results above or ask_user to narrow scope.\n",
+            .{orient_streak},
+        );
+    }
+    return null;
+}
 
 fn asciiLowerEq(hay: []const u8, needle: []const u8) bool {
     if (needle.len > hay.len) return false;
@@ -403,6 +446,13 @@ test "malformedToolCheck stops after max unknown tools" {
     )).?;
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings("stopped malformed\n", out);
+}
+
+test "checkOrientLoop trips at orient_stop_after" {
+    const out = (try checkOrientLoop(std.testing.allocator, orient_stop_after)).?;
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "re-orient loop") != null);
+    try std.testing.expect((try checkOrientLoop(std.testing.allocator, orient_stop_after - 1)) == null);
 }
 
 test "checkTurnLimit trips at the budget" {

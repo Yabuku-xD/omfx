@@ -111,6 +111,10 @@ pub const Panel = struct {
     /// say so rather than presenting a truncated list as complete.
     overflow: usize = 0,
 
+    /// Tab labels for multi-page panels (usage overlay). Tab key cycles `tab_sel`.
+    tabs: []const []const u8 = &.{},
+    tab_sel: usize = 0,
+
     pub fn add(self: *Panel, f: Field) void {
         if (self.n == max_fields) {
             self.overflow += 1;
@@ -196,12 +200,14 @@ pub const Geometry = struct {
 /// Rows of the frame that are not fields: top border, title, rule, help,
 /// bottom border.
 pub const chrome_rows: u16 = 5;
+/// Extra rows when a panel draws a tab bar under the title (tab labels + rule).
+pub const tab_chrome_rows: u16 = 2;
 
 /// How many fields fit in this geometry. A list longer than this scrolls
 /// rather than drawing past the frame -- an unwindowed `/help` painted 54 rows
 /// into a 34-row terminal and tore the box apart.
-pub fn visibleRows(g: Geometry) usize {
-    return virt.viewRows(g.rows, chrome_rows, max_visible);
+pub fn visibleRows(g: Geometry, extra_chrome: u16) usize {
+    return virt.viewRows(g.rows, chrome_rows + extra_chrome, max_visible);
 }
 
 /// First field to draw so `sel` stays on screen.
@@ -210,11 +216,12 @@ pub fn windowStart(total: usize, sel: usize, view: usize) usize {
 }
 
 /// Centred, clamped to `max_cols`, and never taller than the pane.
-pub fn geometry(term_rows: u16, term_cols: u16, field_count: usize) Geometry {
+pub fn geometry(term_rows: u16, term_cols: u16, field_count: usize, extra_chrome: u16) Geometry {
+    const chrome = chrome_rows + extra_chrome;
     const want_cols: u16 = @min(max_cols, if (term_cols > 8) term_cols - 4 else term_cols);
-    // title + rule + fields + rule + help + borders
+    // title + rule + fields + rule + help + borders (+ optional tab row)
     const capped_fields = @min(field_count, @as(usize, max_visible));
-    const want_rows: u16 = @intCast(@min(@as(usize, term_rows), capped_fields + chrome_rows + 1));
+    const want_rows: u16 = @intCast(@min(@as(usize, term_rows), capped_fields + chrome + 1));
     return .{
         .cols = want_cols,
         .rows = want_rows,
@@ -329,7 +336,8 @@ pub fn render(a: std.mem.Allocator, p: *const Panel, g: Geometry) ![]u8 {
     var cup: [32]u8 = undefined;
 
     const inner: u16 = if (g.cols >= 2) g.cols - 2 else 1;
-    const view = visibleRows(g);
+    const extra: u16 = if (p.tabs.len > 0) tab_chrome_rows else 0;
+    const view = visibleRows(g, extra);
     const revealed = revealedRows(p.n, p.elapsed_ms);
     const shown = @min(revealed, view);
     const start = windowStart(p.n, p.sel, view);
@@ -388,6 +396,41 @@ pub fn render(a: std.mem.Allocator, p: *const Panel, g: Geometry) ![]u8 {
     try out.appendSlice(a, "\u{2502}");
     try out.appendSlice(a, paint.reset);
     r += 1;
+
+    if (p.tabs.len > 0) {
+        try out.appendSlice(a, try moveTo(&cup, r, g.col0));
+        try out.appendSlice(a, edge);
+        try out.appendSlice(a, "\u{2502}");
+        try out.appendSlice(a, paint.reset);
+        var used_tabs: u16 = 1;
+        for (p.tabs, 0..) |label, ti| {
+            const active = ti == p.tab_sel;
+            if (ti > 0) {
+                try out.appendSlice(a, paint.muted);
+                try out.appendSlice(a, "  ");
+                try out.appendSlice(a, paint.reset);
+                used_tabs += 2;
+            }
+            try out.appendSlice(a, if (active) paint.accent else paint.muted);
+            const clip_label = clip(label, if (inner > used_tabs + 4) inner - used_tabs - 4 else 1);
+            try out.appendSlice(a, clip_label);
+            try out.appendSlice(a, paint.reset);
+            used_tabs += width.cellsTo(clip_label);
+        }
+        try pad(&out, a, used_tabs, inner);
+        try out.appendSlice(a, edge);
+        try out.appendSlice(a, "\u{2502}");
+        try out.appendSlice(a, paint.reset);
+        r += 1;
+
+        try out.appendSlice(a, try moveTo(&cup, r, g.col0));
+        try out.appendSlice(a, edge);
+        try out.appendSlice(a, "\u{251c}");
+        try rule(&out, a, inner);
+        try out.appendSlice(a, "\u{2524}");
+        try out.appendSlice(a, paint.reset);
+        r += 1;
+    }
 
     // The box is always `view` rows tall, even while the reveal is still
     // filling it. Drawing a shorter frame each animation step left the previous
@@ -573,6 +616,7 @@ fn finish(
 }
 
 fn hintFor(p: *const Panel) []const u8 {
+    if (p.tabs.len > 0) return "Tab switch  ·  up/down scroll  ·  esc closes";
     if (p.editing) return "type your answer  ·  enter saves  ·  esc cancels";
     const f = p.current() orelse return "esc closes";
     return switch (f.kind) {
@@ -636,7 +680,7 @@ test "animating stops so an idle panel costs nothing" {
 }
 
 test "geometry centres and clamps" {
-    const g = geometry(40, 200, 6);
+    const g = geometry(40, 200, 6, 0);
     try std.testing.expectEqual(max_cols, g.cols);
     // Centred, not flush left.
     try std.testing.expect(g.col0 > 1);
@@ -644,14 +688,14 @@ test "geometry centres and clamps" {
 
     // A narrow terminal gets the width it has, not a negative one, and the
     // panel must still fit inside the screen it was measured against.
-    const tiny = geometry(6, 20, 6);
+    const tiny = geometry(6, 20, 6, 0);
     try std.testing.expect(tiny.cols <= 20);
     try std.testing.expect(tiny.rows <= 6);
     try std.testing.expect(tiny.col0 + tiny.cols <= 20 + 1);
     try std.testing.expect(tiny.row0 + tiny.rows <= 6 + 1);
 
     // And a terminal narrower than the margin does not underflow.
-    const cramped = geometry(3, 6, 4);
+    const cramped = geometry(3, 6, 4, 0);
     try std.testing.expect(cramped.cols >= 1 and cramped.cols <= 6);
     try std.testing.expectEqual(@as(u16, 1), cramped.col0);
 }
@@ -721,7 +765,7 @@ fn testPanel() Panel {
 test "render draws every visible field and the title" {
     const a = std.testing.allocator;
     var p = testPanel();
-    const s = try render(a, &p, geometry(30, 100, p.n));
+    const s = try render(a, &p, geometry(30, 100, p.n, 0));
     defer a.free(s);
     try std.testing.expect(std.mem.indexOf(u8, s, "Settings") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "Sound") != null);
@@ -736,7 +780,7 @@ test "the frame is the same height on every animation frame" {
     const a = std.testing.allocator;
     var names: [40][12]u8 = undefined;
     var p = longPanel(&names);
-    const g = geometry(40, 100, p.n);
+    const g = geometry(40, 100, p.n, 0);
 
     // The bottom border must land on the same row at every point in the
     // reveal, or the previous frame's rows are left on screen.
@@ -763,10 +807,10 @@ test "an opening panel draws fewer rows than a settled one" {
     const a = std.testing.allocator;
     var p = testPanel();
     p.elapsed_ms = 0;
-    const opening = try render(a, &p, geometry(30, 100, p.n));
+    const opening = try render(a, &p, geometry(30, 100, p.n, 0));
     defer a.free(opening);
     p.elapsed_ms = open_ms;
-    const settled = try render(a, &p, geometry(30, 100, p.n));
+    const settled = try render(a, &p, geometry(30, 100, p.n, 0));
     defer a.free(settled);
     try std.testing.expect(opening.len < settled.len);
     // The last field only exists once the reveal finishes.
@@ -777,17 +821,17 @@ test "an opening panel draws fewer rows than a settled one" {
 test "a toggle reads as a switch and a choice as a carousel" {
     const a = std.testing.allocator;
     var p = testPanel();
-    const on = try render(a, &p, geometry(30, 100, p.n));
+    const on = try render(a, &p, geometry(30, 100, p.n, 0));
     defer a.free(on);
     try std.testing.expect(std.mem.indexOf(u8, on, "\u{25cf} on") != null);
 
     p.fields[0].value = "off";
-    const off = try render(a, &p, geometry(30, 100, p.n));
+    const off = try render(a, &p, geometry(30, 100, p.n, 0));
     defer a.free(off);
     try std.testing.expect(std.mem.indexOf(u8, off, "\u{25cb} off") != null);
 
     p.sel = 1;
-    const choice = try render(a, &p, geometry(30, 100, p.n));
+    const choice = try render(a, &p, geometry(30, 100, p.n, 0));
     defer a.free(choice);
     try std.testing.expect(std.mem.indexOf(u8, choice, "\u{2039}") != null);
     try std.testing.expect(std.mem.indexOf(u8, choice, "\u{203a}") != null);
@@ -827,7 +871,7 @@ test "toggle on and off keep the right border on the same column" {
     var p = Panel{ .title = "Settings" };
     p.add(.{ .key = "statusline", .label = "Status line", .kind = .toggle, .value = "on", .help = "under the composer" });
     p.add(.{ .key = "sound", .label = "Sound", .kind = .toggle, .value = "off", .help = "bell" });
-    const g = geometry(30, 80, p.n);
+    const g = geometry(30, 80, p.n, 0);
     const on = try render(a, &p, g);
     defer a.free(on);
     p.fields[0].value = "off";
@@ -848,7 +892,7 @@ test "editing shows the live buffer and a caret" {
     p.sel = 2;
     p.editing = true;
     p.edit = "$ ";
-    const s = try render(a, &p, geometry(30, 100, p.n));
+    const s = try render(a, &p, geometry(30, 100, p.n, 0));
     defer a.free(s);
     try std.testing.expect(std.mem.indexOf(u8, s, "$ ") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\u{2588}") != null);
@@ -859,7 +903,7 @@ test "render never writes past the panel width" {
     const a = std.testing.allocator;
     var p = Panel{ .title = "x" ** 200 };
     p.add(.{ .key = "k", .label = "L" ** 120, .kind = .text, .value = "V" ** 120 });
-    const g = geometry(30, 100, p.n);
+    const g = geometry(30, 100, p.n, 0);
     const s = try render(a, &p, g);
     defer a.free(s);
     // Every painted row must fit the frame, or the box tears.
@@ -874,7 +918,7 @@ test "render never writes past the panel width" {
 test "a panel erases what it covers" {
     const a = std.testing.allocator;
     var p = testPanel();
-    const g = geometry(30, 100, p.n);
+    const g = geometry(30, 100, p.n, 0);
     const s = try render(a, &p, g);
     defer a.free(s);
     // Every row of the footprint is blanked before anything is drawn, or the
@@ -894,7 +938,7 @@ test "a long list scrolls instead of drawing past the frame" {
     var names: [40][12]u8 = undefined;
     var p = longPanel(&names);
     // 40 rows in a 20-row terminal: the frame must still close.
-    const g = geometry(20, 100, p.n);
+    const g = geometry(20, 100, p.n, 0);
     try std.testing.expect(g.rows <= 20);
     const s = try render(a, &p, g);
     defer a.free(s);
@@ -912,7 +956,7 @@ test "the window follows the cursor and reports position" {
     const a = std.testing.allocator;
     var names: [40][12]u8 = undefined;
     var p = longPanel(&names);
-    const g = geometry(20, 100, p.n);
+    const g = geometry(20, 100, p.n, 0);
     p.sel = p.n - 1;
     const s = try render(a, &p, g);
     defer a.free(s);
@@ -931,7 +975,7 @@ test "a list longer than the cap says so instead of lying" {
     }
     try std.testing.expectEqual(max_fields, p.n);
     try std.testing.expectEqual(@as(usize, 3), p.overflow);
-    const s = try render(a, &p, geometry(20, 100, p.n));
+    const s = try render(a, &p, geometry(20, 100, p.n, 0));
     defer a.free(s);
     try std.testing.expect(std.mem.indexOf(u8, s, "+3 dropped") != null);
 }
@@ -958,7 +1002,7 @@ fn longPanel(names: *[40][12]u8) Panel {
 test "a panel with no fields still renders a frame" {
     const a = std.testing.allocator;
     var p = Panel{ .title = "Empty" };
-    const s = try render(a, &p, geometry(30, 100, 0));
+    const s = try render(a, &p, geometry(30, 100, 0, 0));
     defer a.free(s);
     try std.testing.expect(std.mem.indexOf(u8, s, "Empty") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\u{2570}") != null);
@@ -972,12 +1016,12 @@ test "every panel is the same height regardless of its content" {
     short.add(.{ .key = "a", .label = "A", .kind = .toggle, .value = "on" });
     short.add(.{ .key = "b", .label = "B", .kind = .toggle, .value = "on" });
 
-    const tall = geometry(50, 100, long.n);
-    try std.testing.expectEqual(max_visible, @as(u16, @intCast(visibleRows(tall))));
+    const tall = geometry(50, 100, long.n, 0);
+    try std.testing.expectEqual(max_visible, @as(u16, @intCast(visibleRows(tall, 0))));
     try std.testing.expectEqual(max_visible + chrome_rows + 1, tall.rows);
 
     // A short panel is only as tall as it needs, never taller than the cap.
-    const small = geometry(50, 100, short.n);
+    const small = geometry(50, 100, short.n, 0);
     try std.testing.expect(small.rows < tall.rows);
     try std.testing.expect(small.rows <= max_visible + chrome_rows + 1);
 }
@@ -985,9 +1029,9 @@ test "every panel is the same height regardless of its content" {
 test "a short terminal still bounds the panel" {
     var names: [40][12]u8 = undefined;
     const long = longPanel(&names);
-    const g = geometry(12, 100, long.n);
+    const g = geometry(12, 100, long.n, 0);
     try std.testing.expect(g.rows <= 12);
-    try std.testing.expect(visibleRows(g) <= max_visible);
+    try std.testing.expect(visibleRows(g, 0) <= max_visible);
 }
 
 test "clipped text ends in an ellipsis, not mid-word silence" {
@@ -999,7 +1043,7 @@ test "clipped text ends in an ellipsis, not mid-word silence" {
         .kind = .info,
         .value = "a description that is far too long to fit inside this frame at all",
     });
-    const s = try render(a, &p, geometry(20, 60, p.n));
+    const s = try render(a, &p, geometry(20, 60, p.n, 0));
     defer a.free(s);
     try std.testing.expect(std.mem.indexOf(u8, s, "\u{2026}") != null);
 }

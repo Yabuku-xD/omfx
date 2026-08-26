@@ -12,7 +12,317 @@ const board = @import("../../core/board.zig");
 const progress = @import("../progress.zig");
 
 const session_mod = @import("../repl/session.zig");
+const runlog = @import("../../core/runlog.zig");
+const cli = @import("../../core/cli.zig");
+
 const Session = session_mod.Session;
+const UsageTab = cmds.UsageTab;
+
+pub const usage_tab_labels = [_][]const u8{ "Context usage", "Usage limit", "Session info" };
+
+const bytes_per_token: u32 = 4;
+
+pub fn usagePanel(sess: *Session) panel_mod.Panel {
+    return usagePanelFrom(.{
+        .arena = sess.arena,
+        .io = sess.io,
+        .home = sess.home,
+        .workspace = sess.workspace,
+        .model = sess.model(),
+        .provider = if (sess.state.resolved) |r| r.spec.id else "(none)",
+        .session_title = sess.state.session_title,
+        .ctx_used = sess.ctx_used,
+        .ctx_window = sess.ctx_window,
+        .trace_sys = sess.trace_sys,
+        .trace_tools = sess.trace_tools,
+        .ctx_fresh = sess.ctx_fresh,
+        .ctx_cache_read = sess.ctx_cache_read,
+        .ctx_cache_write = sess.ctx_cache_write,
+    }, sess.usage_tab);
+}
+
+pub const UsageView = struct {
+    arena: std.mem.Allocator,
+    io: Io,
+    home: []const u8,
+    workspace: []const u8,
+    model: []const u8,
+    provider: []const u8,
+    session_title: []const u8,
+    ctx_used: u32,
+    ctx_window: u32,
+    trace_sys: u32,
+    trace_tools: u32,
+    ctx_fresh: u32,
+    ctx_cache_read: u32,
+    ctx_cache_write: u32,
+};
+
+pub fn usagePanelFrom(view: UsageView, tab: UsageTab) panel_mod.Panel {
+    var p = panel_mod.Panel{
+        .title = "Usage",
+        .tabs = &usage_tab_labels,
+        .tab_sel = @intFromEnum(tab),
+    };
+    switch (tab) {
+        .context => fillContextTab(view, &p),
+        .limit => fillLimitTab(view, &p),
+        .session => fillSessionTab(view, &p),
+    }
+    if (p.n > 0) p.sel = 0;
+    return p;
+}
+
+fn fillContextTab(view: UsageView, p: *panel_mod.Panel) void {
+    const window = view.ctx_window;
+    if (window == 0) {
+        p.add(.{ .key = "", .label = "No window reported yet", .kind = .info });
+        return;
+    }
+    const used = view.ctx_used;
+    const sys = view.trace_sys / bytes_per_token;
+    const tools = view.trace_tools / bytes_per_token;
+    const fixed = @min(sys + tools, used);
+    const messages = used - fixed;
+    const pct = @as(u64, used) * 100 / window;
+
+    p.add(.{
+        .key = "",
+        .label = "Context",
+        .kind = .info,
+        .value = std.fmt.allocPrint(view.arena, "{s} / {s} tokens ({d}%)", .{
+            shortTok(view, used),
+            shortTok(view, window),
+            pct,
+        }) catch "",
+    });
+    p.add(.{ .key = "", .label = "Model", .kind = .info, .value = view.model });
+    addContextGrid(view, p, used, window);
+    p.add(.{ .key = "", .label = "", .kind = .info });
+    p.add(.{ .key = "", .label = "Messages", .kind = .info, .value = contextRowAlloc(view, messages, window) });
+    p.add(.{ .key = "", .label = "System prompt", .kind = .info, .value = contextRowAlloc(view, @min(sys, used), window) });
+    p.add(.{ .key = "", .label = "Tool schemas", .kind = .info, .value = contextRowAlloc(view, @min(tools, used -| sys), window) });
+    p.add(.{ .key = "", .label = "Free", .kind = .info, .value = contextRowAlloc(view, window -| used, window) });
+    addCacheRowsFrom(view, p);
+    if (used * 100 / window >= 80) {
+        const remain = window -| used;
+        p.add(.{
+            .key = "",
+            .label = "Auto-compact",
+            .kind = .info,
+            .value = std.fmt.allocPrint(view.arena, "at 80% — {s} tokens remaining", .{shortTok(view, remain)}) catch "",
+        });
+    }
+    const c = runlog.compare(view.arena, view.io, view.home);
+    if (c.now.turns != 0) {
+        p.add(.{
+            .key = "",
+            .label = "Turns",
+            .kind = .info,
+            .value = std.fmt.allocPrint(view.arena, "{d}  ·  {d} tool calls", .{ c.now.turns, c.now.tools }) catch "",
+        });
+    }
+}
+
+fn fillLimitTab(view: UsageView, p: *panel_mod.Panel) void {
+    p.add(.{ .key = "", .label = "Session usage", .kind = .heading, .value = "" });
+    const path = session.sessionPath(view.arena, view.home, session.resolveId("last")) catch "";
+    const blob = if (path.len != 0)
+        Io.Dir.cwd().readFileAlloc(view.io, path, view.arena, .limited(1_000_000)) catch ""
+    else
+        "";
+    var user_n: usize = 0;
+    var asst_n: usize = 0;
+    var it = std.mem.splitScalar(u8, blob, '\n');
+    while (it.next()) |l| {
+        if (std.mem.indexOf(u8, l, "\"kind\":\"user\"") != null) user_n += 1;
+        if (std.mem.indexOf(u8, l, "\"kind\":\"assistant\"") != null) asst_n += 1;
+    }
+    p.add(.{
+        .key = "",
+        .label = "Transcript",
+        .kind = .info,
+        .value = std.fmt.allocPrint(view.arena, "{d} chars  ·  {d} user  ·  {d} assistant", .{
+            blob.len, user_n, asst_n,
+        }) catch "",
+    });
+    const c = runlog.compare(view.arena, view.io, view.home);
+    if (c.now.turns == 0) {
+        p.add(.{ .key = "", .label = "Turn log", .kind = .info, .value = "No turns recorded yet" });
+    } else {
+        p.add(.{
+            .key = "",
+            .label = std.fmt.allocPrint(view.arena, "Last {d} turns", .{c.now.turns}) catch "Recent turns",
+            .kind = .info,
+            .value = std.fmt.allocPrint(view.arena, "{d}ms avg  ·  {d} tokens avg  ·  {d} tools  ·  {d} not clean", .{
+                c.now.avgMs(),
+                c.now.avgTokens(),
+                c.now.tools,
+                c.now.denied,
+            }) catch "",
+        });
+        if (c.before.turns != 0) {
+            p.add(.{
+                .key = "",
+                .label = std.fmt.allocPrint(view.arena, "Previous {d}", .{c.before.turns}) catch "Previous",
+                .kind = .info,
+                .value = std.fmt.allocPrint(view.arena, "{d}ms avg  ·  {d} tokens avg  ·  {d} tools  ·  {d} not clean", .{
+                    c.before.avgMs(),
+                    c.before.avgTokens(),
+                    c.before.tools,
+                    c.before.denied,
+                }) catch "",
+            });
+        }
+    }
+    p.add(.{
+        .key = "",
+        .label = "Log file",
+        .kind = .info,
+        .value = std.fmt.allocPrint(view.arena, "~/.omfx/{s}", .{runlog.file_name}) catch "",
+    });
+}
+
+fn fillSessionTab(view: UsageView, p: *panel_mod.Panel) void {
+    p.add(.{ .key = "", .label = "Shell", .kind = .info, .value = std.fmt.allocPrint(view.arena, "omfx {s}", .{cli.version}) catch "" });
+    p.add(.{
+        .key = "",
+        .label = "Session",
+        .kind = .info,
+        .value = if (view.session_title.len > 0) view.session_title else "(unsaved)",
+    });
+    p.add(.{ .key = "", .label = "Working directory", .kind = .info, .value = view.workspace });
+    p.add(.{ .key = "", .label = "Model", .kind = .info, .value = view.model });
+    p.add(.{ .key = "", .label = "Provider", .kind = .info, .value = view.provider });
+    if (view.ctx_window != 0) {
+        p.add(.{
+            .key = "",
+            .label = "Context",
+            .kind = .info,
+            .value = std.fmt.allocPrint(view.arena, "{s} / {s} ({d}%)", .{
+                shortTok(view, view.ctx_used),
+                shortTok(view, view.ctx_window),
+                @as(u64, view.ctx_used) * 100 / view.ctx_window,
+            }) catch "",
+        });
+    }
+}
+
+fn shortTok(view: UsageView, tokens: u32) []const u8 {
+    var buf: [24]u8 = undefined;
+    return view.arena.dupe(u8, tui.shortTokens(&buf, tokens)) catch "-";
+}
+
+fn contextRowAlloc(view: UsageView, tokens: u32, window: u32) []const u8 {
+    const pct = if (window == 0) 0 else @as(u64, tokens) * 100 / window;
+    return std.fmt.allocPrint(view.arena, "{s} ({d}%)", .{ shortTok(view, tokens), pct }) catch "";
+}
+
+fn addContextGrid(view: UsageView, p: *panel_mod.Panel, used: u32, window: u32) void {
+    if (window == 0) return;
+    const filled: usize = @min(@as(usize, used * 100 / window), 100);
+    var buf: [128]u8 = undefined;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < 100) : (i += 1) {
+        if (i > 0 and i % 20 == 0 and n + 1 < buf.len) {
+            buf[n] = '\n';
+            n += 1;
+        }
+        const ch: u8 = if (i < filled) '#' else '.';
+        if (n + 1 < buf.len) {
+            buf[n] = ch;
+            n += 1;
+        }
+    }
+    p.add(.{
+        .key = "",
+        .label = "",
+        .kind = .info,
+        .value = view.arena.dupe(u8, buf[0..n]) catch "",
+    });
+}
+
+fn addCacheRowsFrom(view: UsageView, p: *panel_mod.Panel) void {
+    const read = view.ctx_cache_read;
+    const write = view.ctx_cache_write;
+    const fresh = view.ctx_fresh;
+    const prompt = fresh +| read +| write;
+    if (prompt == 0) return;
+
+    p.add(.{ .key = "", .label = "", .kind = .info });
+    const pct = @as(u64, read) * 100 / prompt;
+    p.add(.{
+        .key = "",
+        .label = "Served from cache",
+        .kind = .info,
+        .value = std.fmt.allocPrint(view.arena, "{s} of the last prompt ({d}%)", .{
+            shortTok(view, read),
+            pct,
+        }) catch "",
+    });
+    p.add(.{
+        .key = "",
+        .label = "Read fresh",
+        .kind = .info,
+        .value = shortTok(view, fresh),
+    });
+    if (write > 0) {
+        p.add(.{
+            .key = "",
+            .label = "Written to cache",
+            .kind = .info,
+            .value = std.fmt.allocPrint(view.arena, "{s}, readable on the next turn", .{
+                shortTok(view, write),
+            }) catch "",
+        });
+    }
+    if (read == 0 and write == 0) {
+        p.add(.{ .key = "", .label = "", .kind = .info, .value = "This provider reported no caching." });
+    }
+}
+
+pub fn contextPanel(sess: *Session) panel_mod.Panel {
+    return usagePanel(sess);
+}
+
+pub fn addCacheRows(sess: *Session, p: *panel_mod.Panel) void {
+    addCacheRowsFrom(.{
+        .arena = sess.arena,
+        .io = sess.io,
+        .home = sess.home,
+        .workspace = sess.workspace,
+        .model = sess.model(),
+        .provider = "",
+        .session_title = "",
+        .ctx_used = sess.ctx_used,
+        .ctx_window = sess.ctx_window,
+        .trace_sys = sess.trace_sys,
+        .trace_tools = sess.trace_tools,
+        .ctx_fresh = sess.ctx_fresh,
+        .ctx_cache_read = sess.ctx_cache_read,
+        .ctx_cache_write = sess.ctx_cache_write,
+    }, p);
+}
+
+pub fn contextRow(sess: *Session, tokens: u32, window: u32) []const u8 {
+    return contextRowAlloc(.{
+        .arena = sess.arena,
+        .io = sess.io,
+        .home = sess.home,
+        .workspace = sess.workspace,
+        .model = "",
+        .provider = "",
+        .session_title = "",
+        .ctx_used = 0,
+        .ctx_window = window,
+        .trace_sys = 0,
+        .trace_tools = 0,
+        .ctx_fresh = 0,
+        .ctx_cache_read = 0,
+        .ctx_cache_write = 0,
+    }, tokens, window);
+}
 
 pub fn statusPanel(sess: *Session) panel_mod.Panel {
     var cfg = settings.load(sess.gpa, sess.io, sess.home);
@@ -281,88 +591,6 @@ pub fn commandMatches(q: []const u8, spec: slash.Spec) bool {
     if (q.len == 0) return true;
     return std.ascii.indexOfIgnoreCase(spec.name, q) != null or
         std.ascii.indexOfIgnoreCase(spec.help, q) != null;
-}
-
-const bytes_per_token: u32 = 4;
-
-pub fn contextPanel(sess: *Session) panel_mod.Panel {
-    var p = panel_mod.Panel{ .title = "Context window" };
-    const window = sess.ctx_window;
-    if (window == 0) {
-        p.add(.{ .key = "", .label = "no window reported yet", .kind = .info });
-        return p;
-    }
-    const used = sess.ctx_used;
-    const sys = sess.trace_sys / bytes_per_token;
-    const tools = sess.trace_tools / bytes_per_token;
-    const fixed = @min(sys + tools, used);
-    const messages = used - fixed;
-
-    p.add(.{
-        .key = "",
-        .label = "Total",
-        .kind = .info,
-        .value = contextRow(sess, used, window),
-    });
-    p.add(.{ .key = "", .label = "Messages", .kind = .info, .value = contextRow(sess, messages, window) });
-    p.add(.{ .key = "", .label = "System prompt", .kind = .info, .value = contextRow(sess, @min(sys, used), window) });
-    p.add(.{ .key = "", .label = "Tool schemas", .kind = .info, .value = contextRow(sess, @min(tools, used -| sys), window) });
-    p.add(.{
-        .key = "",
-        .label = "Free space",
-        .kind = .info,
-        .value = contextRow(sess, window -| used, window),
-    });
-    addCacheRows(sess, &p);
-    return p;
-}
-
-pub fn addCacheRows(sess: *Session, p: *panel_mod.Panel) void {
-    const read = sess.ctx_cache_read;
-    const write = sess.ctx_cache_write;
-    const fresh = sess.ctx_fresh;
-    const prompt = fresh +| read +| write;
-    if (prompt == 0) return;
-
-    p.add(.{ .key = "", .label = "", .kind = .info });
-    const pct = @as(u64, read) * 100 / prompt;
-    var buf: [24]u8 = undefined;
-    p.add(.{
-        .key = "",
-        .label = "Served from cache",
-        .kind = .info,
-        .value = std.fmt.allocPrint(sess.arena, "{s} of the last prompt ({d}%)", .{
-            tui.shortTokens(&buf, read),
-            pct,
-        }) catch "",
-    });
-    var fresh_buf: [24]u8 = undefined;
-    p.add(.{
-        .key = "",
-        .label = "Read fresh",
-        .kind = .info,
-        .value = std.fmt.allocPrint(sess.arena, "{s}", .{tui.shortTokens(&fresh_buf, fresh)}) catch "",
-    });
-    if (write > 0) {
-        var w_buf: [24]u8 = undefined;
-        p.add(.{
-            .key = "",
-            .label = "Written to cache",
-            .kind = .info,
-            .value = std.fmt.allocPrint(sess.arena, "{s}, readable on the next turn", .{
-                tui.shortTokens(&w_buf, write),
-            }) catch "",
-        });
-    }
-    if (read == 0 and write == 0) {
-        p.add(.{ .key = "", .label = "", .kind = .info, .value = "This provider reported no caching." });
-    }
-}
-
-pub fn contextRow(sess: *Session, tokens: u32, window: u32) []const u8 {
-    const pct = if (window == 0) 0 else @as(u64, tokens) * 100 / window;
-    var buf: [24]u8 = undefined;
-    return std.fmt.allocPrint(sess.arena, "{s} ({d}%)", .{ tui.shortTokens(&buf, tokens), pct }) catch "";
 }
 
 pub fn rewindPanel(sess: *Session) panel_mod.Panel {

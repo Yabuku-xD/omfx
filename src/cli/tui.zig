@@ -10,6 +10,9 @@ const activity = @import("activity.zig");
 const modal = @import("modal.zig");
 const diffview = @import("diffview.zig");
 const uxcopy = @import("uxcopy.zig");
+const panel_mod = @import("panel.zig");
+const panels = @import("panels.zig");
+const cmds = @import("cmds.zig");
 
 pub const enter_alt = tty.enter_seq;
 pub const leave_alt = tty.restore_seq;
@@ -355,6 +358,49 @@ pub fn askConfirm(
                 else => {},
             },
             .esc, .interrupt, .quit, .ctrl_d, .eof => return false,
+            else => {},
+        }
+    }
+}
+
+/// Blocking usage overlay while a turn owns stdin (header meter click mid-generate).
+pub fn showUsageOverlay(
+    stdin: *Io.Reader,
+    stdout: *Io.Writer,
+    allocator: std.mem.Allocator,
+    layout: *Layout,
+    view: panels.UsageView,
+    tab: cmds.UsageTab,
+) void {
+    var usage_tab = tab;
+    var panel = panels.usagePanelFrom(view, usage_tab);
+    var sel: usize = 0;
+    beginModal();
+    defer endModal();
+    while (true) {
+        panel.sel = sel;
+        const extra: u16 = if (panel.tabs.len > 0) panel_mod.tab_chrome_rows else 0;
+        const pg = panel_mod.geometry(layout.rows, layout.cols, panel.n, extra);
+        const g = modal.Geometry{ .cols = pg.cols, .rows = pg.rows, .row0 = pg.row0, .col0 = pg.col0 };
+        const frame = panel_mod.render(allocator, &panel, pg) catch return;
+        defer allocator.free(frame);
+        paintModalFrame(stdout, g, frame) catch return;
+
+        switch (nextEvent(stdin)) {
+            .esc, .interrupt, .quit, .ctrl_d, .eof => return,
+            .tab => {
+                usage_tab = cmds.usageTabNext(usage_tab);
+                panel = panels.usagePanelFrom(view, usage_tab);
+                sel = 0;
+            },
+            .up, .history_prev => {
+                if (panel.n == 0) continue;
+                sel = if (sel == 0) panel.n - 1 else sel - 1;
+            },
+            .down, .history_next => {
+                if (panel.n == 0) continue;
+                sel = (sel + 1) % panel.n;
+            },
             else => {},
         }
     }

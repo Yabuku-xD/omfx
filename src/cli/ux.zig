@@ -229,6 +229,7 @@ test "ux: panel commands open the right surface" {
         .{ .line = "/continue", .panel = .sessions },
         .{ .line = "/status", .panel = .status },
         .{ .line = "/context", .panel = .context },
+        .{ .line = "/usage", .panel = .usage },
         .{ .line = "/settings", .panel = .settings },
         .{ .line = "/statusline", .panel = .statusline },
         .{ .line = "/background", .panel = .jobs },
@@ -258,7 +259,6 @@ test "ux: inspect commands answer in scrollback" {
     const lines = [_][]const u8{
         "/version",
         "/stats",
-        "/usage",
         "/permissions",
         "/permissions auto",
         "/sandbox",
@@ -725,7 +725,7 @@ test "e2e ui: permission, confirm, panels, hints, and empty states flow" {
     // Panel empty state + footer hints.
     var empty = panel.Panel{ .title = "Your plan" };
     empty.add(.{ .key = "", .label = "No plan yet", .kind = .info, .help = "Start planning" });
-    const panel_frame = try panel.render(a, &empty, panel.geometry(20, 60, empty.n));
+    const panel_frame = try panel.render(a, &empty, panel.geometry(20, 60, empty.n, 0));
     defer a.free(panel_frame);
     try std.testing.expect(std.mem.indexOf(u8, panel_frame, "No plan yet") != null);
     try std.testing.expect(std.mem.indexOf(u8, panel_frame, "Start planning") != null);

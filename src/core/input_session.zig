@@ -64,7 +64,7 @@ pub const InputSession = struct {
     ctx_row: std.atomic.Value(u32) = .init(0),
     ctx_col0: std.atomic.Value(u32) = .init(0),
     ctx_col1: std.atomic.Value(u32) = .init(0),
-    ctx_peek: std.atomic.Value(bool) = .init(false),
+    ctx_panel_pending: std.atomic.Value(bool) = .init(false),
 
     /// Slash palette selection while typing `/…` mid-turn.
     slash_sel: std.atomic.Value(u32) = .init(0),
@@ -285,7 +285,7 @@ pub const InputSession = struct {
         self.utf8_need = 0;
         self.utf8_start = 0;
         self.key_hold_len = 0;
-        self.ctx_peek.store(false, .release);
+        self.ctx_panel_pending.store(false, .release);
         self.pending_cmd_len.store(0, .release);
         self.slash_tab.store(false, .release);
     }
@@ -316,8 +316,8 @@ pub const InputSession = struct {
         self.ctx_col1.store(col1, .release);
     }
 
-    pub fn contextPeekOn(self: *InputSession) bool {
-        return self.ctx_peek.load(.acquire);
+    pub fn takeContextPanel(self: *InputSession) bool {
+        return self.ctx_panel_pending.swap(false, .acq_rel);
     }
 
     pub fn setSlashPalette(self: *InputSession, sel: usize, count: usize) void {
@@ -341,6 +341,12 @@ pub const InputSession = struct {
         const take = @min(n, out.len);
         @memcpy(out[0..take], self.pending_cmd[0..take]);
         return out[0..take];
+    }
+
+    pub fn setPendingCmd(self: *InputSession, cmd: []const u8) void {
+        self.steerLock();
+        defer self.steerUnlock();
+        self.setPendingCmdLocked(cmd);
     }
 
     fn setPendingCmdLocked(self: *InputSession, cmd: []const u8) void {
@@ -415,10 +421,7 @@ pub const InputSession = struct {
         if (row != @as(u16, @truncate(self.ctx_row.load(.acquire)))) return;
         const c0: u16 = @truncate(self.ctx_col0.load(.acquire));
         const c1: u16 = @truncate(self.ctx_col1.load(.acquire));
-        if (col >= c0 and col <= c1) {
-            const on = self.ctx_peek.load(.acquire);
-            self.ctx_peek.store(!on, .release);
-        }
+        if (col >= c0 and col <= c1) self.ctx_panel_pending.store(true, .release);
     }
 
     /// End of an SGR mouse report (`…M` or `…m`), or null if the CSI is incomplete.
@@ -459,7 +462,7 @@ pub const InputSession = struct {
             return .{ .n = end, .delta = if ((btn & 1) == 0) wheel_step else -wheel_step };
         }
         // Left release on the jump pill re-pins to the live tail; header context
-        // toggles the live peek overlay.
+        // opens the usage overlay.
         if ((btn & 3) == 0 and (btn & 32) == 0 and bytes[end - 1] == 'm') {
             const rest = params[semi + 1 ..];
             if (std.mem.indexOfScalar(u8, rest, ';')) |semi2| {

@@ -220,8 +220,36 @@ fn jsonString(json: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
+fn jsonEscape(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, s.len);
+    for (s) |c| {
+        switch (c) {
+            '"' => try out.appendSlice(allocator, "\\\""),
+            '\\' => try out.appendSlice(allocator, "\\\\"),
+            '\n' => try out.appendSlice(allocator, "\\n"),
+            '\r' => try out.appendSlice(allocator, "\\r"),
+            '\t' => try out.appendSlice(allocator, "\\t"),
+            else => try out.append(allocator, c),
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 pub fn encodeApiKey(allocator: std.mem.Allocator, provider: []const u8, key: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{{\"{s}\":{{\"type\":\"api_key\",\"key\":\"{s}\"}}}}\n", .{ provider, key });
+    const esc_provider = try jsonEscape(allocator, provider);
+    defer allocator.free(esc_provider);
+    const esc_key = try jsonEscape(allocator, key);
+    defer allocator.free(esc_key);
+    return std.fmt.allocPrint(allocator, "{{\"{s}\":{{\"type\":\"api_key\",\"key\":\"{s}\"}}}}\n", .{ esc_provider, esc_key });
+}
+
+/// Single-provider object for `upsertFile` (no outer provider key).
+pub fn encodeApiKeyObject(allocator: std.mem.Allocator, key: []const u8) ![]u8 {
+    const esc_key = try jsonEscape(allocator, key);
+    defer allocator.free(esc_key);
+    return std.fmt.allocPrint(allocator, "{{\"type\":\"api_key\",\"key\":\"{s}\"}}", .{esc_key});
 }
 
 pub fn extractOAuth(json: []const u8, provider: []const u8) ?types.OAuth {
@@ -241,10 +269,16 @@ fn storedOAuth(json: []const u8, spec: catalog.Spec) ?types.OAuth {
 }
 
 pub fn encodeOAuthObject(allocator: std.mem.Allocator, rec: types.OAuth) ![]u8 {
+    const esc_access = try jsonEscape(allocator, rec.access);
+    defer allocator.free(esc_access);
+    const esc_refresh = try jsonEscape(allocator, rec.refresh);
+    defer allocator.free(esc_refresh);
+    const esc_endpoint = try jsonEscape(allocator, rec.token_endpoint);
+    defer allocator.free(esc_endpoint);
     return std.fmt.allocPrint(
         allocator,
         "{{\"type\":\"oauth\",\"access_token\":\"{s}\",\"refresh_token\":\"{s}\",\"token_type\":\"bearer\",\"token_endpoint\":\"{s}\",\"expires_at\":{d}}}",
-        .{ rec.access, rec.refresh, rec.token_endpoint, rec.expires_at },
+        .{ esc_access, esc_refresh, esc_endpoint, rec.expires_at },
     );
 }
 
@@ -613,6 +647,13 @@ test "encode api key json" {
     const s = try encodeApiKey(std.testing.allocator, "anthropic", "sk-ant");
     defer std.testing.allocator.free(s);
     try std.testing.expectEqualStrings("sk-ant", extractKey(s, "anthropic").?);
+}
+
+test "encode api key escapes quotes in the key" {
+    const s = try encodeApiKeyObject(std.testing.allocator, "sk-\"x\\y");
+    defer std.testing.allocator.free(s);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\\\\") != null);
 }
 
 test "upsert adds and replaces provider objects" {

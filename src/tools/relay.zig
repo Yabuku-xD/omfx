@@ -372,6 +372,16 @@ fn serveConn(c: Conn) void {
     }
 
     if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/rpc")) {
+        if (c.hub.token.len > 0) {
+            var want_buf: [80]u8 = undefined;
+            const want = std.fmt.bufPrint(&want_buf, "token={s}", .{c.hub.token}) catch return;
+            if (std.mem.indexOf(u8, query, want) == null) {
+                httpStatus(c.stream, c.io, 401, "Unauthorized", "{\"error\":\"bad token\"}") catch |err| {
+                    log.debug("{s}", .{@errorName(err)});
+                };
+                return;
+            }
+        }
         const clen_s = headerValue(req, "content-length") orelse "0";
         const clen = std.fmt.parseInt(usize, clen_s, 10) catch 0;
         c.hub.mutex.lockUncancelable(c.io);
@@ -615,7 +625,7 @@ test "relay hello then list is live tabs" {
         log.debug("{s}", .{@errorName(err)});
     };
     const web = @import("web.zig");
-    const listed = try web.fetch(std.testing.allocator, io, "http://127.0.0.1:19224/json/list");
+    const listed = try web.fetchLocal(std.testing.allocator, io, "http://127.0.0.1:19224/json/list");
     defer std.testing.allocator.free(listed);
     try std.testing.expect(std.mem.indexOf(u8, listed, "tabId") != null);
     try std.testing.expect(std.mem.indexOf(u8, listed, "example.com") != null);

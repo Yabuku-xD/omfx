@@ -344,6 +344,11 @@ pub fn runTurn(
                 .panel => |kind| {
                     switch (kind) {
                         .help, .shortcuts => openSearchPanel(sess, kind),
+                        .context, .usage => {
+                            sess.usage_tab = if (kind == .context) .context else .limit;
+                            sess.openPanel(panels.build(sess, kind));
+                            sess.panel_kind = .usage;
+                        },
                         else => {
                             sess.openPanel(panels.build(sess, kind));
                             sess.panel_kind = kind;

@@ -15,7 +15,6 @@ const agent = @import("../../core/agent.zig");
 const cli = @import("../../core/cli.zig");
 const commands = @import("../../core/commands.zig");
 const context = @import("../../core/context.zig");
-const runlog = @import("../../core/runlog.zig");
 const ide_mod = @import("../../core/ide.zig");
 const plugins = @import("../../core/plugins.zig");
 const menus = @import("../menus.zig");
@@ -202,7 +201,7 @@ pub fn run(ctx: *Ctx, cmd: slash.Name, rest: []const u8) !Flow {
         .sandbox => try doSandbox(ctx, rest),
         .status => return .{ .panel = .status },
         .stats => try doStats(ctx),
-        .usage => try doUsage(ctx),
+        .usage => return .{ .panel = .usage },
         .context => return .{ .panel = .context },
         .settings => if (rest.len == 0) return .{ .panel = .settings } else try doSettings(ctx, rest),
         .appearance => try doAppearance(ctx, rest),
@@ -574,46 +573,6 @@ fn doStats(ctx: *Ctx) !void {
         "turns={s}\nlines={d}\nlast_tool={s}\nchars={d}\n",
         .{ if (ctx.state.had_turn) "yes" else "no", lines, tool, blob.len },
     ));
-}
-
-fn doUsage(ctx: *Ctx) !void {
-    const path = try session.sessionPath(ctx.arena, ctx.home, session.resolveId("last"));
-    const blob = Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.arena, .limited(1_000_000)) catch "";
-    var user_n: usize = 0;
-    var asst_n: usize = 0;
-    var it = std.mem.splitScalar(u8, blob, '\n');
-    while (it.next()) |l| {
-        if (std.mem.indexOf(u8, l, "\"kind\":\"user\"") != null) user_n += 1;
-        if (std.mem.indexOf(u8, l, "\"kind\":\"assistant\"") != null) asst_n += 1;
-    }
-    // Two windows side by side: one number says work happened, two say whether
-    // it is getting slower, chattier, or more often refused.
-    const c = runlog.compare(ctx.gpa, ctx.io, ctx.home);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(ctx.gpa);
-    try out.print(ctx.gpa, "session\n  chars={d} user_turns={d} assistant_turns={d}\n", .{ blob.len, user_n, asst_n });
-    if (c.now.turns == 0) {
-        try out.appendSlice(ctx.gpa, "\nturns\n  no turns recorded yet\n");
-    } else {
-        try out.print(ctx.gpa, "\nlast {d} turns\n", .{c.now.turns});
-        try out.print(ctx.gpa, "  {d}ms avg  {d} tokens avg  {d} tools  {d} not clean\n", .{
-            c.now.avgMs(),
-            c.now.avgTokens(),
-            c.now.tools,
-            c.now.denied,
-        });
-        if (c.before.turns != 0) {
-            try out.print(ctx.gpa, "previous {d}\n", .{c.before.turns});
-            try out.print(ctx.gpa, "  {d}ms avg  {d} tokens avg  {d} tools  {d} not clean\n", .{
-                c.before.avgMs(),
-                c.before.avgTokens(),
-                c.before.tools,
-                c.before.denied,
-            });
-        }
-        try out.print(ctx.gpa, "\n  ~/.omfx/{s}\n", .{runlog.file_name});
-    }
-    try emit(ctx, try ctx.arena.dupe(u8, out.items));
 }
 
 const settings_usage = "usage: /settings <key>=<value>\n  sound thinking telemetry peer git_auto git_dirty statusline sandbox mode composer editor ide\n  review cdp_port effort bash_timeout keep_sessions max_peer_depth\n";

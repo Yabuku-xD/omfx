@@ -19,7 +19,7 @@ fn getLocal(allocator: std.mem.Allocator, io: Io, url: []const u8) ![]u8 {
     if (!isLocalhost(url)) {
         return allocator.dupe(u8, "cdp: denied (not localhost); not a clean verdict\n");
     }
-    return web.fetch(allocator, io, url) catch {
+    return web.fetchLocal(allocator, io, url) catch {
         return allocator.dupe(u8, "cdp: unavailable; not a clean verdict\n");
     };
 }

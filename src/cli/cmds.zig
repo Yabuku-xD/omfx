@@ -52,6 +52,8 @@ const model_pick = @import("model_pick.zig");
 
 pub const Flow = cmd_ctx.Flow;
 pub const PanelKind = cmd_ctx.PanelKind;
+pub const UsageTab = cmd_ctx.UsageTab;
+pub const usageTabNext = cmd_ctx.usageTabNext;
 pub const max_extra = cmd_ctx.max_extra;
 pub const max_jobs = cmd_ctx.max_jobs;
 pub const max_marks = cmd_ctx.max_marks;

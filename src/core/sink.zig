@@ -173,7 +173,14 @@ pub fn enterModal() void {
 }
 
 pub fn leaveModal() void {
-    _ = modal_depth.fetchSub(1, .release);
+    var cur = modal_depth.load(.acquire);
+    while (cur > 0) {
+        if (modal_depth.cmpxchgWeak(cur, cur - 1, .acq_rel, .acquire)) |again| {
+            cur = again;
+            continue;
+        }
+        return;
+    }
 }
 
 pub fn modalActive() bool {
@@ -240,8 +247,8 @@ pub fn setContextHit(active: bool, row: u16, col0: u16, col1: u16) void {
     input.setContextHit(active, row, col0, col1);
 }
 
-pub fn contextPeekOn() bool {
-    return input.contextPeekOn();
+pub fn takeContextPanel() bool {
+    return input.takeContextPanel();
 }
 
 pub fn setSlashPalette(sel: usize, count: usize) void {
@@ -259,6 +266,10 @@ pub fn takeSlashTab() bool {
 /// Copy a deferred slash command out and clear it.
 pub fn takePendingCmd(out: []u8) []const u8 {
     return input.takePendingCmd(out);
+}
+
+pub fn setPendingCmd(cmd: []const u8) void {
+    input.setPendingCmd(cmd);
 }
 
 /// Complete the highlighted slash into the steer buffer. `name` includes `/`.

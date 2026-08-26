@@ -125,6 +125,8 @@ pub const Session = struct {
     /// Which searchable panel is open, so a keystroke rebuilds the same one.
     /// Non-search panels leave this null.
     panel_kind: ?cmds.PanelKind = null,
+    /// Active tab when the usage overlay is open (/usage, /context, header click).
+    usage_tab: cmds.UsageTab = .context,
 
     pub const Focus = enum { prompt, scrollback };
 
@@ -460,7 +462,8 @@ pub const Session = struct {
         const p = &(self.panel orelse return false);
         p.elapsed_ms = nowMs(self.io) - self.panel_opened_ms;
         p.edit = self.panel_edit.items;
-        const g = panel_mod.geometry(self.layout.rows, self.layout.cols, p.n);
+        const extra: u16 = if (p.tabs.len > 0) panel_mod.tab_chrome_rows else 0;
+        const g = panel_mod.geometry(self.layout.rows, self.layout.cols, p.n, extra);
         const body = panel_mod.render(self.arena, p, g) catch return false;
         self.stdout.writeAll(tui.sync_begin) catch return false;
         // The pane is repainted underneath first. A panel only erases its own
