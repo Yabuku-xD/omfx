@@ -70,7 +70,13 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const lookup = omfx.env.Lookup.fromProcess(env);
-    const home = lookup.get("HOME") orelse "/tmp";
+    // Never fall back to a shared directory such as /tmp: auth.json and
+    // sessions written there are readable by every other user's tools.
+    const home = omfx.env.usableHome(lookup.get("HOME")) orelse passwdHome() orelse die(stderr, parsed.json, omfx.cli.exit_config, .{
+        .code = "NO_HOME",
+        .message = "HOME is unset, empty, or not an absolute path, and the account has no home directory",
+        .fix = "export HOME=/absolute/path",
+    });
     var prefs = omfx.settings.load(gpa, io, home);
     defer prefs.deinit(gpa);
     // A persisted mode is a convenience for the interactive session that set
@@ -178,20 +184,45 @@ pub fn main(init: std.process.Init) !void {
             };
             applyEffort(&endpoint, parsed.effort);
             var prompt_text = try omfx.run.joinPrompt(arena, parsed.rest);
-            if (prompt_text.len == 0) {
+            // File text is data (a diff, a log, a spec): it is sent verbatim and
+            // never scanned for `/skill` names or `@path` mentions, which only
+            // the words typed on the command line may trigger.
+            var file_text: []u8 = &.{};
+            if (parsed.prompt_file) |pf| {
+                // Long prompts overflow argv limits and need shell quoting;
+                // a file (or a pipe via `-`) carries them verbatim.
+                const limit: Io.Limit = .limited(4 * 1024 * 1024);
+                const body = (if (std.mem.eql(u8, pf, "-"))
+                    readStdinAlloc(io, arena, limit)
+                else
+                    Io.Dir.cwd().readFileAlloc(io, pf, arena, limit)) catch |err| {
+                    const msg = try std.fmt.allocPrint(arena, "cannot read prompt file {s}: {s}", .{ pf, @errorName(err) });
+                    die(stderr, parsed.json, omfx.cli.exit_usage, .{
+                        .code = "PROMPT_FILE",
+                        .message = msg,
+                        .fix = "omfx ask --prompt-file ./prompt.md",
+                    });
+                };
+                file_text = body[0..std.mem.trimEnd(u8, body, "\r\n").len];
+            }
+            if (prompt_text.len == 0 and file_text.len == 0) {
                 die(stderr, parsed.json, omfx.cli.exit_usage, .{
                     .code = "MISSING_PROMPT",
                     .message = "omfx ask needs a prompt",
                     .fix = "omfx ask \"what does src/main.zig do?\"",
                 });
             }
-            const skills_expanded = try omfx.skills.expand(arena, io, home, workspace, prompt_text);
+            const skills_expanded = if (prompt_text.len == 0) null else try omfx.skills.expand(arena, io, home, workspace, prompt_text);
             if (skills_expanded) |expanded| {
                 prompt_text = expanded;
             }
             const skill_roots = try omfx.skills.readAccessRoots(arena, io, home, workspace);
             const path_access = omfx.tools.pathing.Access{ .workspace = workspace, .read_extra = skill_roots };
-            prompt_text = try omfx.mention.expand(arena, Io.Dir.cwd(), io, path_access, prompt_text);
+            if (prompt_text.len != 0) prompt_text = try omfx.mention.expand(arena, Io.Dir.cwd(), io, path_access, prompt_text);
+            if (file_text.len != 0) prompt_text = if (prompt_text.len == 0)
+                file_text
+            else
+                try std.fmt.allocPrint(arena, "{s}\n\n{s}", .{ file_text, prompt_text });
             const stdin_tty = Io.File.stdin().isTty(io) catch false;
             const can_prompt = parsed.prompt_permissions and stdin_tty;
             var cfg = omfx.settings.load(gpa, io, home);
@@ -249,6 +280,21 @@ pub fn main(init: std.process.Init) !void {
             };
             defer gpa.free(reply);
             live.closeThink();
+            if (trace.provider_failed) {
+                // The stream painted nothing, so the failure text exists only
+                // in `reply`. Scripts and CI must see it and a nonzero exit.
+                if (parsed.json) {
+                    omfx.live.emitJson(stdout, "error", reply);
+                    try stdout.flush();
+                } else {
+                    try stdout.flush();
+                    try stderr.writeAll("omfx: ");
+                    try stderr.writeAll(reply);
+                    if (reply.len == 0 or reply[reply.len - 1] != '\n') try stderr.writeAll("\n");
+                    try stderr.flush();
+                }
+                std.process.exit(omfx.cli.exit_fail);
+            }
             if (!parsed.json) {
                 // `.stream` already painted tokens via host.on_text; reprinting
                 // the full reply doubled every ask ("The" + "The" → "TheThe").
@@ -344,6 +390,20 @@ fn wantsJson(args: []const []const u8) bool {
         if (std.mem.eql(u8, a, "--json")) return true;
     }
     return false;
+}
+
+fn readStdinAlloc(io: Io, arena: std.mem.Allocator, limit: Io.Limit) ![]u8 {
+    var buf: [4096]u8 = undefined;
+    var reader = Io.File.stdin().readerStreaming(io, &buf);
+    return reader.interface.allocRemaining(arena, limit);
+}
+
+/// The account's home from the password database, for a `HOME` that is
+/// missing or unusable (cron, `env -i`, some containers).
+fn passwdHome() ?[]const u8 {
+    const pw = std.c.getpwuid(std.c.getuid()) orelse return null;
+    const dir = pw.dir orelse return null;
+    return omfx.env.usableHome(std.mem.span(dir));
 }
 
 fn die(stderr: *Io.Writer, json: bool, status: u8, fail: omfx.cli.Fail) noreturn {

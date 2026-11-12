@@ -3,7 +3,7 @@
 A coding agent CLI built to keep edits honest, memory inspectable, and context
 under control.
 
-**9** providers · **27** built-in tools · **19** search backends · **~3 MB** binary · **Zig 0.16** · **MIT**
+**9** providers · **28** built-in tools · **19** search backends · **~3.5 MB** binary · **Zig 0.16** · **MIT**
 
 ## Install
 
@@ -23,7 +23,7 @@ omfx update --check    # report only
 The installer verifies `SHA256SUMS` before it replaces `~/.local/bin/omfx`. Pin a
 release with `OMFX_VERSION=<tag>`.
 
-**From source** ([Zig 0.16.0+](https://ziglang.org/download/))
+**From source** ([Zig 0.16.0](https://ziglang.org/download/#release-0.16.0) exactly; 0.17 changed the build API and does not build omfx yet)
 
 ```sh
 zig build

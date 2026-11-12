@@ -561,8 +561,13 @@ pub const Live = union(enum) {
         return @ptrCast(@alignCast(c));
     }
 
-    fn onText(ctx: ?*anyopaque, chunk: []const u8) void {
+    fn onText(ctx: ?*anyopaque, raw: []const u8) void {
         const self = asLive(ctx) orelse return;
+        // Model text can carry control sequences too (a prompt injection only
+        // has to ask the model to echo them).
+        const gpa = std.heap.smp_allocator;
+        const chunk = if (self.* == .json) raw else ansi.safeForTerminal(gpa, raw) catch return;
+        defer if (self.* != .json) gpa.free(chunk);
         switch (self.*) {
             .json => |j| emitJson(j.stdout, "text", chunk),
             .stream => |*s| {
@@ -604,8 +609,11 @@ pub const Live = union(enum) {
         }
     }
 
-    fn onThink(ctx: ?*anyopaque, chunk: []const u8) void {
+    fn onThink(ctx: ?*anyopaque, raw: []const u8) void {
         const self = asLive(ctx) orelse return;
+        const gpa = std.heap.smp_allocator;
+        const chunk = if (self.* == .json) raw else ansi.safeForTerminal(gpa, raw) catch return;
+        defer if (self.* != .json) gpa.free(chunk);
         self.flushAsst();
         switch (self.*) {
             .json => |j| emitJson(j.stdout, "think", chunk),
@@ -647,8 +655,20 @@ pub const Live = union(enum) {
         }
     }
 
-    fn onTool(ctx: ?*anyopaque, name: []const u8, detail: []const u8, done: bool, body: []const u8) void {
+    fn onTool(ctx: ?*anyopaque, name: []const u8, detail: []const u8, done: bool, raw_body: []const u8) void {
         const self = asLive(ctx) orelse return;
+        // Every byte below reaches a real terminal except in JSON mode, where
+        // emitJson escapes it. The body and detail are untrusted tool output.
+        const gpa = std.heap.smp_allocator;
+        const body = if (self.* == .json) raw_body else ansi.safeForTerminal(gpa, raw_body) catch return;
+        defer if (self.* != .json) gpa.free(body);
+        const raw_detail = detail;
+        const safe_detail = if (self.* == .json) raw_detail else ansi.safeForTerminal(gpa, raw_detail) catch return;
+        defer if (self.* != .json) gpa.free(safe_detail);
+        self.onToolSafe(name, safe_detail, done, body);
+    }
+
+    fn onToolSafe(self: *Live, name: []const u8, detail: []const u8, done: bool, body: []const u8) void {
         self.flushAsst();
         switch (self.*) {
             .json => |j| {
@@ -719,13 +739,19 @@ pub const Live = union(enum) {
             .stream => return .deny,
             .tui => |*tty_live| tty_live,
         };
-        const preview = askprev.build(t.allocator, name, args) catch "";
-        defer if (preview.len != 0) t.allocator.free(preview);
+        const raw_preview = askprev.build(t.allocator, name, args) catch "";
+        defer if (raw_preview.len != 0) t.allocator.free(raw_preview);
+        // The approval box must show exactly what will run: any escape in a
+        // model-written command, colour included, could hide part of it.
+        const preview = ansi.plainForTerminal(t.allocator, raw_preview) catch return .deny;
+        defer t.allocator.free(preview);
+        const safe_detail = ansi.plainForTerminal(t.allocator, detail) catch return .deny;
+        defer t.allocator.free(safe_detail);
         // The spinner repaints the full TUI every ~80ms; without stopping it the
         // permission box flickers and keystrokes never reach askPerm.
         stopSpinTty(t);
         defer if (!t.cancel.load(.acquire)) startSpinTty(t);
-        return switch (tui.askPerm(t.stdin, t.stdout, t.allocator, t.layout, name, detail, preview)) {
+        return switch (tui.askPerm(t.stdin, t.stdout, t.allocator, t.layout, name, safe_detail, preview)) {
             .allow => .allow,
             .always => .always,
             .deny => .deny,

@@ -58,6 +58,23 @@ pub fn emptyLookup() Lookup {
     return .{ .ctx = &empty_ctx, .getFn = emptyGet };
 }
 
+/// `HOME` as omfx may use it: set, non-empty, and absolute. A relative or
+/// empty value would put credentials and sessions under whatever directory
+/// the process happens to start in.
+pub fn usableHome(raw: ?[]const u8) ?[]const u8 {
+    const v = raw orelse return null;
+    if (v.len == 0 or v[0] != '/') return null;
+    return v;
+}
+
+test "usableHome rejects empty and relative values" {
+    try std.testing.expectEqualStrings("/home/u", usableHome("/home/u").?);
+    try std.testing.expect(usableHome(null) == null);
+    try std.testing.expect(usableHome("") == null);
+    try std.testing.expect(usableHome("home/u") == null);
+    try std.testing.expect(usableHome("~") == null);
+}
+
 /// FORCE_COLOR overrides NO_COLOR. Empty / 0 disables. 1, 2, 3, true enable.
 pub fn colorOn(lookup: Lookup) bool {
     if (lookup.get("FORCE_COLOR")) |v| {

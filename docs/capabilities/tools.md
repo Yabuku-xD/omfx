@@ -4,7 +4,7 @@ Built-in tools the agent can call. Exact availability depends on permission mode
 
 ## Capabilities
 
-- Read, edit, patch, and search the workspace (`read`, `write`, `edit`, `patch`, `glob`, `grep`, `list`, …). `write` and `copy` create missing parent directories.
+- Read, edit, patch, and search the workspace (`read`, `write`, `edit`, `patch`, `glob`, `grep`, `list`, …). `write` and `copy` create missing parent directories. Paths are checked after symlinks resolve: a link that leads outside the workspace, to a secret such as `.env` or `~/.ssh`, or nowhere (dangling) is refused, and `grep`/`glob` skip links to anything but a regular file inside the workspace. Tool output shown in the terminal keeps colour but prints other control sequences as text (`^[`).
 - Hybrid `semantic_search` — repo reference rank, symbol names, and tokens fused with reciprocal rank fusion (no embeddings, no on-disk index)
 - Shell commands (`bash`, `job`) with optional OS sandbox
 - `read_result` — re-read a recall cite (`rN` / `3`) or a background job log (`job:N`); secret-shaped bodies stay redacted

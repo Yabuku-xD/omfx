@@ -55,7 +55,12 @@ pub const killed_status: u8 = 137;
 ///
 /// The argv arrives positionally, so no command text is interpolated into
 /// script source and there is nothing to quote or escape.
+///
+/// `AI_AGENT=omfx` is exported here because every command the agent runs
+/// (shell, sandboxed shell, verify, MCP servers) passes through this script,
+/// so build tools and test runners can tell an agent is driving.
 const script =
+    \\export AI_AGENT=omfx
     \\set -m
     \\__omfx_secs=$1; shift
     \\"$@" & __omfx_pid=$!
@@ -170,6 +175,11 @@ fn runCapped(argv: []const []const u8, secs: []const u8, pipe: bool) !std.proces
 test "a fast command keeps its own exit code" {
     const term = try runCapped(&.{ "/bin/sh", "-c", "echo hi; exit 7" }, "5", false);
     try std.testing.expectEqual(@as(u8, 7), term.exited);
+}
+
+test "a capped command sees AI_AGENT=omfx" {
+    const term = try runCapped(&.{ "/bin/sh", "-c", "test \"$AI_AGENT\" = omfx" }, "5", false);
+    try std.testing.expectEqual(@as(u8, 0), term.exited);
 }
 
 test "a slow command is killed at the deadline" {

@@ -206,6 +206,7 @@ fn chatTurn(
             last.deinit(allocator);
             return allocator.dupe(u8, interrupted_text);
         }
+        if (trace) |t| t.provider_failed = last.status < 200 or last.status >= 300;
         if (try turn_loop.finishIfText(allocator, &last, tool_rounds, ensureNl)) |text| return text;
         const extracted = turn_loop.extractToolCall(&last);
         const call = extracted.call;

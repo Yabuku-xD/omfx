@@ -19,7 +19,7 @@ pub fn read(
     access: pathing.Access,
     rel: []const u8,
 ) ![]u8 {
-    try pathing.assertReadable(access, rel);
+    try pathing.assertResolved(dir, io, access, rel, .read);
     // Absolute skill paths live outside the workspace Dir; open via cwd.
     const open_dir = if (std.fs.path.isAbsolute(rel)) Io.Dir.cwd() else dir;
     // A FIFO, a socket, or a character device has no end: reading one parks the
@@ -97,7 +97,7 @@ pub fn write(
     contents: []const u8,
 ) !void {
     _ = allocator;
-    try pathing.assertInside(access, rel);
+    try pathing.assertResolved(dir, io, access, rel, .write);
     if (std.fs.path.dirname(rel)) |parent| {
         if (parent.len > 0) try dir.createDirPath(io, parent);
     }
@@ -144,6 +144,27 @@ test "read write edit in temp workspace" {
     try std.testing.expectEqualStrings("hello world", got2);
 }
 
+test "read, write, and edit refuse a symlink that leaves the workspace" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var outside = std.testing.tmpDir(.{});
+    defer outside.cleanup();
+    var ws = std.testing.tmpDir(.{});
+    defer ws.cleanup();
+    const access: pathing.Access = .{ .workspace = "ws" };
+    try write(outside.dir, io, a, access, "id_key", "SECRET");
+    const target = try outside.dir.realPathFileAlloc(io, "id_key", a);
+    defer a.free(target);
+    try ws.dir.symLink(io, target, "notes.txt", .{});
+
+    try std.testing.expectError(error.SymlinkEscape, read(ws.dir, io, a, access, "notes.txt"));
+    try std.testing.expectError(error.SymlinkEscape, write(ws.dir, io, a, access, "notes.txt", "owned"));
+    try std.testing.expectError(error.SymlinkEscape, edit(ws.dir, io, a, access, "notes.txt", "SECRET", "x"));
+    const still = try read(outside.dir, io, a, access, "id_key");
+    defer a.free(still);
+    try std.testing.expectEqualStrings("SECRET", still);
+}
+
 test "edit non-unique old_string fails" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -164,7 +185,7 @@ pub fn list(
     rel: []const u8,
 ) ![]u8 {
     const path = if (rel.len == 0 or std.mem.eql(u8, rel, ".") or std.mem.eql(u8, rel, "./")) "." else rel;
-    if (!std.mem.eql(u8, path, ".")) try pathing.assertReadable(access, path);
+    if (!std.mem.eql(u8, path, ".")) try pathing.assertResolved(dir, io, access, path, .read);
     const open_dir = if (std.fs.path.isAbsolute(path)) Io.Dir.cwd() else dir;
     var child = open_dir.openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
         // Models often `list` a file; NotDir alone reads as a crash, not a hint.
@@ -202,8 +223,9 @@ pub fn copy(
     from: []const u8,
     to: []const u8,
 ) !void {
+    try pathing.assertResolved(dir, io, access, from, .read);
     try pathing.assertInside(access, from);
-    try pathing.assertInside(access, to);
+    try pathing.assertResolved(dir, io, access, to, .write);
     if (std.fs.path.dirname(to)) |parent| {
         if (parent.len > 0) try dir.createDirPath(io, parent);
     }
@@ -216,7 +238,7 @@ pub fn mkdir(
     access: pathing.Access,
     rel: []const u8,
 ) !void {
-    try pathing.assertInside(access, rel);
+    try pathing.assertResolved(dir, io, access, rel, .write);
     try dir.createDirPath(io, rel);
 }
 

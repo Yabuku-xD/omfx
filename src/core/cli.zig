@@ -25,7 +25,7 @@ pub const Spec = struct {
 };
 
 pub const commands = [_]Spec{
-    .{ .name = "ask", .tag = .ask, .summary = "One-shot request (no alt screen)", .usage = "Examples:\n  omfx ask \"what does src/main.zig do?\"\n  omfx ask --json --provider groq \"summarize this repo\"\n\nUsage:\n  omfx ask [--provider <id>] [--model <name>] [--auto|--yolo] [--prompt-permissions] [--effort <none|low|medium|high>] [--resume last|<id>] [--json] <prompt>" },
+    .{ .name = "ask", .tag = .ask, .summary = "One-shot request (no alt screen)", .usage = "Examples:\n  omfx ask \"what does src/main.zig do?\"\n  omfx ask --json --provider groq \"summarize this repo\"\n\nUsage:\n  omfx ask [--provider <id>] [--model <name>] [--auto|--yolo] [--prompt-permissions] [--effort <none|low|medium|high>] [--resume last|<id>] [--json] [--prompt-file <path|->] <prompt>" },
     .{ .name = "login", .tag = .login, .summary = "Prefer /login inside a session", .usage = "Prefer `/login` inside an interactive session.\n\nAlso: omfx login [provider]\n  omfx login                 List providers\n  omfx login xai-oauth       SuperGrok / X Premium+ (device code)\n  omfx login anthropic       Claude Pro/Max (browser PKCE)\n  omfx login openai-codex    ChatGPT Plus/Pro\n  omfx login github-copilot  GitHub Copilot (device code)\n  omfx login groq            Paste an API key" },
     .{ .name = "session", .tag = .session, .summary = "Prefer /session inside a session", .usage = "Prefer `/session` or `/resume` inside an interactive session.\n\nAlso:\n  omfx session\n  omfx session resume last\n  omfx session <id>" },
     .{ .name = "browser-relay", .tag = .browser_relay, .summary = "Prefer /browser inside a session", .usage = "Prefer `/browser` inside an interactive session.\n\nAlso: omfx browser-relay [install]\n  omfx browser-relay          Listen on 127.0.0.1:9224 (Chrome extension dials /ext)\n  omfx browser-relay install  Write ~/.omfx/browser-relay/extension for Load unpacked" },
@@ -57,6 +57,8 @@ pub const Parsed = struct {
     json: bool = false,
     check: bool = false,
     force: bool = false,
+    /// `omfx ask` reads its prompt from this file; `-` reads stdin.
+    prompt_file: ?[]const u8 = null,
 };
 
 const Flag = enum {
@@ -76,6 +78,8 @@ const Flag = enum {
     json,
     check,
     force,
+    prompt_file,
+    prompt_file_eq,
     end_opts,
     positional,
     unknown,
@@ -99,6 +103,8 @@ fn classify(a: []const u8) Flag {
     if (std.mem.eql(u8, a, "--json")) return .json;
     if (std.mem.eql(u8, a, "--check")) return .check;
     if (std.mem.eql(u8, a, "--force")) return .force;
+    if (std.mem.eql(u8, a, "--prompt-file")) return .prompt_file;
+    if (std.mem.startsWith(u8, a, "--prompt-file=")) return .prompt_file_eq;
     if (a.len > 0 and a[0] == '-') return .unknown;
     return .positional;
 }
@@ -159,6 +165,8 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) ParseEr
             .json => parsed.json = true,
             .check => parsed.check = true,
             .force => parsed.force = true,
+            .prompt_file => parsed.prompt_file = try takeValue(args, &i),
+            .prompt_file_eq => parsed.prompt_file = args[i]["--prompt-file=".len..],
             .positional => try positionals.append(allocator, args[i]),
             .unknown => return error.UnknownFlag,
         }
@@ -221,12 +229,14 @@ pub const help_text =
     \\      --yolo                Allow writes without a TTY prompt
     \\      --prompt-permissions  Y/N on stderr for `omfx ask` when stdin is a TTY
     \\      --json                omfx ask emits JSONL events
+    \\      --prompt-file <path>  omfx ask reads the prompt from a file (- for stdin)
     \\      --resume [last|id]    Continue a saved session
     \\      --check               With update: report only, do not install
     \\      --force               With update: reinstall even if current
     \\
     \\Exit:
     \\  0   ok
+    \\  1   the provider failed (unreachable, or an error after retries)
     \\  2   bad usage (unknown command, flag, or missing prompt)
     \\  78  no provider configured
     \\
@@ -455,6 +465,23 @@ test "session usage does not say ffx" {
     const usage = commandHelp(.session);
     try std.testing.expect(std.mem.indexOf(u8, usage, "ffx") == null);
     try std.testing.expect(std.mem.indexOf(u8, usage, "omfx session") != null);
+}
+
+test "prompt-file takes a path, an = form, or - for stdin" {
+    const a = [_][]const u8{ "omfx", "ask", "--prompt-file", "task.md", "--json" };
+    const p = try parseArgs(std.testing.allocator, &a);
+    defer std.testing.allocator.free(p.rest);
+    try std.testing.expectEqualStrings("task.md", p.prompt_file.?);
+    try std.testing.expect(p.json);
+    try std.testing.expectEqual(@as(usize, 0), p.rest.len);
+
+    const b = [_][]const u8{ "omfx", "ask", "--prompt-file=-" };
+    const q = try parseArgs(std.testing.allocator, &b);
+    defer std.testing.allocator.free(q.rest);
+    try std.testing.expectEqualStrings("-", q.prompt_file.?);
+
+    const c = [_][]const u8{ "omfx", "ask", "--prompt-file" };
+    try std.testing.expectError(error.MissingValue, parseArgs(std.testing.allocator, &c));
 }
 
 test "auto prompt-permissions effort and resume flags" {

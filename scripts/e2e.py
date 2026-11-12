@@ -191,6 +191,134 @@ def case_mock_interrupt(r: Runner) -> tuple[bool, str]:
             server.kill()
 
 
+def case_mock_retry(r: Runner) -> tuple[bool, str]:
+    port = free_port()
+    d = r.case_dir("mock-retry")
+    server = start_mock_server(str(SCRIPT_DIR), port)
+    try:
+        with isolated_home_ctx() as home:
+            env = {**os.environ, **mock_provider_env(port, home=home)}
+            p = subprocess.run(
+                [r.binary, "ask", "say flaky-retry"],
+                cwd=d,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=env,
+            )
+            out = (p.stdout or "") + (p.stderr or "")
+            if "RETRY_OK after 3" not in out:
+                return False, f"no reply after two 503s (rc={p.returncode}): {out[-400:]}"
+            return True, "two 503s retried, third attempt answered"
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=3)
+        except Exception:
+            server.kill()
+
+
+def case_unicode_reply(r: Runner) -> tuple[bool, str]:
+    port = free_port()
+    d = r.case_dir("unicode-reply")
+    server = start_mock_server(str(SCRIPT_DIR), port)
+    try:
+        with isolated_home_ctx() as home:
+            env = {**os.environ, **mock_provider_env(port, home=home)}
+            p = subprocess.run(
+                [r.binary, "ask", "unicode-probe"],
+                cwd=d, stdin=subprocess.DEVNULL, capture_output=True, timeout=60, env=env,
+            )
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=3)
+        except Exception:
+            server.kill()
+    out = p.stdout.decode("utf-8", "replace")
+    want = "café Привет \U0001F600"
+    if want not in out:
+        return False, f"\\u escapes not decoded: {out[-120:]!r}"
+    return True, "\\uXXXX and surrogate pairs decode to UTF-8"
+
+
+def case_provider_down(r: Runner) -> tuple[bool, str]:
+    import resource
+
+    d = r.case_dir("provider-down")
+    with isolated_home_ctx() as home:
+        # Port 9 (discard) refuses connections: every attempt fails, so the ask
+        # spends its whole backoff (about 7 s) waiting with stdin at EOF.
+        env = {**os.environ, **mock_provider_env(9, home=home)}
+        before = resource.getrusage(resource.RUSAGE_CHILDREN)
+        p = subprocess.run(
+            [r.binary, "ask", "hi"],
+            cwd=d,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+        after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu = (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
+    if p.returncode != 1:
+        return False, f"want exit 1 on provider failure, got {p.returncode}: {p.stderr[-300:]}"
+    if "omfx: transport error" not in p.stderr:
+        return False, f"failure not reported on stderr: {p.stderr[-300:]!r}"
+    if cpu > 1.5:
+        return False, f"waiting burned {cpu:.1f}s of CPU (stdin EOF spin?)"
+    return True, f"exit 1, error on stderr, cpu {cpu:.2f}s while waiting"
+
+
+def case_tool_escapes(r: Runner) -> tuple[bool, str]:
+    import pty
+    import select
+    import time
+
+    port = free_port()
+    d = r.case_dir("tool-escapes")
+    server = start_mock_server(str(SCRIPT_DIR), port)
+    try:
+        with isolated_home_ctx() as home:
+            env = {**os.environ, **mock_provider_env(port, home=home), "TERM": "xterm-256color"}
+            env.pop("NO_COLOR", None)
+            master, slave = pty.openpty()
+            p = subprocess.Popen(
+                [r.binary, "ask", "--yolo", "esc-probe"],
+                stdin=subprocess.DEVNULL, stdout=slave, stderr=slave, env=env, cwd=d,
+            )
+            os.close(slave)
+            buf = b""
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                ready, _, _ = select.select([master], [], [], 0.5)
+                if ready:
+                    try:
+                        chunk = os.read(master, 65536)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    buf += chunk
+                elif p.poll() is not None:
+                    break
+            p.wait(timeout=10)
+            os.close(master)
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=3)
+        except Exception:
+            server.kill()
+    if b"ESC_DONE" not in buf:
+        return False, "turn did not finish"
+    for seq in (b"\x1b]0;PWNED", b"\x1b[2J"):
+        if seq in buf:
+            return False, f"tool output wrote {seq!r} to the terminal"
+    return True, "OSC title and clear-screen from a command shown as text"
+
+
 def case_mock_steer(r: Runner) -> tuple[bool, str]:
     port = free_port()
     d = r.case_dir("mock-steer")
@@ -418,6 +546,10 @@ CASES: list[Case] = [
     Case("interrupt-harness", "offline", case_interrupt_harness_unit),
     Case("mock-interrupt", "offline", case_mock_interrupt),
     Case("mock-steer", "offline", case_mock_steer),
+    Case("mock-retry", "offline", case_mock_retry),
+    Case("provider-down", "offline", case_provider_down),
+    Case("tool-escapes", "offline", case_tool_escapes),
+    Case("unicode-reply", "offline", case_unicode_reply),
     Case("write", "live", case_write),
     Case("edit", "live", case_edit),
     Case("search", "live", case_search),

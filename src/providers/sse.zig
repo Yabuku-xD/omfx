@@ -283,12 +283,17 @@ pub fn extract(protocol: types.Protocol, body: []const u8) Extract {
     return out;
 }
 
-/// Unescape a JSON string body (`\"` `\\` `\n`). Allocator owns the result.
+/// Unescape a JSON string body. Allocator owns the result.
 /// Decodes into a caller buffer, or null when it does not fit.
 ///
 /// Security checks run before any allocator is in scope and must see the same
 /// bytes the shell will. Null is a refusal, not an empty result: a caller that
 /// cannot decode has to fail closed rather than judge the escaped form.
+///
+/// `\uXXXX` decodes to UTF-8 (surrogate pairs joined, a lone surrogate becomes
+/// U+FFFD). Providers and gateways that escape non-ASCII text would otherwise
+/// arrive as `u00e9` instead of `é`. Decoding never grows the text, so a
+/// buffer as long as the input always fits.
 pub fn unescapeInto(buf: []u8, s: []const u8) ?[]const u8 {
     var n: usize = 0;
     var i: usize = 0;
@@ -296,18 +301,47 @@ pub fn unescapeInto(buf: []u8, s: []const u8) ?[]const u8 {
         if (n == buf.len) return null;
         if (s[i] == '\\' and i + 1 < s.len) {
             i += 1;
-            buf[n] = switch (s[i]) {
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                else => s[i],
-            };
+            switch (s[i]) {
+                'n' => buf[n] = '\n',
+                'r' => buf[n] = '\r',
+                't' => buf[n] = '\t',
+                'b' => buf[n] = 0x08,
+                'f' => buf[n] = 0x0c,
+                'u' => if (hex4(s, i + 1)) |first| {
+                    var cp: u21 = first;
+                    var used: usize = 4;
+                    if (first >= 0xd800 and first <= 0xdbff) {
+                        const low = if (i + 6 < s.len and s[i + 5] == '\\' and s[i + 6] == 'u') hex4(s, i + 7) else null;
+                        if (low) |lo| {
+                            if (lo >= 0xdc00 and lo <= 0xdfff) {
+                                cp = 0x10000 + ((@as(u21, first) - 0xd800) << 10) + (lo - 0xdc00);
+                                used = 10;
+                            } else cp = 0xfffd;
+                        } else cp = 0xfffd;
+                    } else if (first >= 0xdc00 and first <= 0xdfff) cp = 0xfffd;
+                    var enc: [4]u8 = undefined;
+                    const len = std.unicode.utf8Encode(cp, &enc) catch unreachable;
+                    if (n + len > buf.len) return null;
+                    @memcpy(buf[n..][0..len], enc[0..len]);
+                    n += len;
+                    i += used;
+                    continue;
+                } else {
+                    buf[n] = 'u';
+                },
+                else => buf[n] = s[i],
+            }
         } else {
             buf[n] = s[i];
         }
         n += 1;
     }
     return buf[0..n];
+}
+
+fn hex4(s: []const u8, at: usize) ?u16 {
+    if (at + 4 > s.len) return null;
+    return std.fmt.parseInt(u16, s[at..][0..4], 16) catch null;
 }
 
 /// Tool arguments arrive as JSON string values. Decode the field once so a
@@ -325,26 +359,31 @@ pub fn argStringInto(buf: []u8, json: []const u8, key: []const u8) ?[]const u8 {
 }
 
 pub fn unescapeAlloc(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    try out.ensureTotalCapacity(allocator, s.len);
-    var i: usize = 0;
-    while (i < s.len) : (i += 1) {
-        if (s[i] == '\\' and i + 1 < s.len) {
-            i += 1;
-            switch (s[i]) {
-                '"' => try out.append(allocator, '"'),
-                '\\' => try out.append(allocator, '\\'),
-                'n' => try out.append(allocator, '\n'),
-                'r' => try out.append(allocator, '\r'),
-                't' => try out.append(allocator, '\t'),
-                else => try out.append(allocator, s[i]),
-            }
-        } else {
-            try out.append(allocator, s[i]);
-        }
+    const buf = try allocator.alloc(u8, s.len);
+    errdefer allocator.free(buf);
+    const got = unescapeInto(buf, s) orelse unreachable;
+    return allocator.realloc(buf, got.len);
+}
+
+test "unicode escapes decode to UTF-8, pairs join, lone surrogates do not leak" {
+    const a = std.testing.allocator;
+    const cases = [_][2][]const u8{
+        .{ "caf\\u00e9", "café" },
+        .{ "\\u041f\\u0440\\u0438\\u0432\\u0435\\u0442", "Привет" },
+        .{ "\\ud83d\\ude00!", "😀!" },
+        .{ "x\\ud83dy", "x\u{fffd}y" },
+        .{ "\\u001b[2J", "\x1b[2J" },
+        .{ "\\uZZZZ", "uZZZZ" },
+        .{ "tail\\u00", "tailu00" },
+        .{ "\\/\\b\\f", "/\x08\x0c" },
+    };
+    for (cases) |c| {
+        const got = try unescapeAlloc(a, c[0]);
+        defer a.free(got);
+        try std.testing.expectEqualStrings(c[1], got);
+        var buf: [64]u8 = undefined;
+        try std.testing.expectEqualStrings(c[1], unescapeInto(&buf, c[0]).?);
     }
-    return out.toOwnedSlice(allocator);
 }
 
 /// Naive JSON string field extractor. Sufficient for fixture deltas; not a full parser.

@@ -76,6 +76,13 @@ pub const Walk = struct {
         return false;
     }
 
+    fn linkOk(self: *Walk, rel: []const u8) bool {
+        const st = self.base.statFile(self.io, rel, .{}) catch return false;
+        if (st.kind != .file) return false;
+        pathing.assertResolved(self.base, self.io, .{ .workspace = "" }, rel, .read) catch return false;
+        return true;
+    }
+
     fn join(self: *Walk, name: []const u8) ![]u8 {
         if (self.prefix.len == 0) return self.allocator.dupe(u8, name);
         return std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.prefix, name });
@@ -116,6 +123,13 @@ pub const Walk = struct {
                     const rel = try self.join(entry.name);
                     errdefer self.allocator.free(rel);
                     if (self.ignore.ignored(rel, false)) {
+                        self.allocator.free(rel);
+                        continue;
+                    }
+                    // A link may name a FIFO (grep would block on it forever)
+                    // or a file outside the workspace; only a regular file the
+                    // workspace really contains is walked.
+                    if (entry.kind == .sym_link and !self.linkOk(rel)) {
                         self.allocator.free(rel);
                         continue;
                     }
@@ -385,6 +399,50 @@ test "grep finds needle" {
     defer std.testing.allocator.free(got);
     try std.testing.expect(std.mem.indexOf(u8, got, "a.txt") != null);
     try std.testing.expect(std.mem.indexOf(u8, got, "b.txt") == null);
+}
+
+test "grep skips links to fifos and to files outside the workspace" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var outside = std.testing.tmpDir(.{});
+    defer outside.cleanup();
+    var ws = std.testing.tmpDir(.{});
+    defer ws.cleanup();
+    {
+        var f = try outside.dir.createFile(io, "private.txt", .{});
+        defer f.close(io);
+        var buf: [64]u8 = undefined;
+        var w = f.writer(io, &buf);
+        try w.interface.writeAll("needle outside\n");
+        try w.interface.flush();
+    }
+    const out_root = try outside.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(out_root);
+    const fifo = try std.fs.path.joinZ(a, &.{ out_root, "pipe" });
+    defer a.free(fifo);
+    const mkfifo = @extern(*const fn ([*:0]const u8, std.c.mode_t) callconv(.c) c_int, .{ .name = "mkfifo" });
+    try std.testing.expectEqual(@as(c_int, 0), mkfifo(fifo, 0o600));
+    const private = try std.fs.path.join(a, &.{ out_root, "private.txt" });
+    defer a.free(private);
+    try ws.dir.symLink(io, fifo, "pipe.txt", .{});
+    try ws.dir.symLink(io, private, "notes.txt", .{});
+    {
+        var f = try ws.dir.createFile(io, "inside.txt", .{});
+        defer f.close(io);
+        var buf: [64]u8 = undefined;
+        var w = f.writer(io, &buf);
+        try w.interface.writeAll("needle inside\n");
+        try w.interface.flush();
+    }
+    try ws.dir.symLink(io, "inside.txt", "alias.txt", .{});
+
+    // Before the fix this blocked forever opening pipe.txt.
+    const got = try grep(ws.dir, io, a, .{ .workspace = "ws" }, "needle", "*", "");
+    defer a.free(got);
+    try std.testing.expect(std.mem.indexOf(u8, got, "inside.txt:1: needle inside") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "alias.txt:1:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "outside") == null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "pipe.txt") == null);
 }
 
 test "grep reports path, line number, and the matching text" {

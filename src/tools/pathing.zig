@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 
 pub const Access = struct {
     workspace: []const u8,
@@ -42,6 +43,73 @@ pub const Access = struct {
 
 pub fn assertInside(access: Access, requested: []const u8) error{PathEscape}!void {
     return access.allows(requested);
+}
+
+pub const Need = enum { read, write };
+
+/// The lexical checks above see `notes.txt`; the kernel follows the symlink
+/// it names to `~/.ssh/id_ed25519`. This resolves what the path actually
+/// reaches and holds it to the same roots and secret rules. A path that does
+/// not exist yet (a new file) is judged by its deepest existing ancestor, and
+/// a dangling symlink is refused outright: creating through it would write
+/// wherever it points.
+///
+/// One exception keeps skills working: a read under a skill root that lives
+/// outside the workspace (`~/.claude/skills`, `~/.codex/skills`, ...) may follow
+/// links anywhere except to a secret. Those roots belong to the user, who
+/// commonly links them into `~/.agents`. A link inside the workspace -- one a
+/// cloned repository could have planted -- gets no such trust.
+pub fn assertResolved(dir: Io.Dir, io: Io, access: Access, requested: []const u8, need: Need) error{ PathEscape, SymlinkEscape }!void {
+    if (need == .read) try access.allowsRead(requested) else try access.allows(requested);
+    const open_dir = if (std.fs.path.isAbsolute(requested)) Io.Dir.cwd() else dir;
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var probe: []const u8 = requested;
+    const real = while (true) {
+        const sub = if (probe.len == 0) "." else probe;
+        if (open_dir.realPathFile(io, sub, &buf)) |n| break buf[0..n] else |err| switch (err) {
+            error.FileNotFound => {
+                var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+                if (open_dir.readLink(io, sub, &link_buf)) |_| return error.SymlinkEscape else |_| {}
+                if (probe.len == 0) return;
+                probe = std.fs.path.dirname(probe) orelse "";
+            },
+            // Anything else (permissions, name too long) fails the real open
+            // that follows with a clearer error than an escape would give.
+            else => return,
+        }
+    };
+
+    if (isSecret(real) and !isSecret(requested)) return error.SymlinkEscape;
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (dir.realPath(io, &root_buf)) |n| {
+        if (isPrefix(root_buf[0..n], real)) return;
+    } else |_| {}
+    if (std.fs.path.isAbsolute(access.workspace) and resolvedUnder(io, access.workspace, real)) return;
+    for (access.extra) |root| {
+        if (resolvedUnder(io, root, real)) return;
+    }
+    if (need == .read) for (access.read_extra) |root| {
+        if (resolvedUnder(io, root, real)) return;
+        const user_root = std.fs.path.isAbsolute(root) and
+            !(std.fs.path.isAbsolute(access.workspace) and isPrefix(access.workspace, root));
+        if (user_root and isPrefix(root, requested)) return;
+    };
+    return error.SymlinkEscape;
+}
+
+/// What the model is told when a link is refused, so it picks a real path
+/// instead of retrying the same one.
+pub const symlink_escape_hint =
+    "tool error: SymlinkEscape. That path is a symlink (or sits under one) that leads outside the workspace, " ++
+    "to a secret, or nowhere. omfx does not follow it. Use the real path inside the workspace, or ask the user to add the target with /workspace add.";
+
+fn resolvedUnder(io: Io, root: []const u8, real: []const u8) bool {
+    if (!std.fs.path.isAbsolute(root)) return false;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = Io.Dir.realPathFileAbsolute(io, root, &buf) catch return isPrefix(root, real);
+    return isPrefix(buf[0..n], real);
 }
 
 pub fn assertReadable(access: Access, requested: []const u8) error{PathEscape}!void {
@@ -151,6 +219,79 @@ test "env files are secret except examples" {
     try std.testing.expect(isSecret("/home/u/.omfx/auth.json"));
     try std.testing.expect(isSecret("/home/u/.ssh/id_ed25519"));
     try std.testing.expect(!isSecret("src/auth.json"));
+}
+
+test "a symlink out of the workspace is refused even though its name is inside" {
+    const io = std.testing.io;
+    var outside = std.testing.tmpDir(.{});
+    defer outside.cleanup();
+    var ws = std.testing.tmpDir(.{});
+    defer ws.cleanup();
+    {
+        var f = try outside.dir.createFile(io, "private.txt", .{});
+        f.close(io);
+    }
+    const target = try outside.dir.realPathFileAlloc(io, "private.txt", std.testing.allocator);
+    defer std.testing.allocator.free(target);
+    try ws.dir.symLink(io, target, "notes.txt", .{});
+    try ws.dir.symLink(io, "/nonexistent/omfx-dangling", "dangling.txt", .{});
+    {
+        var f = try ws.dir.createFile(io, "real.txt", .{});
+        f.close(io);
+    }
+    try ws.dir.symLink(io, "real.txt", "alias.txt", .{});
+    try ws.dir.symLink(io, ".env", "harmless.txt", .{});
+    {
+        var f = try ws.dir.createFile(io, ".env", .{});
+        f.close(io);
+    }
+
+    const access: Access = .{ .workspace = "ws" };
+    try std.testing.expectError(error.SymlinkEscape, assertResolved(ws.dir, io, access, "notes.txt", .read));
+    try std.testing.expectError(error.SymlinkEscape, assertResolved(ws.dir, io, access, "notes.txt", .write));
+    try std.testing.expectError(error.SymlinkEscape, assertResolved(ws.dir, io, access, "dangling.txt", .write));
+    try std.testing.expectError(error.SymlinkEscape, assertResolved(ws.dir, io, access, "harmless.txt", .read));
+    try assertResolved(ws.dir, io, access, "alias.txt", .read);
+    try assertResolved(ws.dir, io, access, "real.txt", .write);
+    try assertResolved(ws.dir, io, access, "new/dir/file.txt", .write);
+    try std.testing.expectError(error.PathEscape, assertResolved(ws.dir, io, access, "../x", .read));
+}
+
+test "a home skill root may link out; a workspace skill root may not" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var agents = std.testing.tmpDir(.{});
+    defer agents.cleanup();
+    var home_skills = std.testing.tmpDir(.{});
+    defer home_skills.cleanup();
+    var ws = std.testing.tmpDir(.{});
+    defer ws.cleanup();
+    try agents.dir.createDirPath(io, "deslop");
+    {
+        var f = try agents.dir.createFile(io, "deslop/SKILL.md", .{});
+        f.close(io);
+    }
+    const target = try agents.dir.realPathFileAlloc(io, "deslop", a);
+    defer a.free(target);
+    const home_root = try home_skills.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(home_root);
+    try home_skills.dir.symLink(io, target, "deslop", .{});
+    const ws_root = try ws.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(ws_root);
+    try ws.dir.createDirPath(io, ".claude/skills");
+    try ws.dir.symLink(io, target, ".claude/skills/deslop", .{});
+    const ws_skills = try std.fs.path.join(a, &.{ ws_root, ".claude/skills" });
+    defer a.free(ws_skills);
+
+    const access: Access = .{ .workspace = ws_root, .read_extra = &.{ ws_skills, home_root } };
+    const via_home = try std.fs.path.join(a, &.{ home_root, "deslop/SKILL.md" });
+    defer a.free(via_home);
+    try assertResolved(ws.dir, io, access, via_home, .read);
+    try std.testing.expectError(error.PathEscape, assertResolved(ws.dir, io, access, via_home, .write));
+    try std.testing.expectError(
+        error.SymlinkEscape,
+        assertResolved(ws.dir, io, access, ".claude/skills/deslop/SKILL.md", .read),
+    );
 }
 
 /// A scratch workspace unique to this test run.

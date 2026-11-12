@@ -161,7 +161,7 @@ pub fn executeAdmitted(a: AdmitArgs) !AdmitOutcome {
         } else {
             const mark = undo.depth(allocator, a.dir, a.io);
             result = dispatch.run(a.dir, a.io, allocator, a.path_access, tool_name, tool_args, a.home, a.tasks) catch |err| blk: {
-                break :blk try std.fmt.allocPrint(allocator, "tool error: {s}", .{@errorName(err)});
+                break :blk try toolErrorText(allocator, err);
             };
             a.reads.guard.record(p);
             const note = diag.afterWrite(allocator, a.io, a.workspace, a.dir, p) catch
@@ -186,7 +186,7 @@ pub fn executeAdmitted(a: AdmitArgs) !AdmitOutcome {
         }
     } else {
         result = dispatch.run(a.dir, a.io, allocator, a.path_access, tool_name, tool_args, a.home, a.tasks) catch |err| blk: {
-            break :blk try std.fmt.allocPrint(allocator, "tool error: {s}", .{@errorName(err)});
+            break :blk try toolErrorText(allocator, err);
         };
         if (path) |p| {
             if (Tool.Name.fromSlice(tool_name) == .read) a.reads.guard.record(p);
@@ -297,4 +297,9 @@ test "doom_loop trips on the third identical call" {
     try std.testing.expectEqual(@as(usize, 2), bumpRepeat(&same, "write", "{}", "write", "{}"));
     try std.testing.expectEqual(@as(usize, 3), bumpRepeat(&same, "write", "{}", "write", "{}"));
     try std.testing.expect(same >= doom_after);
+}
+
+fn toolErrorText(allocator: std.mem.Allocator, err: anyerror) ![]u8 {
+    if (err == error.SymlinkEscape) return allocator.dupe(u8, pathing.symlink_escape_hint);
+    return std.fmt.allocPrint(allocator, "tool error: {s}", .{@errorName(err)});
 }

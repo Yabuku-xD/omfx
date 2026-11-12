@@ -792,8 +792,37 @@ const HostWriter = struct {
     }
 };
 
+/// Retries after the first attempt. Transient provider failures (overload,
+/// gateway hiccups, rate limits) usually clear within seconds; ending the turn
+/// on the first one throws away the work the turn already did.
+pub const max_retries: u8 = 3;
+
 pub fn shouldRetry(status: u16, attempt: u8) bool {
-    return status == 429 and attempt == 0;
+    if (attempt >= max_retries) return false;
+    return switch (status) {
+        408, 429, 500, 502, 503, 504, 529 => true,
+        else => false,
+    };
+}
+
+pub fn backoffMs(attempt: u8) u32 {
+    const shift: u5 = @intCast(@min(attempt, 3));
+    return @as(u32, 1000) << shift;
+}
+
+/// Sleeps in short slices so Esc still lands during a backoff. Returns false
+/// when the user cancelled.
+fn backoff(io: std.Io, host: anytype, attempt: u8) bool {
+    var left: u32 = backoffMs(attempt);
+    while (left > 0) {
+        host.pollCancel();
+        if (host.cancelled()) return false;
+        const step = @min(left, 100);
+        std.Io.sleep(io, .fromMilliseconds(step), .awake) catch return false;
+        left -= step;
+    }
+    host.pollCancel();
+    return !host.cancelled();
 }
 
 /// Like `Client.fetch`, but arms `sink.armAbort` on the live socket so Esc /
@@ -971,6 +1000,15 @@ pub fn postChatFiltered(
                 if (flags.host.cancelled() or err == error.Canceled) {
                     return error.Transport;
                 }
+                // A dropped connection before any reply text reached the
+                // screen is safe to resend; after that, a retry would repeat
+                // text the user already saw.
+                if (attempt < max_retries and !tee.seen.text and !tee.seen.think) {
+                    if (!backoff(io, flags.host, attempt)) return error.Transport;
+                    attempt += 1;
+                    tee.reset();
+                    continue;
+                }
                 const msg = try std.fmt.allocPrint(allocator, "transport error: {s}", .{@errorName(err)});
                 return .{ .status = 0, .outcome = .{ .text = msg } };
             },
@@ -980,6 +1018,7 @@ pub fn postChatFiltered(
         tee.writer.flush() catch {};
         const try_status: u16 = @intFromEnum(result.status);
         if (!shouldRetry(try_status, attempt)) break;
+        if (!backoff(io, flags.host, attempt)) return error.Transport;
         attempt += 1;
         tee.reset();
     }
@@ -995,7 +1034,7 @@ pub fn postChatFiltered(
         return .{ .status = status, .outcome = .{ .text = msg } };
     }
     if (status == 429) {
-        const msg = try std.fmt.allocPrint(allocator, "{s} http 429: retry once exhausted; not a clean verdict", .{endpoint.vendor.asSlice()});
+        const msg = try std.fmt.allocPrint(allocator, "{s} http 429: rate limited after {d} retries; not a clean verdict", .{ endpoint.vendor.asSlice(), max_retries });
         return .{ .status = status, .outcome = .{ .text = msg } };
     }
     if (status == 401 or status == 403 or isBadKeyBody(status, raw)) {
@@ -1077,10 +1116,22 @@ pub fn postChatFiltered(
     return .{ .status = status, .outcome = .{ .text = text } };
 }
 
-test "retry only the first 429" {
-    try std.testing.expect(shouldRetry(429, 0));
-    try std.testing.expect(!shouldRetry(429, 1));
-    try std.testing.expect(!shouldRetry(500, 0));
+test "transient statuses retry up to the attempt cap; client errors never do" {
+    for ([_]u16{ 408, 429, 500, 502, 503, 504, 529 }) |s| {
+        try std.testing.expect(shouldRetry(s, 0));
+        try std.testing.expect(shouldRetry(s, max_retries - 1));
+        try std.testing.expect(!shouldRetry(s, max_retries));
+    }
+    for ([_]u16{ 200, 400, 401, 403, 404, 413, 422 }) |s| {
+        try std.testing.expect(!shouldRetry(s, 0));
+    }
+}
+
+test "backoff doubles and stays bounded" {
+    try std.testing.expectEqual(@as(u32, 1000), backoffMs(0));
+    try std.testing.expectEqual(@as(u32, 2000), backoffMs(1));
+    try std.testing.expectEqual(@as(u32, 4000), backoffMs(2));
+    try std.testing.expectEqual(@as(u32, 8000), backoffMs(9));
 }
 
 test "json escape quotes" {

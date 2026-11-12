@@ -12,6 +12,7 @@ pub const Error = error{
     OldStringNotFound,
     OldStringNotUnique,
     PathEscape,
+    SymlinkEscape,
     ApplyFailed,
 } || std.mem.Allocator.Error;
 
@@ -168,6 +169,7 @@ pub fn applyEdits(
             error.OldStringNotUnique => return error.OldStringNotUnique,
             error.OldStringNotFound => return error.OldStringNotFound,
             error.PathEscape => return error.PathEscape,
+            error.SymlinkEscape => return error.SymlinkEscape,
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.OldStringNotFound,
         };
@@ -202,6 +204,7 @@ fn applyStep(
                 error.OldStringNotUnique => return error.OldStringNotUnique,
                 error.OldStringNotFound => return error.OldStringNotFound,
                 error.PathEscape => return error.PathEscape,
+                error.SymlinkEscape => return error.SymlinkEscape,
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.OldStringNotFound,
             };

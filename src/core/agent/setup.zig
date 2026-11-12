@@ -105,6 +105,9 @@ pub const Trace = struct {
     tools: u16 = 0,
     sys_bytes: u32 = 0,
     tools_bytes: u32 = 0,
+    /// The turn ended on a provider failure (non-2xx status or transport
+    /// error) rather than a model reply, so a headless caller can exit nonzero.
+    provider_failed: bool = false,
 
     pub fn setTool(self: *Trace, name: []const u8, args: []const u8) void {
         self.tools +|= 1;

@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const catalog = @import("catalog.zig");
 const env = @import("../core/env.zig");
+const atomic = @import("../core/atomic.zig");
 const types = @import("types.zig");
 const oauth = @import("oauth.zig");
 
@@ -450,28 +451,9 @@ pub fn removeId(allocator: std.mem.Allocator, existing: []const u8, id: []const 
 pub fn writeFile(allocator: std.mem.Allocator, io: Io, home: []const u8, json: []const u8) !void {
     const p = try path(allocator, home);
     defer allocator.free(p);
-    const dir = std.fs.path.dirname(p) orelse home;
-    Io.Dir.cwd().createDirPath(io, dir) catch |err| {
-        log.warn("mkdir {s}: {s}", .{ dir, @errorName(err) });
-    };
-    // Written beside the target and renamed over it: a crash or a full disk
-    // half-way through leaves the old credentials, not a truncated file that
-    // logs everyone out.
-    const tmp = try std.fmt.allocPrint(allocator, "{s}.tmp", .{p});
-    defer allocator.free(tmp);
-    {
-        var file = try Io.Dir.cwd().createFile(io, tmp, .{
-            .truncate = true,
-            .permissions = .fromMode(0o600),
-        });
-        defer file.close(io);
-        var buf: [1024]u8 = undefined;
-        var w = file.writer(io, &buf);
-        try w.interface.writeAll(json);
-        try w.interface.flush();
-    }
-    errdefer Io.Dir.cwd().deleteFile(io, tmp) catch {};
-    try Io.Dir.cwd().rename(tmp, Io.Dir.cwd(), p, io);
+    // A crash or a full disk half-way through leaves the old credentials, not
+    // a truncated file that logs everyone out.
+    try atomic.writeFile(allocator, io, p, json, .{});
 }
 
 fn finishStored(

@@ -123,6 +123,9 @@ fn loadOne(
     if (pathing.isSecret(rel)) {
         return .{ .note = try std.fmt.allocPrint(allocator, "(@{s}: secret)\n", .{rel}) };
     }
+    pathing.assertResolved(dir, io, access, rel, .read) catch {
+        return .{ .note = try std.fmt.allocPrint(allocator, "(@{s}: symlink leads outside the workspace or to a secret)\n", .{rel}) };
+    };
     if (dir.openDir(io, rel, .{ .iterate = true })) |dir_val| {
         var child = dir_val;
         defer child.close(io);

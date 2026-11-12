@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const log = std.log.scoped(.settings);
 const Io = std.Io;
 const permissions = @import("permissions.zig");
+const atomic = @import("atomic.zig");
 
 pub const path_name = "settings.json";
 
@@ -515,14 +516,7 @@ pub fn setNumber(allocator: std.mem.Allocator, io: Io, home: []const u8, key: Nu
     }
     const encoded = try encodeFile(allocator, file);
     defer allocator.free(encoded);
-    const p = try path(allocator, home);
-    defer allocator.free(p);
-    var f = try Io.Dir.cwd().createFile(io, p, .{ .truncate = true });
-    defer f.close(io);
-    var buf: [1024]u8 = undefined;
-    var w = f.writer(io, &buf);
-    try w.interface.writeAll(encoded);
-    try w.interface.flush();
+    try writePath(allocator, io, home, encoded);
 }
 
 pub fn encode(allocator: std.mem.Allocator, web: Web) ![]u8 {
@@ -532,16 +526,9 @@ pub fn encode(allocator: std.mem.Allocator, web: Web) ![]u8 {
 fn writePath(allocator: std.mem.Allocator, io: Io, home: []const u8, body: []const u8) !void {
     const p = try path(allocator, home);
     defer allocator.free(p);
-    const dir = std.fs.path.dirname(p) orelse home;
-    Io.Dir.cwd().createDirPath(io, dir) catch |err| {
-        log.warn("mkdir {s}: {s}", .{ dir, @errorName(err) });
-    };
-    var file = try Io.Dir.cwd().createFile(io, p, .{ .truncate = true, .permissions = .fromMode(0o600) });
-    defer file.close(io);
-    var buf: [512]u8 = undefined;
-    var w = file.writer(io, &buf);
-    try w.interface.writeAll(body);
-    try w.interface.flush();
+    // settings.json holds web-search keys, so a crash mid-write must not leave
+    // it empty: that silently drops every key and preference at next launch.
+    try atomic.writeFile(allocator, io, p, body, .{});
 }
 
 pub fn save(allocator: std.mem.Allocator, io: Io, home: []const u8, web: Web) !void {

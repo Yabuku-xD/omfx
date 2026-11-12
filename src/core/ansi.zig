@@ -54,3 +54,111 @@ test "accent is an SGR sequence" {
     try std.testing.expect(std.mem.startsWith(u8, accent, "\x1b["));
     try std.testing.expectEqualStrings(reset, "\x1b[0m");
 }
+
+/// Tool output (shell commands, files, web pages, MCP replies) is untrusted
+/// text bound for the user's terminal. Left raw, it can retitle the window
+/// (OSC 0), write the clipboard (OSC 52), clear or scroll the screen, move the
+/// cursor to overwrite earlier rows, or answer terminal queries as if typed.
+///
+/// Colour (SGR, `ESC [ ... m`) is kept: it cannot move or query anything, and
+/// test runners and omfx's own task list rely on it. Every other escape and C0
+/// control except newline and tab becomes visible caret text (`^[`, `^G`), so
+/// the bytes stay inspectable. A bare carriage return is dropped: it would let
+/// a line paint over itself.
+pub fn safeForTerminal(allocator: @import("std").mem.Allocator, s: []const u8) ![]u8 {
+    return defang(allocator, s, true);
+}
+
+/// For text a decision rests on (the permission box): colour is escaped too,
+/// since concealed (`ESC[8m`) or black-on-black text can hide part of a
+/// command from the person approving it.
+pub fn plainForTerminal(allocator: @import("std").mem.Allocator, s: []const u8) ![]u8 {
+    return defang(allocator, s, false);
+}
+
+fn defang(allocator: @import("std").mem.Allocator, s: []const u8, keep_sgr: bool) ![]u8 {
+    const std = @import("std");
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, s.len);
+    var i: usize = 0;
+    while (i < s.len) {
+        const c = s[i];
+        if (c == 0x1b) {
+            if (if (keep_sgr) sgrLen(s[i..]) else null) |n| {
+                try out.appendSlice(allocator, s[i .. i + n]);
+                i += n;
+                continue;
+            }
+            try out.appendSlice(allocator, "^[");
+            i += 1;
+            continue;
+        }
+        // UTF-8 encoded C1 controls (U+0080..U+009F): CSI is U+009B, and some
+        // terminals honour it exactly like ESC [.
+        if (c == 0xc2 and i + 1 < s.len and s[i + 1] >= 0x80 and s[i + 1] <= 0x9f) {
+            try out.appendSlice(allocator, "\u{fffd}");
+            i += 2;
+            continue;
+        }
+        switch (c) {
+            '\n', '\t' => try out.append(allocator, c),
+            '\r' => {},
+            0...0x08, 0x0b, 0x0c, 0x0e...0x1a, 0x1c...0x1f => {
+                try out.append(allocator, '^');
+                try out.append(allocator, c + 0x40);
+            },
+            0x7f => try out.appendSlice(allocator, "^?"),
+            else => try out.append(allocator, c),
+        }
+        i += 1;
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Length of a complete `ESC [ params m` at the start of `s`, else null.
+fn sgrLen(s: []const u8) ?usize {
+    if (s.len < 3 or s[0] != 0x1b or s[1] != '[') return null;
+    var j: usize = 2;
+    while (j < s.len) : (j += 1) {
+        const d = s[j];
+        if ((d >= '0' and d <= '9') or d == ';' or d == ':') continue;
+        if (d == 'm') return j + 1;
+        return null;
+    }
+    return null;
+}
+
+test "safeForTerminal keeps colour and defangs everything else" {
+    const std = @import("std");
+    const a = std.testing.allocator;
+    const raw = "ok \x1b[32mgreen\x1b[0m\x1b]0;PWNED\x07\x1b]52;c;ZXZpbA==\x07\x1b[2J\x1b[1;1H\x1b[6n\rspoof\n\ttab\x08\x7f\xc2\x9b2J";
+    const got = try safeForTerminal(a, raw);
+    defer a.free(got);
+    try std.testing.expectEqualStrings(
+        "ok \x1b[32mgreen\x1b[0m^[]0;PWNED^G^[]52;c;ZXZpbA==^G^[[2J^[[1;1H^[[6nspoof\n\ttab^H^?\u{fffd}2J",
+        got,
+    );
+    // Nothing that can move, clear, query, or title survives.
+    var k: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, got, k, 0x1b)) |at| : (k = at + 1) {
+        try std.testing.expect(sgrLen(got[at..]) != null);
+    }
+}
+
+test "safeForTerminal leaves plain text and UTF-8 alone" {
+    const std = @import("std");
+    const a = std.testing.allocator;
+    const text = "héllo — 世界 ✓\nline two\n";
+    const got = try safeForTerminal(a, text);
+    defer a.free(got);
+    try std.testing.expectEqualStrings(text, got);
+}
+
+test "plainForTerminal escapes colour as well" {
+    const std = @import("std");
+    const a = std.testing.allocator;
+    const got = try plainForTerminal(a, "rm -rf ~ \x1b[8m# just listing files\x1b[0m");
+    defer a.free(got);
+    try std.testing.expectEqualStrings("rm -rf ~ ^[[8m# just listing files^[[0m", got);
+}

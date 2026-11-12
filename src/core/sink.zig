@@ -164,7 +164,6 @@ pub fn dropSteer() void {
 ///
 /// This cannot peek. `recv(MSG_PEEK)` fails with ENOTSOCK on a TTY, which is
 /// what made the previous version of this function never fire.
-
 /// Painters and the cancel watcher stand down while a modal owns the keyboard.
 var modal_depth: std.atomic.Value(u32) = .init(0);
 
@@ -288,8 +287,33 @@ fn drainKeys() bool {
     return drainKeysTimeout(0, 20);
 }
 
+/// Latched once a non-terminal stdin reaches end of file (CI, `< /dev/null`,
+/// a closed pipe). Such an fd polls readable forever and every read returns
+/// zero, so without the latch the watcher thread spins a core for the whole
+/// turn instead of idling.
+var stdin_eof: std.atomic.Value(bool) = .init(false);
+
+fn idleFor(wait_ms: i32) void {
+    if (wait_ms <= 0) return;
+    var wait = std.c.timespec{
+        .sec = @divTrunc(wait_ms, 1000),
+        .nsec = @rem(wait_ms, 1000) * std.time.ns_per_ms,
+    };
+    _ = std.c.nanosleep(&wait, null);
+}
+
+/// A zero-byte read on a terminal is a cooked-mode Ctrl-D and the terminal
+/// stays usable; anywhere else it is the end of input for good.
+fn noteStdinEnd() void {
+    if (std.c.isatty(std.posix.STDIN_FILENO) == 0) stdin_eof.store(true, .release);
+}
+
 fn drainKeysTimeout(wait_ms: i32, page_rows: u16) bool {
     if (builtin.os.tag == .windows) return false;
+    if (stdin_eof.load(.acquire)) {
+        idleFor(wait_ms);
+        return false;
+    }
     var stop = false;
     while (true) {
         var fds = [_]std.posix.pollfd{.{
@@ -299,9 +323,22 @@ fn drainKeysTimeout(wait_ms: i32, page_rows: u16) bool {
         }};
         const n = std.posix.poll(&fds, wait_ms) catch return stop;
         if (n == 0) return stop;
+        if (fds[0].revents & std.posix.POLL.NVAL != 0) {
+            stdin_eof.store(true, .release);
+            idleFor(wait_ms);
+            return stop;
+        }
         var buf: [cancel_drain_bytes]u8 = undefined;
-        const got = std.posix.read(std.posix.STDIN_FILENO, &buf) catch return stop;
-        if (got == 0) return stop;
+        const got = std.posix.read(std.posix.STDIN_FILENO, &buf) catch {
+            noteStdinEnd();
+            idleFor(wait_ms);
+            return stop;
+        };
+        if (got == 0) {
+            noteStdinEnd();
+            idleFor(wait_ms);
+            return stop;
+        }
         if (wantsModeCycle(buf[0..got])) {
             mode_cycle_pending.store(true, .release);
             continue;

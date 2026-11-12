@@ -135,7 +135,9 @@ pub fn start(
     defer file.close(io);
 
     const child = std.process.spawn(io, .{
-        .argv = &.{ shell, "-c", command },
+        // Background jobs skip the deadline wrapper, so the agent marker that
+        // wrapper exports is set here instead.
+        .argv = &.{ "/usr/bin/env", "AI_AGENT=omfx", shell, "-c", command },
         .cwd = .{ .path = workspace },
         .stdin = .close,
         .stdout = .{ .file = file },
