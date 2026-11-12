@@ -90,8 +90,8 @@ fn fetchLatestBody(allocator: std.mem.Allocator, io: Io) Error![]u8 {
         .response_writer = &aw.writer,
         .extra_headers = extra[0..extra_n],
     }) catch return error.Transport;
-    if (@intFromEnum(result.status) == 404) return error.NoRelease;
-    if (@intFromEnum(result.status) != 200) return error.BadRelease;
+    if (@backingInt(result.status) == 404) return error.NoRelease;
+    if (@backingInt(result.status) != 200) return error.BadRelease;
     return aw.toOwnedSlice() catch return error.OutOfMemory;
 }
 

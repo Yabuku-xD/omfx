@@ -1,4 +1,5 @@
 const std = @import("std");
+const repeat = @import("repeat.zig");
 const Io = std.Io;
 
 pub const max_verify: usize = 4;
@@ -628,6 +629,6 @@ test "normalizeWs collapses runs and trims ends" {
 test "an unnormalizable command is blocked, not allowed" {
     var c = try parse(std.testing.allocator, "# Never\n- `rm -rf`\n");
     defer c.deinit(std.testing.allocator);
-    const long = "x" ** (max_normalized + 16);
+    const long = repeat.str("x", (max_normalized + 16));
     try std.testing.expect(c.blocksBash(long));
 }

@@ -15,7 +15,7 @@ pub const Price = struct {
 };
 
 const Entry = struct {
-    id: [96]u8 = [_]u8{0} ** 96,
+    id: [96]u8 = @splat(0),
     id_len: usize = 0,
     price: Price = .{},
 
@@ -172,8 +172,8 @@ fn fetchOpenRouter(allocator: std.mem.Allocator, io: Io) []u8 {
         log.debug("openrouter fetch: {s}", .{@errorName(err)});
         return "";
     };
-    if (@intFromEnum(result.status) != 200) {
-        log.debug("openrouter fetch: http {d}", .{@intFromEnum(result.status)});
+    if (@backingInt(result.status) != 200) {
+        log.debug("openrouter fetch: http {d}", .{@backingInt(result.status)});
         return "";
     }
     if (aw.written().len > max_body) return "";

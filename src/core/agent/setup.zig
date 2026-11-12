@@ -97,7 +97,7 @@ pub const Verify = enum { none, clean, fail, unavailable };
 pub const Trace = struct {
     const tool_cap: usize = 24;
 
-    tool: [tool_cap]u8 = [_]u8{0} ** tool_cap,
+    tool: [tool_cap]u8 = @splat(0),
     tool_len: usize = 0,
     args_tag: u32 = 0,
     verify: Verify = .none,

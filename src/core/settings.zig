@@ -103,7 +103,7 @@ pub const File = struct {
     last_provider: []const u8 = "",
     last_mode: []const u8 = "",
     /// Preferred model per provider so switching providers does not clobber.
-    provider_models: [max_provider_models]ProviderPref = [_]ProviderPref{.{}} ** max_provider_models,
+    provider_models: [max_provider_models]ProviderPref = @splat(.{}),
     provider_models_n: usize = 0,
 
     pub fn providerModels(self: *const File) []const ProviderPref {
@@ -190,7 +190,7 @@ pub fn parse(allocator: std.mem.Allocator, json: []const u8) !File {
     const market_n = extractArray(raw, "plugin_marketplaces", &market_store);
     const plugin_marketplaces = try allocator.dupe([]const u8, market_store[0..market_n]);
     errdefer allocator.free(plugin_marketplaces);
-    var provider_models: [max_provider_models]ProviderPref = [_]ProviderPref{.{}} ** max_provider_models;
+    var provider_models: [max_provider_models]ProviderPref = @splat(.{});
     const provider_models_n = fillProviderModels(raw, &provider_models);
     return .{
         .raw = raw,

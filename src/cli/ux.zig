@@ -579,7 +579,7 @@ test "ux matrix covers every builtin at least once" {
     try h.seedSession();
     try h.writeAuth("{\"commandcode\":{\"type\":\"api_key\",\"key\":\"cc-test\"}}");
 
-    var covered: [slash.builtin.len]bool = [_]bool{false} ** slash.builtin.len;
+    var covered: [slash.builtin.len]bool = @splat(false);
     const extras = [_][]const u8{
         "/new",
         "/exit",

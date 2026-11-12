@@ -29,7 +29,7 @@ fn fileName(cue: Cue) []const u8 {
     };
 }
 
-var paths: [std.enums.values(Cue).len]?[]const u8 = .{null} ** std.enums.values(Cue).len;
+var paths: [std.enums.values(Cue).len]?[]const u8 = @splat(null);
 var path_bufs: [std.enums.values(Cue).len][std.fs.max_path_bytes]u8 = undefined;
 
 pub fn play(io: Io, lookup: env.Lookup, cue: Cue) void {
@@ -48,7 +48,7 @@ pub fn play(io: Io, lookup: env.Lookup, cue: Cue) void {
 }
 
 fn materialize(io: Io, lookup: env.Lookup, cue: Cue) ?[]const u8 {
-    const idx = @intFromEnum(cue);
+    const idx = @backingInt(cue);
     if (paths[idx]) |path| return path;
 
     const dir = lookup.get("TMPDIR") orelse "/tmp";

@@ -25,13 +25,13 @@ comptime {
 }
 
 pub fn hashOf(s: []const u8) Hash {
-    return @enumFromInt(@as(u32, @truncate(std.hash.Wyhash.hash(0, s))));
+    return @fromBackingInt(@intCast(@as(u32, @truncate(std.hash.Wyhash.hash(0, s)))));
 }
 
 fn parseHash(s: []const u8) ?Hash {
     if (s.len != 8) return null;
     const v = std.fmt.parseInt(u32, s, 16) catch return null;
-    return @enumFromInt(v);
+    return @fromBackingInt(@intCast(v));
 }
 
 const HashCheck = union(enum) {

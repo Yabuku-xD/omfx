@@ -62,7 +62,7 @@ pub fn run(
             if (digits.len > 0 and (digits[0] == 'r' or digits[0] == 'R')) digits = digits[1..];
             const n = std.fmt.parseInt(u16, digits, 10) catch
                 break :blk try allocator.dupe(u8, "read_result: id is rN or job:N\n");
-            const body = recall.load(allocator, dir, io, @enumFromInt(n)) catch
+            const body = recall.load(allocator, dir, io, @fromBackingInt(@intCast(n))) catch
                 break :blk try std.fmt.allocPrint(allocator, "read_result: no archive r{d}\n", .{n});
             defer allocator.free(body);
             // Hand-edited archives can still hold secrets; never replay them.

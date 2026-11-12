@@ -1,4 +1,5 @@
 const std = @import("std");
+const repeat = @import("repeat.zig");
 const Io = std.Io;
 const contract_mod = @import("contract.zig");
 const tool = @import("tool.zig");
@@ -187,7 +188,7 @@ test "a never-rule is matched against what the shell will run" {
 
 test "an unreadably long command is denied, not passed through" {
     const c = contract_mod.Contract{};
-    const long = "x" ** (permissions.max_command + 16);
+    const long = repeat.str("x", (permissions.max_command + 16));
     const args = "{\"command\":\"" ++ long ++ "\"}";
     switch (pre(c, "bash", args)) {
         .deny => {},

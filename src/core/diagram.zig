@@ -99,17 +99,17 @@ fn exists(dir: Io.Dir, io: Io, name: []const u8) bool {
 }
 
 fn fileName(buf: *[72]u8, id: Id, ext: []const u8) []const u8 {
-    return std.fmt.bufPrint(buf, "{s}/d{d}.{s}", .{ dir_name, @intFromEnum(id), ext }) catch dir_name;
+    return std.fmt.bufPrint(buf, "{s}/d{d}.{s}", .{ dir_name, @backingInt(id), ext }) catch dir_name;
 }
 
 fn nextId(dir: Io.Dir, io: Io) Id {
     var n: u16 = 1;
     while (n <= max_ids) : (n += 1) {
         var buf: [72]u8 = undefined;
-        const name = fileName(&buf, @enumFromInt(n), "mmd");
-        if (!exists(dir, io, name)) return @enumFromInt(n);
+        const name = fileName(&buf, @fromBackingInt(@intCast(n)), "mmd");
+        if (!exists(dir, io, name)) return @fromBackingInt(@intCast(n));
     }
-    return @enumFromInt(1);
+    return @fromBackingInt(@intCast(1));
 }
 
 const WriteError = error{WriteFailed};

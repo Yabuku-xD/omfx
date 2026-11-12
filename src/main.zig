@@ -103,7 +103,7 @@ pub fn main(init: std.process.Init) !void {
     const resolved = omfx.providers.auth.resolveStored(lookup, auth_json, want_provider, want_model);
     const model_name = parsed.model orelse lookup.get("OMFX_MODEL") orelse if (resolved) |r| r.model else "(unset)";
     const provider_id = parsed.provider orelse if (resolved) |r| r.spec.id else "(unset)";
-    const cwd_z = std.process.currentPathAlloc(io, arena) catch try arena.dupeZ(u8, ".");
+    const cwd_z = std.process.currentPathAlloc(io, arena) catch try arena.dupeSentinel(u8, ".", 0);
     const workspace = std.mem.sliceTo(cwd_z, 0);
 
     switch (parsed.command) {

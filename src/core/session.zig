@@ -639,7 +639,7 @@ fn sweepOrphans(
             const num = entry.name[1 .. entry.name.len - ".txt".len];
             const id_n = std.fmt.parseInt(u16, num, 10) catch continue;
             if (id_n == 0) continue;
-            const rid: recall.Id = @enumFromInt(id_n);
+            const rid: recall.Id = @fromBackingInt(@intCast(id_n));
             var keep = false;
             for (live_recall[0..live_recall_n]) |live| {
                 if (live == rid) {
@@ -679,7 +679,7 @@ fn deleteRecallFile(
     workspace: []const u8,
     id: recall.Id,
 ) void {
-    const name = std.fmt.allocPrint(allocator, "r{d}.txt", .{@intFromEnum(id)}) catch return;
+    const name = std.fmt.allocPrint(allocator, "r{d}.txt", .{@backingInt(id)}) catch return;
     defer allocator.free(name);
     const full = std.fs.path.join(allocator, &.{ workspace, ".omfx", "recall", name }) catch return;
     defer allocator.free(full);
@@ -700,7 +700,7 @@ fn mergeRecallIds(out: *[recall.max_items]recall.Id, n0: usize, src: []const u8)
 }
 
 fn takeRecall(out: *[recall.max_items]recall.Id, n: usize, id: recall.Id) usize {
-    if (@intFromEnum(id) == 0) return n;
+    if (@backingInt(id) == 0) return n;
     for (out[0..n]) |old| {
         if (old == id) return n;
     }
@@ -757,7 +757,7 @@ fn takeDigits(src: []const u8, i: *usize) ?recall.Id {
         v = v *% 10 + (src[i.*] - '0');
     }
     if (!saw or v == 0) return null;
-    return @enumFromInt(v);
+    return @fromBackingInt(@intCast(v));
 }
 
 fn collectRunIds(

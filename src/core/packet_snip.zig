@@ -84,7 +84,7 @@ pub fn appendRecallIds(allocator: std.mem.Allocator, reply: []const u8, out: *st
     var i: usize = 0;
     while (i < n) : (i += 1) {
         if (i > 0) try out.append(allocator, ' ');
-        try out.print(allocator, "r{d}", .{@intFromEnum(ids[i])});
+        try out.print(allocator, "r{d}", .{@backingInt(ids[i])});
     }
     return n;
 }

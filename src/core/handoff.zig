@@ -2,6 +2,7 @@
 //! todos on disk, thin stub in the new session — never a last-reply dump.
 
 const std = @import("std");
+const repeat = @import("repeat.zig");
 const Io = std.Io;
 const board = @import("board.zig");
 const snip = @import("packet_snip.zig");
@@ -147,7 +148,7 @@ test "build stub has no last_reply dump" {
     const built = try build(a, io, "/tmp", "h1", .{
         .goal = "ship handoff",
         .last_tool = "write",
-        .last_reply = "SECRET_SHOULD_NOT_APPEAR " ** 20,
+        .last_reply = repeat.str("SECRET_SHOULD_NOT_APPEAR ", 20),
     }, &.{});
     defer a.free(built.stub);
     defer a.free(built.packet);

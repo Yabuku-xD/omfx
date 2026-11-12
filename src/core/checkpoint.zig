@@ -3,6 +3,7 @@
 //! Layout: `.omfx/runs/<id>/{checkpoint.md,meta.json}`
 
 const std = @import("std");
+const repeat = @import("repeat.zig");
 const Io = std.Io;
 const board = @import("board.zig");
 const snip = @import("packet_snip.zig");
@@ -374,7 +375,7 @@ test "build stub has no last_reply dump" {
         .goal = "ship checkpoint",
         .note = "park",
         .last_tool = "write",
-        .last_reply = "SECRET_SHOULD_NOT_APPEAR " ** 20,
+        .last_reply = repeat.str("SECRET_SHOULD_NOT_APPEAR ", 20),
         .mode = "ask",
         .plan = "off",
     }, &.{});

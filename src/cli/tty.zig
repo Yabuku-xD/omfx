@@ -57,8 +57,8 @@ pub const Raw = struct {
         if (@hasField(@TypeOf(next.lflag), "IEXTEN")) next.lflag.IEXTEN = false;
         if (@hasField(@TypeOf(next.iflag), "IXON")) next.iflag.IXON = false;
         if (@hasField(std.posix.system.V, "MIN")) {
-            next.cc[@intFromEnum(std.posix.system.V.MIN)] = 1;
-            next.cc[@intFromEnum(std.posix.system.V.TIME)] = 0;
+            next.cc[@backingInt(std.posix.system.V.MIN)] = 1;
+            next.cc[@backingInt(std.posix.system.V.TIME)] = 0;
         }
         _ = tcflush(@intCast(fd), input_flush);
         std.posix.tcsetattr(fd, .FLUSH, next) catch return .{};

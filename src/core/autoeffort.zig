@@ -35,6 +35,7 @@
 //! call to save an inference call has not saved anything.
 
 const std = @import("std");
+const repeat = @import("repeat.zig");
 
 pub const Archetype = enum {
     /// Mechanical and single-step. More thinking changes nothing.
@@ -275,7 +276,7 @@ test "a prompt longer than the lowercase buffer is still classified" {
     // Only the first 4 KB is lowercased, so the tail is not scanned. The full
     // length is still recorded, and the result is a real archetype rather than
     // a crash or a silent zero.
-    const big = "why " ** 3000;
+    const big = repeat.str("why ", 3000);
     const f = extract(big, 0);
     try std.testing.expectEqual(big.len, f.len);
     try std.testing.expect(f.distinct > 0);

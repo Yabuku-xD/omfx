@@ -164,7 +164,7 @@ fn sessionHttp(
     }) catch |err| {
         return std.fmt.allocPrint(allocator, "mcp http failed ({s}): {s}", .{ server.name, @errorName(err) });
     };
-    const status: u16 = @intFromEnum(result.status);
+    const status: u16 = @backingInt(result.status);
     const raw = aw.written();
     if (status < 200 or status >= 300) {
         return std.fmt.allocPrint(allocator, "mcp http {d}: {s}", .{ status, raw[0..@min(raw.len, 200)] });

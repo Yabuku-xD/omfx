@@ -62,7 +62,7 @@ pub fn usagePanelFrom(view: UsageView, tab: UsageTab) panel_mod.Panel {
     var p = panel_mod.Panel{
         .title = "Usage",
         .tabs = &usage_tab_labels,
-        .tab_sel = @intFromEnum(tab),
+        .tab_sel = @backingInt(tab),
     };
     switch (tab) {
         .context => fillContextTab(view, &p),
@@ -558,9 +558,9 @@ pub fn keysPanel(sess: *Session) panel_mod.Panel {
 
 pub fn keyMatches(q: []const u8, row: tui.KeyRow) bool {
     if (q.len == 0) return true;
-    return std.ascii.indexOfIgnoreCase(row.name, q) != null or
-        std.ascii.indexOfIgnoreCase(row.help, q) != null or
-        std.ascii.indexOfIgnoreCase(row.section, q) != null;
+    return std.ascii.findIgnoreCase(row.name, q) != null or
+        std.ascii.findIgnoreCase(row.help, q) != null or
+        std.ascii.findIgnoreCase(row.section, q) != null;
 }
 
 pub fn lessThanSpec(_: void, a: slash.Spec, b: slash.Spec) bool {
@@ -589,8 +589,8 @@ pub fn helpPanel(sess: *Session) panel_mod.Panel {
 
 pub fn commandMatches(q: []const u8, spec: slash.Spec) bool {
     if (q.len == 0) return true;
-    return std.ascii.indexOfIgnoreCase(spec.name, q) != null or
-        std.ascii.indexOfIgnoreCase(spec.help, q) != null;
+    return std.ascii.findIgnoreCase(spec.name, q) != null or
+        std.ascii.findIgnoreCase(spec.help, q) != null;
 }
 
 pub fn rewindPanel(sess: *Session) panel_mod.Panel {

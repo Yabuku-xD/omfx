@@ -578,8 +578,8 @@ pub fn collectCalls(body: []const u8, out: *[max_calls]CallHit) usize {
 /// Stitch OpenAI chat.completions `tool_calls` deltas. `out[i].args` is owned by
 /// `allocator` (empty slots are "").
 fn collectChatToolCalls(allocator: std.mem.Allocator, body: []const u8, out: *[max_calls]CallHit) !usize {
-    var names: [max_calls][]const u8 = .{""} ** max_calls;
-    var args: [max_calls]std.ArrayList(u8) = .{std.ArrayList(u8).empty} ** max_calls;
+    var names: [max_calls][]const u8 = @splat("");
+    var args: [max_calls]std.ArrayList(u8) = @splat(std.ArrayList(u8).empty);
     errdefer for (&args) |*a| a.deinit(allocator);
 
     var it = std.mem.splitScalar(u8, body, '\n');
@@ -1016,7 +1016,7 @@ pub fn postChatFiltered(
         // Fetch may leave the last SSE bytes in the writer buffer without a
         // final drain — flush so HostWriter.ingest sees them.
         tee.writer.flush() catch {};
-        const try_status: u16 = @intFromEnum(result.status);
+        const try_status: u16 = @backingInt(result.status);
         if (!shouldRetry(try_status, attempt)) break;
         if (!backoff(io, flags.host, attempt)) return error.Transport;
         attempt += 1;
@@ -1024,7 +1024,7 @@ pub fn postChatFiltered(
     }
 
     const raw = tee.body.items;
-    const status: u16 = @intFromEnum(result.status);
+    const status: u16 = @backingInt(result.status);
     if (tee.overflow) {
         const msg = try std.fmt.allocPrint(
             allocator,
@@ -1070,7 +1070,7 @@ pub fn postChatFiltered(
     if (!tee.seen.think and extracted_think.len > 0) flags.host.think(extracted_think);
     if (!tee.seen.text and extracted_text.len > 0) flags.host.text(extracted_text);
     var calls: [max_calls]CallHit = undefined;
-    var owned_args: [max_calls]?[]u8 = .{null} ** max_calls;
+    var owned_args: [max_calls]?[]u8 = @splat(null);
     defer for (owned_args) |a| if (a) |p| allocator.free(p);
     var n_calls = collectCalls(raw, &calls);
     if (n_calls == 0) {

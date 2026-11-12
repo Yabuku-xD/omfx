@@ -1,4 +1,5 @@
 const std = @import("std");
+const repeat = @import("repeat.zig");
 const Io = std.Io;
 const pathing = @import("../tools/pathing.zig");
 
@@ -724,7 +725,7 @@ test "a long description is cut at a word, on a rune boundary" {
     const path = try std.fs.path.join(a, &.{ ws, "SKILL.md" });
     defer a.free(path);
 
-    try writeFileForTest(io, path, "---\nname: x\ndescription: " ++ ("word " ** 80) ++ "\n---\n");
+    try writeFileForTest(io, path, "---\nname: x\ndescription: " ++ (repeat.str("word ", 80)) ++ "\n---\n");
     const got = describe(a, io, path);
     defer a.free(got);
     try std.testing.expect(got.len <= max_description);

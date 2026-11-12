@@ -41,6 +41,7 @@ pub const peer_router = @import("core/peer_router.zig");
 pub const slash = @import("core/slash.zig");
 pub const settings = @import("core/settings.zig");
 pub const atomic = @import("core/atomic.zig");
+pub const repeat = @import("core/repeat.zig");
 pub const menus = @import("cli/menus.zig");
 pub const cmds = @import("cli/cmds.zig");
 pub const context = @import("core/context.zig");
@@ -113,6 +114,7 @@ test {
     _ = slash;
     _ = settings;
     _ = atomic;
+    _ = repeat;
     _ = menus;
     _ = cmds;
     _ = @import("cli/ux.zig");

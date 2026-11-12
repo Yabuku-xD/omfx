@@ -103,7 +103,7 @@ pub const Http = struct {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.Transport,
         };
-        return .{ .status = @intFromEnum(result.status), .body = try aw.toOwnedSlice() };
+        return .{ .status = @backingInt(result.status), .body = try aw.toOwnedSlice() };
     }
 };
 

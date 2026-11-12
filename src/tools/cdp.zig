@@ -60,7 +60,7 @@ fn postJson(allocator: std.mem.Allocator, io: Io, url: []const u8, payload: []co
     }) catch |err| {
         return std.fmt.allocPrint(allocator, "cdp: unavailable ({s}); not a clean verdict\n", .{@errorName(err)});
     };
-    const status: u16 = @intFromEnum(result.status);
+    const status: u16 = @backingInt(result.status);
     const raw = aw.written();
     if (status < 200 or status >= 300) {
         return std.fmt.allocPrint(allocator, "cdp: http {d}; not a clean verdict\n", .{status});

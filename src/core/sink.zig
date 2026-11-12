@@ -469,8 +469,8 @@ pub const Watch = struct {
         next.lflag.ICANON = false;
         if (@hasField(@TypeOf(next.lflag), "ECHOCTL")) next.lflag.ECHOCTL = false;
         if (@hasField(std.posix.system.V, "MIN")) {
-            next.cc[@intFromEnum(std.posix.system.V.MIN)] = 1;
-            next.cc[@intFromEnum(std.posix.system.V.TIME)] = 0;
+            next.cc[@backingInt(std.posix.system.V.MIN)] = 1;
+            next.cc[@backingInt(std.posix.system.V.TIME)] = 0;
         }
         std.posix.tcsetattr(fd, .FLUSH, next) catch return;
         self.termios_old = old;

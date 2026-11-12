@@ -436,8 +436,8 @@ test "typing into the commands panel filters it" {
         if (f.kind != .pick) continue;
         picks += 1;
         // Matched on the name or on what the command does, not on neither.
-        try std.testing.expect(std.ascii.indexOfIgnoreCase(f.key, "sess") != null or
-            std.ascii.indexOfIgnoreCase(f.value, "sess") != null);
+        try std.testing.expect(std.ascii.findIgnoreCase(f.key, "sess") != null or
+            std.ascii.findIgnoreCase(f.value, "sess") != null);
     }
     try std.testing.expect(picks > 0);
     try std.testing.expect(picks < slash.builtin.len);

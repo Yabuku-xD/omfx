@@ -110,11 +110,11 @@ fn fetchRaw(allocator: std.mem.Allocator, io: Io, url: []const u8) ![]u8 {
         .headers = .{ .accept_encoding = .{ .override = "identity" } },
         .response_writer = &aw.writer,
         .redirect_buffer = &loc_buf,
-        .redirect_behavior = @enumFromInt(max_redirect_hops),
+        .redirect_behavior = @fromBackingInt(@intCast(max_redirect_hops)),
     }) catch |err| {
         return std.fmt.allocPrint(allocator, "fetch failed: {s}", .{@errorName(err)});
     };
-    const status: u16 = @intFromEnum(result.status);
+    const status: u16 = @backingInt(result.status);
     const raw = aw.written();
     if (status < 200 or status >= 300) {
         return std.fmt.allocPrint(allocator, "http {d}: {s}", .{ status, raw[0..@min(raw.len, status_snip)] });
@@ -140,11 +140,11 @@ pub fn scrape(allocator: std.mem.Allocator, io: Io, url: []const u8) ![]u8 {
         .headers = .{ .accept_encoding = .{ .override = "identity" } },
         .response_writer = &aw.writer,
         .redirect_buffer = &loc_buf,
-        .redirect_behavior = @enumFromInt(max_redirect_hops),
+        .redirect_behavior = @fromBackingInt(@intCast(max_redirect_hops)),
     }) catch |err| {
         return std.fmt.allocPrint(allocator, "scrape failed: {s}", .{@errorName(err)});
     };
-    const status: u16 = @intFromEnum(result.status);
+    const status: u16 = @backingInt(result.status);
     const raw = aw.written();
     if (status < 200 or status >= 300) {
         return std.fmt.allocPrint(allocator, "http {d}: {s}", .{ status, raw[0..@min(raw.len, status_snip)] });
@@ -158,10 +158,10 @@ pub fn scrape(allocator: std.mem.Allocator, io: Io, url: []const u8) ![]u8 {
 
 fn looksHtml(body: []const u8) bool {
     const head = body[0..@min(body.len, html_probe)];
-    return std.ascii.indexOfIgnoreCase(head, "<html") != null or
-        std.ascii.indexOfIgnoreCase(head, "<!doctype html") != null or
-        std.ascii.indexOfIgnoreCase(head, "<head") != null or
-        std.ascii.indexOfIgnoreCase(head, "<body") != null;
+    return std.ascii.findIgnoreCase(head, "<html") != null or
+        std.ascii.findIgnoreCase(head, "<!doctype html") != null or
+        std.ascii.findIgnoreCase(head, "<head") != null or
+        std.ascii.findIgnoreCase(head, "<body") != null;
 }
 
 fn readablePage(allocator: std.mem.Allocator, url: []const u8, html: []const u8) ![]u8 {
@@ -179,17 +179,17 @@ fn readablePage(allocator: std.mem.Allocator, url: []const u8, html: []const u8)
 }
 
 fn extractTitle(allocator: std.mem.Allocator, html: []const u8) ![]u8 {
-    const open = std.ascii.indexOfIgnoreCase(html, "<title") orelse return allocator.dupe(u8, "");
+    const open = std.ascii.findIgnoreCase(html, "<title") orelse return allocator.dupe(u8, "");
     const gt = std.mem.indexOfScalarPos(u8, html, open, '>') orelse return allocator.dupe(u8, "");
     const start = gt + 1;
-    const close = std.ascii.indexOfIgnoreCase(html[start..], "</title>") orelse return allocator.dupe(u8, "");
+    const close = std.ascii.findIgnoreCase(html[start..], "</title>") orelse return allocator.dupe(u8, "");
     return collapseWs(allocator, html[start .. start + close], title_cap);
 }
 
 fn mainRegion(html: []const u8) []const u8 {
     if (taggedRegion(html, "article")) |r| return r;
     if (taggedRegion(html, "main")) |r| return r;
-    if (std.ascii.indexOfIgnoreCase(html, "role=\"main\"")) |at| {
+    if (std.ascii.findIgnoreCase(html, "role=\"main\"")) |at| {
         if (std.mem.indexOfScalarPos(u8, html, at, '>')) |gt| {
             const start = gt + 1;
             return html[start..@min(html.len, start + role_main_cap)];
@@ -205,7 +205,7 @@ fn taggedRegion(html: []const u8, name: []const u8) ?[]const u8 {
     open_pat[0] = '<';
     @memcpy(open_pat[1..][0..name.len], name);
     const open_s = open_pat[0 .. name.len + 1];
-    const open_at = std.ascii.indexOfIgnoreCase(html, open_s) orelse return null;
+    const open_at = std.ascii.findIgnoreCase(html, open_s) orelse return null;
     const after = open_at + open_s.len;
     if (after < html.len and std.ascii.isAlphanumeric(html[after])) return null;
     const gt = std.mem.indexOfScalarPos(u8, html, open_at, '>') orelse return null;
@@ -216,7 +216,7 @@ fn taggedRegion(html: []const u8, name: []const u8) ?[]const u8 {
     @memcpy(close_pat[2..][0..name.len], name);
     close_pat[2 + name.len] = '>';
     const close_s = close_pat[0 .. name.len + 3];
-    const close_rel = std.ascii.indexOfIgnoreCase(html[start..], close_s) orelse return html[start..];
+    const close_rel = std.ascii.findIgnoreCase(html[start..], close_s) orelse return html[start..];
     return html[start .. start + close_rel];
 }
 

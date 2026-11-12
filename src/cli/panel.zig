@@ -16,6 +16,7 @@
 //!    slow terminal shows the same animation shorter rather than in slow motion.
 
 const std = @import("std");
+const repeat = @import("../core/repeat.zig");
 const Io = std.Io;
 
 const paint = @import("../core/ansi.zig");
@@ -901,8 +902,8 @@ test "editing shows the live buffer and a caret" {
 
 test "render never writes past the panel width" {
     const a = std.testing.allocator;
-    var p = Panel{ .title = "x" ** 200 };
-    p.add(.{ .key = "k", .label = "L" ** 120, .kind = .text, .value = "V" ** 120 });
+    var p = Panel{ .title = repeat.str("x", 200) };
+    p.add(.{ .key = "k", .label = repeat.str("L", 120), .kind = .text, .value = repeat.str("V", 120) });
     const g = geometry(30, 100, p.n, 0);
     const s = try render(a, &p, g);
     defer a.free(s);

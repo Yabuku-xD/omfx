@@ -25,7 +25,7 @@ zig build
 ./zig-out/bin/omfx version
 ```
 
-Use the binary at `./zig-out/bin/omfx`, not an older copy on your `PATH`. `zig build` produces ReleaseFast; `zig build test` stays Debug.
+Use the binary at `./zig-out/bin/omfx`, not an older copy on your `PATH`. `zig build` produces an optimized (`-Doptimize=fast`) binary; `zig build test` stays `debug`.
 
 ```sh
 zig fmt --check src build.zig   # CI runs this first

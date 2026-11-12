@@ -1,4 +1,5 @@
 const std = @import("std");
+const repeat = @import("repeat.zig");
 const Io = std.Io;
 const config = @import("config.zig");
 const sse = @import("../providers/sse.zig");
@@ -504,7 +505,7 @@ test "a permission check judges the decoded command, not the escaped one" {
 test "an undecodable command fails closed" {
     // Longer than max_command: unjudgeable, so it must not be auto-approved
     // and must not run in plan mode.
-    const long = "x" ** (max_command + 16);
+    const long = repeat.str("x", (max_command + 16));
     const args = "{\"command\":\"" ++ long ++ "\"}";
     try std.testing.expect(!isRoutine("bash", args));
     try std.testing.expect(blockedByPlan("bash", args));

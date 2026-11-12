@@ -276,11 +276,11 @@ fn http(
         .extra_headers = extra,
         .response_writer = &aw.writer,
         .redirect_buffer = &loc_buf,
-        .redirect_behavior = @enumFromInt(5),
+        .redirect_behavior = @fromBackingInt(@intCast(5)),
     }) catch |err| {
         return .{ .status = 0, .body = try std.fmt.allocPrint(allocator, "transport {s}", .{@errorName(err)}) };
     };
-    return .{ .status = @intFromEnum(result.status), .body = try aw.toOwnedSlice() };
+    return .{ .status = @backingInt(result.status), .body = try aw.toOwnedSlice() };
 }
 
 fn collectSources(allocator: std.mem.Allocator, provider: []const u8, body: []const u8, limit: usize, query: []const u8) ![]u8 {

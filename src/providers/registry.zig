@@ -529,8 +529,8 @@ fn fetchUrl(allocator: std.mem.Allocator, io: Io, url: []const u8, limit: usize)
         log.debug("fetch {s}: {s}", .{ url, @errorName(err) });
         return "";
     };
-    if (@intFromEnum(result.status) != 200) {
-        log.debug("fetch {s}: http {d}", .{ url, @intFromEnum(result.status) });
+    if (@backingInt(result.status) != 200) {
+        log.debug("fetch {s}: http {d}", .{ url, @backingInt(result.status) });
         return "";
     }
     if (aw.written().len > limit) return "";
@@ -907,8 +907,8 @@ pub fn fetch(
         log.debug("{s} models: {s}", .{ provider, @errorName(err) });
         return "";
     };
-    if (@intFromEnum(result.status) != 200) {
-        log.debug("{s} models: http {d}", .{ provider, @intFromEnum(result.status) });
+    if (@backingInt(result.status) != 200) {
+        log.debug("{s} models: http {d}", .{ provider, @backingInt(result.status) });
         return "";
     }
     if (aw.written().len > max_body) return "";

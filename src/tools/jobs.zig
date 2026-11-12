@@ -188,7 +188,7 @@ pub fn running(job: Job) bool {
     const rc = std.c.waitpid(job.pid, null, wnohang);
     // The child was reaped just now, or is already gone.
     if (rc == job.pid or rc < 0) return false;
-    std.posix.kill(job.pid, @enumFromInt(0)) catch return false;
+    std.posix.kill(job.pid, @fromBackingInt(@intCast(0))) catch return false;
     return true;
 }
 

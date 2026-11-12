@@ -1,4 +1,5 @@
 const std = @import("std");
+const repeat = @import("../core/repeat.zig");
 const Tool = @import("../core/tool.zig");
 const paint = @import("../core/ansi.zig");
 const activity = @import("activity.zig");
@@ -638,7 +639,7 @@ test "a command answer is quiet, indented, and never raw" {
 
 test "a long command answer is clipped inside the gutter" {
     const a = std.testing.allocator;
-    const long = "x" ** 200;
+    const long = repeat.str("x", 200);
     const out = try formatCommand(a, 40, long);
     defer a.free(out);
     // 40 cells minus the gutter, so the row cannot push the pane sideways.
@@ -688,7 +689,7 @@ test "fenced code renders as a plate, not a bare rule" {
 }
 
 test "long code lines wrap instead of losing code" {
-    const long = "x" ** 90;
+    const long = repeat.str("x", 90);
     const s = try formatAssistant(std.testing.allocator, 40, "```\n" ++ long ++ "\n```\n");
     defer std.testing.allocator.free(s);
     var found: usize = 0;
@@ -1034,7 +1035,7 @@ test "a table is drawn as a block, with its columns aligned" {
 
 test "a table wider than the pane shrinks its widest column" {
     const a = std.testing.allocator;
-    const src = "| a | b |\n|---|---|\n| short | " ++ ("x" ** 60) ++ " |\n";
+    const src = "| a | b |\n|---|---|\n| short | " ++ (repeat.str("x", 60)) ++ " |\n";
     const out = try formatAssistant(a, 30, src);
     defer a.free(out);
     const plain = try plainRows(a, out);
@@ -1179,7 +1180,7 @@ test "a call row reads as the call that was made" {
     try std.testing.expect(std.mem.indexOf(u8, bare, "read()") != null);
 
     // A long command is cut inside the brackets, not past them.
-    const long = try formatGroupChild(a, 40, "bash", "x" ** 200, true, false);
+    const long = try formatGroupChild(a, 40, "bash", repeat.str("x", 200), true, false);
     defer a.free(long);
     try std.testing.expect(std.mem.indexOf(u8, long, ")") != null);
     try std.testing.expect(std.mem.count(u8, long, "x") < 40);

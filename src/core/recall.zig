@@ -35,7 +35,7 @@ pub const Cite = struct {
 const dir_name = ".omfx/recall";
 
 fn fileName(buf: *[40]u8, id: Id) []const u8 {
-    return std.fmt.bufPrint(buf, "{s}/r{d}.txt", .{ dir_name, @intFromEnum(id) }) catch dir_name;
+    return std.fmt.bufPrint(buf, "{s}/r{d}.txt", .{ dir_name, @backingInt(id) }) catch dir_name;
 }
 
 fn exists(dir: Io.Dir, io: Io, name: []const u8) bool {
@@ -48,10 +48,10 @@ fn nextId(dir: Io.Dir, io: Io) Id {
     var n: u16 = 1;
     while (n <= max_items) : (n += 1) {
         var buf: [40]u8 = undefined;
-        const name = fileName(&buf, @enumFromInt(n));
-        if (!exists(dir, io, name)) return @enumFromInt(n);
+        const name = fileName(&buf, @fromBackingInt(@intCast(n)));
+        if (!exists(dir, io, name)) return @fromBackingInt(@intCast(n));
     }
-    return @enumFromInt(1);
+    return @fromBackingInt(@intCast(1));
 }
 
 pub fn put(
@@ -110,7 +110,7 @@ pub fn load(
 }
 
 pub fn cite(allocator: std.mem.Allocator, item: Cite) std.mem.Allocator.Error![]u8 {
-    const n = @intFromEnum(item.id);
+    const n = @backingInt(item.id);
     return switch (item.target) {
         .path => |p| std.fmt.allocPrint(
             allocator,
@@ -139,12 +139,12 @@ pub fn idFromPath(path: []const u8) ?Id {
     }
     if (!saw or v == 0) return null;
     if (i < path.len and !std.mem.startsWith(u8, path[i..], ".txt")) return null;
-    return @enumFromInt(v);
+    return @fromBackingInt(@intCast(v));
 }
 
 pub fn take(dst: *[max_items]Id, n: *usize, id: Id) void {
     if (n.* >= max_items) return;
-    if (@intFromEnum(id) == 0) return;
+    if (@backingInt(id) == 0) return;
     for (dst[0..n.*]) |old| {
         if (old == id) return;
     }
@@ -166,14 +166,14 @@ pub fn collectIds(src: []const u8, out: *[max_items]Id) usize {
             v = v *% 10 + (src[i] - '0');
         }
         if (!saw) continue;
-        take(out, &n, @enumFromInt(v));
+        take(out, &n, @fromBackingInt(@intCast(v)));
     }
     return n;
 }
 
 test "cite names read_result id" {
     const s = try cite(std.testing.allocator, .{
-        .id = @enumFromInt(3),
+        .id = @fromBackingInt(@intCast(3)),
         .tool = "bash",
         .target = .none,
         .chars = 12000,
@@ -200,9 +200,9 @@ test "put then collectIds round trip" {
 }
 
 test "idFromPath accepts relative and absolute paths" {
-    try std.testing.expectEqual(@as(?Id, @enumFromInt(6)), idFromPath(".omfx/recall/r6.txt"));
+    try std.testing.expectEqual(@as(?Id, @fromBackingInt(@intCast(6))), idFromPath(".omfx/recall/r6.txt"));
     try std.testing.expectEqual(
-        @as(?Id, @enumFromInt(6)),
+        @as(?Id, @fromBackingInt(@intCast(6))),
         idFromPath("/Users/demo/ws/.omfx/recall/r6.txt"),
     );
     try std.testing.expect(idFromPath("src/main.zig") == null);

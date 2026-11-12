@@ -44,7 +44,7 @@ const Sys = enum(usize) {
     restrict_self = 446,
 
     fn asLinux(self: Sys) std.os.linux.SYS {
-        return @enumFromInt(@intFromEnum(self));
+        return @fromBackingInt(@intCast(@backingInt(self)));
     }
 };
 
@@ -124,7 +124,7 @@ pub fn applyLinux(workspace: []const u8) void {
         addBeneath(ruleset, workspace);
         addBeneath(ruleset, "/tmp");
         addBeneath(ruleset, "/var/tmp");
-        _ = std.os.linux.prctl(@intFromEnum(std.os.linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0);
+        _ = std.os.linux.prctl(@backingInt(std.os.linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0);
         _ = std.os.linux.syscall2(Sys.restrict_self.asLinux(), @intCast(ruleset), 0);
         _ = std.os.linux.close(ruleset);
     }
@@ -198,8 +198,8 @@ pub fn runLinux(
         _ = c.dup2(pipe_fds[1], posix.STDERR_FILENO);
         _ = c.close(pipe_fds[1]);
         applyLinux(workspace);
-        const shell_z = allocator.dupeZ(u8, shell) catch c._exit(127);
-        const cmd_z = allocator.dupeZ(u8, command) catch c._exit(127);
+        const shell_z = allocator.dupeSentinel(u8, shell, 0) catch c._exit(127);
+        const cmd_z = allocator.dupeSentinel(u8, command, 0) catch c._exit(127);
         const argv = [_:null]?[*:0]const u8{ shell_z.ptr, "-c", cmd_z.ptr, null };
         _ = c.execve(shell_z.ptr, &argv, c.environ);
         c._exit(127);

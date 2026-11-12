@@ -23,7 +23,7 @@ zig build
 ./zig-out/bin/omfx
 ```
 
-Requires Zig 0.16.0+.
+Requires Zig 0.17.1.
 
 ## Sign in
 

@@ -284,7 +284,7 @@ test "presentResult archives secret-shaped bodies as placeholder" {
     defer a.free(out);
     try std.testing.expect(std.mem.indexOf(u8, out, "cite r") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "sk-secret-e2e") == null);
-    const body = try recall.load(a, tmp.dir, io, @enumFromInt(1));
+    const body = try recall.load(a, tmp.dir, io, @fromBackingInt(@intCast(1)));
     defer a.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "(sensitive; not saved)") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "sk-secret-e2e") == null);

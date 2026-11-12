@@ -54,7 +54,7 @@ comptime {
 pub const copy_note = "copied last reply\n";
 
 pub const Mark = struct {
-    preview: [40]u8 = [_]u8{0} ** 40,
+    preview: [40]u8 = @splat(0),
     preview_len: usize = 0,
     lines: usize = 0,
     undo_n: usize = 0,
@@ -133,7 +133,7 @@ pub const State = struct {
     extra_n: usize = 0,
     plan: agent.Plan = .off,
     last_plan: []const u8 = "",
-    marks: [max_marks]Mark = [_]Mark{.{}} ** max_marks,
+    marks: [max_marks]Mark = @splat(.{}),
     marks_n: usize = 0,
     fork_n: usize = 0,
     /// Ephemeral session rules (ask/deny only). Never enter the system prompt.

@@ -2,9 +2,9 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    // Product binary: ReleaseFast unless -Doptimize= is set. Tests stay Debug (GPA).
-    const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size") orelse .ReleaseFast;
-    const test_optimize: std.builtin.OptimizeMode = .Debug;
+    // Product binary: fast (formerly ReleaseFast) unless -Doptimize= is set. Tests stay debug (GPA).
+    const optimize = b.option(std.builtin.Optimize, "optimize", "Prioritize performance, safety, or binary size") orelse .fast;
+    const test_optimize: std.builtin.Optimize = .debug;
 
     // libc is a link-time dependency, not a source one: `tty.zig` calls
     // tcsetattr and the sandbox path uses the C errno table. On the host it is
@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/gen_models.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .link_libc = true,
         }),
     });
@@ -53,7 +53,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
 
     const mod_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -96,7 +96,7 @@ pub fn build(b: *std.Build) void {
     wasm_step.dependOn(&b.addInstallArtifact(wasm, .{}).step);
 
     const fmt_step = b.step("fmt", "Check formatting");
-    fmt_step.dependOn(&b.addFmt(.{ .paths = &.{ "src", "tools", "build.zig" }, .check = true }).step);
+    fmt_step.dependOn(&b.addFmt(.{ .paths = &.{ b.path("src"), b.path("tools"), b.path("build.zig") }, .check = true }).step);
 
     const e2e_offline = b.addSystemCommand(&.{
         "bash", "-c", "OMFX_E2E_OFFLINE=1 python3 scripts/e2e.py",

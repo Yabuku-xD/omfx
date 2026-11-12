@@ -248,7 +248,7 @@ fn byScore(_: void, a: File, b: File) bool {
 fn pathMentions(path: []const u8, tokens: []const []const u8) bool {
     for (tokens) |tok| {
         if (tok.len < 2) continue;
-        if (std.ascii.indexOfIgnoreCase(path, tok) != null) return true;
+        if (std.ascii.findIgnoreCase(path, tok) != null) return true;
     }
     return false;
 }
@@ -567,7 +567,7 @@ fn scoreLex(tokens: []const []const u8, path: []const u8, sigs: []const Sig) usi
         if (std.mem.indexOf(u8, path, tok) != null) score += 3;
         var count: usize = 0;
         for (sigs) |sig| {
-            if (std.ascii.indexOfIgnoreCase(sig.line, tok) != null) count += 1;
+            if (std.ascii.findIgnoreCase(sig.line, tok) != null) count += 1;
         }
         score += @min(count, 4);
     }

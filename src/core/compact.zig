@@ -1,4 +1,5 @@
 const std = @import("std");
+const repeat = @import("repeat.zig");
 const Io = std.Io;
 const recall = @import("recall.zig");
 
@@ -58,7 +59,7 @@ pub fn summarizePrefix(allocator: std.mem.Allocator, turns: []const Turn, kept_f
             for (cites[0..cite_n], 0..) |id, i| {
                 if (i != 0) try list.append(allocator, ',');
                 var ibuf: [16]u8 = undefined;
-                const piece = std.fmt.bufPrint(&ibuf, "r{d}", .{@intFromEnum(id)}) catch "r?";
+                const piece = std.fmt.bufPrint(&ibuf, "r{d}", .{@backingInt(id)}) catch "r?";
                 try list.appendSlice(allocator, piece);
             }
             const out = try std.fmt.allocPrint(
@@ -205,7 +206,7 @@ test "char budget fires compact under turn threshold" {
 }
 
 test "capResult names the layer1 budget" {
-    const buf = "x" ** 12_010;
+    const buf = repeat.str("x", 12_010);
     const s = try capResult(std.testing.allocator, buf);
     defer std.testing.allocator.free(s);
     try std.testing.expect(std.mem.indexOf(u8, s, "truncated at 12000 bytes (layer1 budget)") != null);
@@ -347,7 +348,7 @@ test "stitch keeps original and tail, drops middle" {
 
 test "compaction never returns a longer thread than it was given" {
     const a = std.testing.allocator;
-    const big = "x" ** 30_000;
+    const big = repeat.str("x", 30_000);
     // Four turns, well over char_budget: the case char-driven compaction exists
     // for, and the one that used to grow.
     var turns = [_]Turn{

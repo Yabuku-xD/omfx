@@ -1,4 +1,5 @@
 const std = @import("std");
+const repeat = @import("../../core/repeat.zig");
 const Io = std.Io;
 
 const slash = @import("../../core/slash.zig");
@@ -421,7 +422,7 @@ pub fn matchAt(
 test "a truncated row never ends inside a rune" {
     var p = Pick{};
     // 3-byte runes, so a byte cap that is not a multiple of 3 lands mid-rune.
-    const wide = "\u{4e00}" ** 40;
+    const wide = repeat.str("\u{4e00}", 40);
     p.push(wide, wide);
     try std.testing.expect(std.unicode.utf8ValidateSlice(p.rows[0].name));
     try std.testing.expect(std.unicode.utf8ValidateSlice(p.rows[0].help));
