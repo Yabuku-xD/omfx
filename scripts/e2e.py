@@ -18,6 +18,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -216,6 +217,52 @@ def case_mock_retry(r: Runner) -> tuple[bool, str]:
             server.wait(timeout=3)
         except Exception:
             server.kill()
+
+
+def case_stream_live(r: Runner) -> tuple[bool, str]:
+    import select
+
+    port = free_port()
+    d = r.case_dir("stream-live")
+    server = start_mock_server(str(SCRIPT_DIR), port)
+    try:
+        with isolated_home_ctx() as home:
+            env = {**os.environ, **mock_provider_env(port, home=home)}
+            p = subprocess.Popen(
+                [r.binary, "ask", "trickle-probe"],
+                cwd=d, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, env=env,
+            )
+            start = time.time()
+            out = b""
+            first_at = None
+            while time.time() - start < 30:
+                ready, _, _ = select.select([p.stdout], [], [], 0.1)
+                if not ready:
+                    if p.poll() is not None:
+                        break
+                    continue
+                chunk = os.read(p.stdout.fileno(), 4096)
+                if not chunk:
+                    break
+                out += chunk
+                if first_at is None and b"TRICKLE1" in out:
+                    first_at = time.time()
+            p.wait(timeout=10)
+            end_at = time.time()
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=3)
+        except Exception:
+            server.kill()
+    if b"TRICKLE5" not in out:
+        return False, f"reply incomplete: {out[-200:]!r}"
+    # The stub spends about 2.5 s between the first and the last line.
+    lead = end_at - first_at
+    if lead < 1.5:
+        return False, f"first line shown only {lead:.1f}s before the end; output is batched, not streamed"
+    return True, f"first line shown {lead:.1f}s before the reply ended"
 
 
 def case_unicode_reply(r: Runner) -> tuple[bool, str]:
@@ -550,6 +597,7 @@ CASES: list[Case] = [
     Case("provider-down", "offline", case_provider_down),
     Case("tool-escapes", "offline", case_tool_escapes),
     Case("unicode-reply", "offline", case_unicode_reply),
+    Case("stream-live", "offline", case_stream_live),
     Case("write", "live", case_write),
     Case("edit", "live", case_edit),
     Case("search", "live", case_search),

@@ -884,10 +884,23 @@ fn streamChatPost(
     var transfer_buffer: [64]u8 = undefined;
     var decompress: http.Decompress = undefined;
     const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
-    _ = reader.streamRemaining(&tee.writer) catch |err| {
-        if (flags.host.cancelled()) return error.Canceled;
-        return err;
-    };
+    // Flush after every read, not only when tee's 16 KiB buffer fills
+    // (`streamRemaining` does the latter): otherwise streamed text reaches
+    // the screen in 16 KiB batches, and a slow model shows nothing for
+    // seconds at a time.
+    while (true) {
+        _ = reader.stream(&tee.writer, .unlimited) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => {
+                if (flags.host.cancelled()) return error.Canceled;
+                return err;
+            },
+        };
+        tee.writer.flush() catch {
+            if (flags.host.cancelled()) return error.Canceled;
+            return error.WriteFailed;
+        };
+    }
 
     return .{ .status = response.head.status };
 }

@@ -58,6 +58,20 @@ class H(BaseHTTPRequestHandler):
             done = {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]}
             self.wfile.write(("data: %s\n\ndata: [DONE]\n\n" % json.dumps(done)).encode())
             return
+        if "trickle-probe" in json.dumps(req):
+            # Five short lines half a second apart: far less than any read
+            # buffer, so they only show up live if omfx forwards each read.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for i in range(1, 6):
+                c = {"choices": [{"delta": {"content": "TRICKLE%d\n" % i}, "index": 0}]}
+                self.wfile.write(f"data: {json.dumps(c)}\n\n".encode())
+                self.wfile.flush()
+                time.sleep(0.5)
+            done = {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]}
+            self.wfile.write(f"data: {json.dumps(done)}\n\ndata: [DONE]\n\n".encode())
+            return
         if "echo-probe" in json.dumps(req):
             # Says whether a file's contents reached the request, so a test can
             # tell an expanded @mention from a verbatim one.
