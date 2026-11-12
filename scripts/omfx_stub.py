@@ -242,5 +242,9 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.environ.get("OMFX_STUB_PORT", "8765"))
+    # Bind before announcing: the harness starts omfx as soon as it reads this
+    # line, and on a slow runner a request sent before the bind is refused and
+    # spends one of omfx's retries (mock-retry then ran out of them).
+    server = HTTPServer(("127.0.0.1", port), H)
     print("listening %d" % port, flush=True)
-    HTTPServer(("127.0.0.1", port), H).serve_forever()
+    server.serve_forever()
